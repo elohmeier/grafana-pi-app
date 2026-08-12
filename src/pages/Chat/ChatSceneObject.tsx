@@ -77,6 +77,11 @@ import {
   storeDashboardAssistantLaunch,
   type DashboardAssistantLaunch,
 } from './dashboardLaunch';
+import {
+  externalAssistantSessionTitle,
+  renderExternalAssistantContextBlock,
+  type ExternalAssistantLaunch,
+} from './externalAssistantLaunch';
 import { getAssistantDockRoute, routeFromLocation, storeAssistantSidebarDockRequest } from './sidebarDock';
 import {
   buildAssistantSidebarPageContextSnapshot,
@@ -220,12 +225,27 @@ export function ChatApp({
   launchContextId,
   sidebarRoute,
   sessionId,
+  initialPrompt,
+  initialContext,
+  initialAutoSend,
+  initialChatId,
 }: {
   agentWorkspaceLaunch?: AgentWorkspaceLaunchPayload;
   variant?: ChatAppVariant;
   launchContextId?: string;
   sidebarRoute?: string;
   sessionId?: string;
+  /** Prompt from an external plugin's @grafana/assistant openAssistant() call. */
+  initialPrompt?: string;
+  initialContext?: unknown[];
+  /** Whether to send `initialPrompt` immediately rather than only prefilling it. Defaults to true. */
+  initialAutoSend?: boolean;
+  /** When set, sends `initialPrompt` as a follow-up into this existing session instead of starting a new one. */
+  initialChatId?: string;
+  /** Accepted for forward-compatibility with @grafana/assistant's contract; not yet used - every external launch is treated as appending context. */
+  initialAppendContext?: boolean;
+  /** Accepted for forward-compatibility with @grafana/assistant's contract; not yet used. */
+  initialOrigin?: string;
 }) {
   const isSidebarVariant = variant === 'sidebar';
   const canDockToSidebar = !isSidebarVariant && PLUGIN_ID === ASSISTANT_SIDEBAR_PLUGIN_ID;
@@ -260,6 +280,7 @@ export function ChatApp({
   const artifactsRef = useRef<Record<string, Artifact>>({});
   const artifactCounterRef = useRef(0);
   const dashboardLaunchRef = useRef<DashboardAssistantLaunch>();
+  const externalLaunchRef = useRef<ExternalAssistantLaunch>();
   const agentWorkspaceRef = useRef<AgentWorkspaceState>();
   const [investigationReport, setInvestigationReport] = useState<InvestigationReport>();
   useEffect(() => {
@@ -630,10 +651,15 @@ export function ChatApp({
       const dashboardLaunchContext = dashboardLaunchRef.current
         ? renderDashboardAssistantContextBlock(dashboardLaunchRef.current)
         : undefined;
+      const externalLaunchContext = externalLaunchRef.current
+        ? renderExternalAssistantContextBlock(externalLaunchRef.current.context)
+        : undefined;
       const sidebarContext = renderAssistantSidebarPageContextBlock(sidebarPageContext);
 
       return {
-        systemPrompt: [systemPrompt, dashboardLaunchContext, sidebarContext].filter(Boolean).join('\n\n'),
+        systemPrompt: [systemPrompt, dashboardLaunchContext, externalLaunchContext, sidebarContext]
+          .filter(Boolean)
+          .join('\n\n'),
         tools,
         skillSelection: selection,
       };
@@ -786,6 +812,7 @@ export function ChatApp({
     const id = createSessionId();
     stopCurrentAgentForSessionChange();
     dashboardLaunchRef.current = undefined;
+    externalLaunchRef.current = undefined;
     agentWorkspaceRef.current = undefined;
     clearChatSessionParamFromLocation();
     sessionIdRef.current = id;
@@ -813,6 +840,7 @@ export function ChatApp({
       const title = dashboardAssistantSessionTitle(launch);
       stopCurrentAgentForSessionChange();
       dashboardLaunchRef.current = launch;
+      externalLaunchRef.current = undefined;
       agentWorkspaceRef.current = undefined;
       sessionIdRef.current = id;
       titleRef.current = title;
@@ -835,12 +863,42 @@ export function ChatApp({
     [buildAgent, clearArtifacts, setRunStatusSnapshot, settleToolConfirmation, stopCurrentAgentForSessionChange]
   );
 
+  const startExternalAssistantLaunchSession = useCallback(
+    (launch: ExternalAssistantLaunch) => {
+      const id = createSessionId();
+      const title = externalAssistantSessionTitle(launch.prompt);
+      stopCurrentAgentForSessionChange();
+      dashboardLaunchRef.current = undefined;
+      externalLaunchRef.current = launch;
+      agentWorkspaceRef.current = undefined;
+      sessionIdRef.current = id;
+      titleRef.current = title;
+      virtualJsonnetFilesRef.current = {};
+      virtualJsonnetHydratedRef.current = {};
+      investigationReportRef.current = undefined;
+      setRunStatusSnapshot(undefined);
+      clearArtifacts();
+      autoScrollRef.current = true;
+      setIsAutoScrollPaused(false);
+      setCurrentSessionId(id);
+      setCurrentTitle(title);
+      setError(undefined);
+      setInput(launch.prompt);
+      setToolRuns({});
+      setInvestigationReport(undefined);
+      settleToolConfirmation(false);
+      buildAgent([]);
+    },
+    [buildAgent, clearArtifacts, setRunStatusSnapshot, settleToolConfirmation, stopCurrentAgentForSessionChange]
+  );
+
   const startAgentWorkspaceLaunchSession = useCallback(
     (state: AgentWorkspaceState) => {
       const id = createSessionId();
       const title = agentWorkspaceSessionTitle(state);
       stopCurrentAgentForSessionChange();
       dashboardLaunchRef.current = undefined;
+      externalLaunchRef.current = undefined;
       agentWorkspaceRef.current = state;
       sessionIdRef.current = id;
       titleRef.current = title;
@@ -892,6 +950,7 @@ export function ChatApp({
       stopCurrentAgentForSessionChange();
       setChatRunConfirmationHandler(run.id, requestToolConfirmation);
       dashboardLaunchRef.current = run.dashboardLaunch;
+      externalLaunchRef.current = undefined;
       agentWorkspaceRef.current = undefined;
       sessionIdRef.current = run.id;
       titleRef.current = run.title;
@@ -1172,9 +1231,11 @@ export function ChatApp({
     [isChatDirty]
   );
 
-  const submitPrompt = async (event: FormEvent) => {
-    event.preventDefault();
-    const prompt = input.trim();
+  // Extracted so an auto-sent external launch (see startExternalAssistantLaunchSession)
+  // can submit the prompt it just set synchronously, without waiting on the
+  // `input` state update (setState is batched, so reading `input` right
+  // after `setInput(...)` would still see the previous value).
+  const submitPromptText = useCallback(async (prompt: string) => {
     const currentAgent = agentRef.current;
     if (!currentAgent || !prompt || currentAgent.state.isStreaming) {
       return;
@@ -1222,10 +1283,16 @@ export function ChatApp({
     } finally {
       if (agentRef.current === currentAgent && sessionIdRef.current === sessionId) {
         dashboardLaunchRef.current = undefined;
+        externalLaunchRef.current = undefined;
         setRunStatusSnapshot(undefined);
         flushRevision();
       }
     }
+  }, [assistantTelemetry, buildSkillRuntime, flushRevision, keepAutoScrollEnabled, saveSession, setRunStatusSnapshot]);
+
+  const submitPrompt = async (event: FormEvent) => {
+    event.preventDefault();
+    await submitPromptText(input.trim());
   };
 
   const loadSession = useCallback(
@@ -1239,6 +1306,7 @@ export function ChatApp({
       const stored = JSON.parse(raw) as StoredSession;
       stopCurrentAgentForSessionChange();
       dashboardLaunchRef.current = undefined;
+      externalLaunchRef.current = undefined;
       agentWorkspaceRef.current = undefined;
       sessionIdRef.current = id;
       titleRef.current = stored.title;
@@ -1275,10 +1343,20 @@ export function ChatApp({
     loadSession,
     startAgentWorkspaceLaunchSession,
     startDashboardLaunchSession,
+    startExternalAssistantLaunchSession,
     startNewSession,
     stopCurrentAgentForSessionChange,
+    submitPromptText,
   });
-  const initialLaunchPropsRef = useRef({ agentWorkspaceLaunch, launchContextId, sessionId });
+  const initialLaunchPropsRef = useRef({
+    agentWorkspaceLaunch,
+    launchContextId,
+    sessionId,
+    initialPrompt,
+    initialContext,
+    initialAutoSend,
+    initialChatId,
+  });
   const initialConfigPending = !pluginMetaJsonData.isOpenAIAPIKeySet && settingsJsonData === undefined;
 
   useLayoutEffect(() => {
@@ -1287,20 +1365,36 @@ export function ChatApp({
       loadSession,
       startAgentWorkspaceLaunchSession,
       startDashboardLaunchSession,
+      startExternalAssistantLaunchSession,
       startNewSession,
       stopCurrentAgentForSessionChange,
+      submitPromptText,
     };
-    initialLaunchPropsRef.current = { agentWorkspaceLaunch, launchContextId, sessionId };
+    initialLaunchPropsRef.current = {
+      agentWorkspaceLaunch,
+      launchContextId,
+      sessionId,
+      initialPrompt,
+      initialContext,
+      initialAutoSend,
+      initialChatId,
+    };
   }, [
     agentWorkspaceLaunch,
     attachLiveRun,
     launchContextId,
     loadSession,
     sessionId,
+    initialPrompt,
+    initialContext,
+    initialAutoSend,
+    initialChatId,
     startAgentWorkspaceLaunchSession,
     startDashboardLaunchSession,
+    startExternalAssistantLaunchSession,
     startNewSession,
     stopCurrentAgentForSessionChange,
+    submitPromptText,
   ]);
 
   useEffect(() => {
@@ -1328,6 +1422,10 @@ export function ChatApp({
         agentWorkspaceLaunch: initialAgentWorkspaceLaunch,
         launchContextId: initialLaunchContextId,
         sessionId: initialSessionProp,
+        initialPrompt: externalPrompt,
+        initialContext: externalContext,
+        initialAutoSend: externalAutoSend,
+        initialChatId: externalChatId,
       } = initialLaunchPropsRef.current;
       const launchFromSearch = agentWorkspaceLaunchFromSearch(location.search);
       const workspaceLaunch = initialAgentWorkspaceLaunch ?? launchFromSearch;
@@ -1339,6 +1437,34 @@ export function ChatApp({
         initialLoadHandlersRef.current.startAgentWorkspaceLaunchSession(state);
         if (launchFromSearch) {
           locationService.partial(removeAgentWorkspaceLaunchParams(), true);
+        }
+        return;
+      }
+
+      // Launch from an external plugin via @grafana/assistant's openAssistant()
+      // (see AssistantSidebar.tsx / ChatApp's initialPrompt props). autoSend
+      // defaults to true per that package's contract.
+      if (externalPrompt) {
+        const autoSend = externalAutoSend ?? true;
+        const attachedExistingChat = externalChatId && (await initialLoadHandlersRef.current.loadSession(externalChatId));
+        if (attachedExistingChat) {
+          // loadSession() already reset externalLaunchRef to undefined; restore
+          // it just for this one follow-up turn so its context still reaches
+          // buildSkillRuntime (cleared again right after send, same as a fresh launch).
+          externalLaunchRef.current = { prompt: externalPrompt, context: externalContext, autoSend };
+          setInput(externalPrompt);
+        } else {
+          initialLoadHandlersRef.current.startExternalAssistantLaunchSession({
+            prompt: externalPrompt,
+            context: externalContext,
+            autoSend,
+          });
+        }
+        if (!mounted) {
+          return;
+        }
+        if (autoSend) {
+          await initialLoadHandlersRef.current.submitPromptText(externalPrompt);
         }
         return;
       }

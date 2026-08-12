@@ -79,6 +79,15 @@ const AssistantSidebar = (props: {
   contextId?: string;
   path?: string;
   sessionId?: string;
+  // Forwarded verbatim to AssistantSidebar - see the prop-shape comment on
+  // AssistantSidebarProps in AssistantSidebar.tsx.
+  initialPrompt?: string;
+  initialContext?: unknown[];
+  initialAutoSend?: boolean;
+  origin?: string;
+  initialMode?: string;
+  chatId?: string;
+  appendContext?: boolean;
 }) => (
   <Suspense fallback={<LoadingPlaceholder text="" />}>
     <LazyAssistantSidebar {...props} />
