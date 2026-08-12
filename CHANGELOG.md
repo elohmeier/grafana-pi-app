@@ -1,3 +1,10 @@
+## [2.18.3](https://github.com/elohmeier/grafana-pi-app/compare/v2.18.2...v2.18.3) (2026-08-12)
+
+
+### Bug Fixes
+
+* support external assistant launch prompts ([fa18f4e](https://github.com/elohmeier/grafana-pi-app/commit/fa18f4effd69034576b23f0cd6c3737509fc0dcc))
+
 ## [2.18.2](https://github.com/elohmeier/grafana-pi-app/compare/v2.18.1...v2.18.2) (2026-08-12)
 
 
