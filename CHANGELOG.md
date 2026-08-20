@@ -1,3 +1,16 @@
+# [3.0.0](https://github.com/elohmeier/grafana-pi-app/compare/v2.18.3...v3.0.0) (2026-08-20)
+
+
+* feat!: replace single-model config with multi-model chat selector ([6fdfef2](https://github.com/elohmeier/grafana-pi-app/commit/6fdfef2e7b25cd43ad7ece0e51e1f2045236358a))
+
+
+### BREAKING CHANGES
+
+* the top-level defaultModel, openAIProtocol,
+thinkingLevel, and thinkingFormat settings are removed and no longer
+read. Migrate provisioning to the models list; local Compose provisioning
+maps the existing PI_* env vars onto a single default model entry.
+
 ## [2.18.3](https://github.com/elohmeier/grafana-pi-app/compare/v2.18.2...v2.18.3) (2026-08-12)
 
 
