@@ -178,11 +178,12 @@ func recordAssistantUsage(counter *prometheus.CounterVec, usage assistantTelemet
 	addTokenCounter(counter, "total", usage.TotalTokens)
 }
 
-func recordLLMRequestMetrics(status string, reason string, duration time.Duration, usage proxyUsage) {
+func recordLLMRequestMetrics(status string, reason string, model string, duration time.Duration, usage proxyUsage) {
 	status = metricStatus(status, "failed")
 	reason = metricReason(reason)
-	assistantLLMRequestsTotal.WithLabelValues(status, reason).Inc()
-	assistantLLMRequestDuration.WithLabelValues(status, reason).Observe(duration.Seconds())
+	model = metricLabel(model, metricUnknownLabel)
+	assistantLLMRequestsTotal.WithLabelValues(status, reason, model).Inc()
+	assistantLLMRequestDuration.WithLabelValues(status, reason, model).Observe(duration.Seconds())
 	addTokenCounter(assistantLLMTokensTotal, "input", usage.Input)
 	addTokenCounter(assistantLLMTokensTotal, "output", usage.Output)
 	addTokenCounter(assistantLLMTokensTotal, "cache_read", usage.CacheRead)

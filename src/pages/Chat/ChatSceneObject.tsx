@@ -24,6 +24,7 @@ import {
   Alert,
   Badge,
   Button,
+  Combobox,
   Dropdown,
   EmptyState,
   Field,
@@ -54,7 +55,7 @@ import {
   type VirtualJsonnetFileSnapshot,
 } from './grafanaTools';
 import { formatAssistantError, type AssistantErrorView } from './llmErrors';
-import { createOpenAICompatibleModel, getConfiguredThinkingLevel, type PiAppJsonData } from './model';
+import { createOpenAICompatibleModel, getActiveModel, getConfiguredModels, type PiAppJsonData } from './model';
 import { convertChatMessagesToLlm, hasPersistableMessages } from './chatMessages';
 import { getGrafanaSkills, renderGrafanaSystemPrompt, selectGrafanaSkills } from './skills';
 import { isFailedDashboardMutationResult } from './tools/result';
@@ -260,8 +261,11 @@ export function ChatApp({
     () => ({ ...(settingsJsonData ?? {}), ...pluginMetaJsonData }),
     [pluginMetaJsonData, settingsJsonData]
   );
-  const llmModel = useMemo(() => createOpenAICompatibleModel(jsonData), [jsonData]);
-  const thinkingLevel = useMemo(() => getConfiguredThinkingLevel(jsonData), [jsonData]);
+  const configuredModels = useMemo(() => getConfiguredModels(jsonData), [jsonData]);
+  const [selectedModelId, setSelectedModelId] = useState<string>();
+  const activeModel = useMemo(() => getActiveModel(jsonData, selectedModelId), [jsonData, selectedModelId]);
+  const llmModel = useMemo(() => createOpenAICompatibleModel(jsonData, activeModel), [jsonData, activeModel]);
+  const thinkingLevel = activeModel.thinkingLevel;
   const skills = useMemo(() => getGrafanaSkills(jsonData), [jsonData]);
   const assistantTelemetry = useMemo(() => createAssistantTelemetryReporter(), []);
   const streamFn = useCallback<StreamFn>(
@@ -817,6 +821,7 @@ export function ChatApp({
     clearChatSessionParamFromLocation();
     sessionIdRef.current = id;
     titleRef.current = 'New chat';
+    setSelectedModelId(undefined);
     virtualJsonnetFilesRef.current = {};
     virtualJsonnetHydratedRef.current = {};
     investigationReportRef.current = undefined;
@@ -954,6 +959,7 @@ export function ChatApp({
       agentWorkspaceRef.current = undefined;
       sessionIdRef.current = run.id;
       titleRef.current = run.title;
+      setSelectedModelId(run.agent.state.model?.id || undefined);
       virtualJsonnetFilesRef.current = run.virtualJsonnetFiles;
       virtualJsonnetHydratedRef.current = run.virtualJsonnetHydrated;
       investigationReportRef.current = run.investigationReport;
@@ -1235,60 +1241,74 @@ export function ChatApp({
   // can submit the prompt it just set synchronously, without waiting on the
   // `input` state update (setState is batched, so reading `input` right
   // after `setInput(...)` would still see the previous value).
-  const submitPromptText = useCallback(async (prompt: string) => {
-    const currentAgent = agentRef.current;
-    if (!currentAgent || !prompt || currentAgent.state.isStreaming) {
-      return;
-    }
-
-    let sessionId = sessionIdRef.current;
-    if (!sessionId) {
-      sessionId = createSessionId();
-      sessionIdRef.current = sessionId;
-      setCurrentSessionId(sessionId);
-    }
-
-    if (titleRef.current === 'New chat') {
-      const title = generateTitle(prompt);
-      titleRef.current = title;
-      setCurrentTitle(title);
-    }
-
-    setInput('');
-    setError(undefined);
-    setRunStatusSnapshot(createInitialRunStatus());
-    keepAutoScrollEnabled();
-    try {
-      const runtime = buildSkillRuntime(prompt);
-      assistantTelemetry.recordPromptStart({
-        prompt,
-        systemPrompt: runtime.systemPrompt,
-        messages: currentAgent.state.messages,
-        toolCount: runtime.tools.length,
-        activeSkills: runtime.skillSelection.activeSkills,
-        explicitSkillNames: runtime.skillSelection.explicitSkillNames,
-      });
-      currentAgent.state.systemPrompt = runtime.systemPrompt;
-      currentAgent.state.tools = runtime.tools;
-      await currentAgent.prompt(prompt);
-      assistantTelemetry.recordTranscriptSnapshot(currentAgent.state.messages);
-      emitBenchmarkTranscriptSnapshot(currentAgent.state.messages);
-      if (agentRef.current === currentAgent && sessionIdRef.current === sessionId) {
-        await saveSession(sessionId, titleRef.current, currentAgent.state.messages);
+  const submitPromptText = useCallback(
+    async (prompt: string) => {
+      const currentAgent = agentRef.current;
+      if (!currentAgent || !prompt || currentAgent.state.isStreaming) {
+        return;
       }
-    } catch (err) {
-      if (agentRef.current === currentAgent && sessionIdRef.current === sessionId) {
-        setError(err instanceof Error ? err.message : String(err));
+
+      let sessionId = sessionIdRef.current;
+      if (!sessionId) {
+        sessionId = createSessionId();
+        sessionIdRef.current = sessionId;
+        setCurrentSessionId(sessionId);
       }
-    } finally {
-      if (agentRef.current === currentAgent && sessionIdRef.current === sessionId) {
-        dashboardLaunchRef.current = undefined;
-        externalLaunchRef.current = undefined;
-        setRunStatusSnapshot(undefined);
-        flushRevision();
+
+      if (titleRef.current === 'New chat') {
+        const title = generateTitle(prompt);
+        titleRef.current = title;
+        setCurrentTitle(title);
       }
-    }
-  }, [assistantTelemetry, buildSkillRuntime, flushRevision, keepAutoScrollEnabled, saveSession, setRunStatusSnapshot]);
+
+      setInput('');
+      setError(undefined);
+      setRunStatusSnapshot(createInitialRunStatus());
+      keepAutoScrollEnabled();
+      try {
+        const runtime = buildSkillRuntime(prompt);
+        assistantTelemetry.recordPromptStart({
+          prompt,
+          systemPrompt: runtime.systemPrompt,
+          messages: currentAgent.state.messages,
+          toolCount: runtime.tools.length,
+          activeSkills: runtime.skillSelection.activeSkills,
+          explicitSkillNames: runtime.skillSelection.explicitSkillNames,
+        });
+        currentAgent.state.systemPrompt = runtime.systemPrompt;
+        currentAgent.state.tools = runtime.tools;
+        currentAgent.state.model = llmModel;
+        currentAgent.state.thinkingLevel = thinkingLevel;
+        await currentAgent.prompt(prompt);
+        assistantTelemetry.recordTranscriptSnapshot(currentAgent.state.messages);
+        emitBenchmarkTranscriptSnapshot(currentAgent.state.messages);
+        if (agentRef.current === currentAgent && sessionIdRef.current === sessionId) {
+          await saveSession(sessionId, titleRef.current, currentAgent.state.messages);
+        }
+      } catch (err) {
+        if (agentRef.current === currentAgent && sessionIdRef.current === sessionId) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      } finally {
+        if (agentRef.current === currentAgent && sessionIdRef.current === sessionId) {
+          dashboardLaunchRef.current = undefined;
+          externalLaunchRef.current = undefined;
+          setRunStatusSnapshot(undefined);
+          flushRevision();
+        }
+      }
+    },
+    [
+      assistantTelemetry,
+      buildSkillRuntime,
+      flushRevision,
+      keepAutoScrollEnabled,
+      llmModel,
+      saveSession,
+      setRunStatusSnapshot,
+      thinkingLevel,
+    ]
+  );
 
   const submitPrompt = async (event: FormEvent) => {
     event.preventDefault();
@@ -1310,6 +1330,7 @@ export function ChatApp({
       agentWorkspaceRef.current = undefined;
       sessionIdRef.current = id;
       titleRef.current = stored.title;
+      setSelectedModelId(stored.modelId || undefined);
       setChatSessionParamInLocation(id);
       virtualJsonnetFilesRef.current = stored.virtualJsonnetFiles ?? {};
       virtualJsonnetHydratedRef.current = {};
@@ -1446,7 +1467,8 @@ export function ChatApp({
       // defaults to true per that package's contract.
       if (externalPrompt) {
         const autoSend = externalAutoSend ?? true;
-        const attachedExistingChat = externalChatId && (await initialLoadHandlersRef.current.loadSession(externalChatId));
+        const attachedExistingChat =
+          externalChatId && (await initialLoadHandlersRef.current.loadSession(externalChatId));
         if (attachedExistingChat) {
           // loadSession() already reset externalLaunchRef to undefined; restore
           // it just for this one follow-up turn so its context still reaches
@@ -1758,6 +1780,7 @@ export function ChatApp({
         agentWorkspaceRef.current = undefined;
         sessionIdRef.current = id;
         titleRef.current = title;
+        setSelectedModelId(imported.modelId || undefined);
         virtualJsonnetFilesRef.current = imported.virtualJsonnetFiles ?? {};
         virtualJsonnetHydratedRef.current = {};
         investigationReportRef.current = imported.investigationReport;
@@ -1803,7 +1826,7 @@ export function ChatApp({
   const runElapsedMs = useRunElapsedMs(Boolean(isStreaming || pendingApprovalToolName), displayRunStatus?.startedAt);
   const streamingStatusText = runStatusText(displayRunStatus, pendingApprovalToolName);
   const streamingBadgeText = runStatusBadgeText(displayRunStatus, pendingApprovalToolName);
-  const hasLLMConfig = Boolean(jsonData.isOpenAIAPIKeySet);
+  const hasLLMConfig = Boolean(jsonData.isOpenAIAPIKeySet) && configuredModels.length > 0;
   const hasCurrentMessages = hasPersistableMessages(agent?.state.messages ?? []);
   const visibleSidebarSessions = sessions.slice(0, SIDEBAR_SESSION_MENU_LIMIT);
   const sidebarSessionMenu = (
@@ -2004,8 +2027,8 @@ export function ChatApp({
         </div>
 
         {!hasLLMConfig && (
-          <Alert severity="warning" title="LLM API key is not configured">
-            Configure the app plugin with an OpenAI-compatible API key before sending prompts.
+          <Alert severity="warning" title="LLM is not configured">
+            Configure the app plugin with an OpenAI-compatible API key and at least one model before sending prompts.
           </Alert>
         )}
         {error && (
@@ -2100,6 +2123,19 @@ export function ChatApp({
             />
           </div>
           <div className={cx(styles.composerActions, isSidebarVariant && styles.composerActionsSidebar)}>
+            {configuredModels.length > 1 && (
+              <div className={styles.modelSelect} data-testid={testIds.chat.modelSelect}>
+                <Combobox
+                  aria-label="Model"
+                  disabled={isBusy || !hasLLMConfig}
+                  options={configuredModels.map((model) => ({ label: model.name, value: model.id }))}
+                  value={activeModel.id}
+                  width="auto"
+                  minWidth={14}
+                  onChange={(option) => setSelectedModelId(option.value)}
+                />
+              </div>
+            )}
             {isStreaming && (
               <Button
                 aria-label="Abort response"
@@ -3907,6 +3943,9 @@ const getStyles = (theme: GrafanaTheme2) => ({
     justifyContent: 'flex-end',
     gap: theme.spacing(1),
     flexWrap: 'wrap',
+  }),
+  modelSelect: css({
+    marginRight: 'auto',
   }),
   composerActionsSidebar: css({
     flexWrap: 'nowrap',

@@ -160,7 +160,8 @@ The main file is `src/pages/Chat/ChatSceneObject.tsx`.
 On load:
 
 1. The UI reads plugin metadata and configuration with `usePluginMeta()`.
-2. It builds an OpenAI-compatible Pi model object from central admin settings.
+2. It builds OpenAI-compatible Pi model objects from the admin-configured
+   model list, using the default entry until the user picks another model.
 3. It creates a Pi `streamFn` with `streamProxy`.
 4. It creates a new chat session and `Agent`.
 5. It loads the saved session index from Grafana plugin user storage.
@@ -169,7 +170,9 @@ When a user submits a prompt:
 
 1. `submitPrompt` trims the input and creates a session title if needed.
 2. `buildSkillRuntime(prompt)` selects active skills and tool groups.
-3. The agent's `systemPrompt` and `tools` are replaced in place for this turn.
+3. The agent's `systemPrompt`, `tools`, `model`, and `thinkingLevel` are
+   replaced in place for this turn, so the model selected in the chat composer
+   applies to the next request.
 4. `agent.prompt(prompt)` starts the Pi loop.
 5. The agent streams model events, tool calls, tool results, and final text.
 6. On `agent_end`, the chat session is saved to plugin user storage.
@@ -177,7 +180,7 @@ When a user submits a prompt:
 Sessions store:
 
 - agent messages,
-- model ID,
+- selected model ID (restored into the model selector on load and import),
 - virtual Jsonnet file snapshots,
 - investigation report state,
 - artifacts,
@@ -208,14 +211,17 @@ The backend:
 
 - requires app access through `withAppAccess`,
 - rejects requests when the secure API key is missing,
-- ignores the client model ID and uses `settings.DefaultModel`,
+- resolves the client model ID against the configured `models` list,
+  rejecting unknown IDs and falling back to the default entry when the
+  request omits one,
 - appends the admin-configured `systemPromptAddendum` as an
   `## Instance instructions` section the client cannot remove,
-- selects the configured OpenAI-compatible protocol (`auto`, Chat Completions,
-  or Responses),
+- selects the resolved model's OpenAI-compatible protocol (`auto`, Chat
+  Completions, or Responses),
 - in `auto` mode, retries with Responses only for the exact upstream
   `reasoning_effort` validation error that directs the caller to
-  `/v1/responses`, then remembers that protocol for the plugin instance,
+  `/v1/responses`, then remembers that protocol per model for the plugin
+  instance,
 - translates Pi proxy messages and tool schemas into the selected protocol,
 - preserves Responses `call_id`/item IDs and encrypted reasoning items across
   tool turns while keeping `store: false`,
@@ -336,7 +342,7 @@ Each specialist is another Pi `Agent` created by
 
 - a narrow system prompt,
 - a narrow tool allow-list,
-- the same central model and backend `streamFn`,
+- the same currently selected model and backend `streamFn`,
 - the same write-approval hook,
 - a per-specialist child tool-call budget enforced in the child
   `beforeToolCall`.
@@ -581,18 +587,18 @@ All backend resource routes are wrapped with `withAppAccess`.
 
 ### Central Model Configuration
 
-Chat users cannot choose arbitrary models or base URLs from the chat page.
+Chat users pick a model from the selector in the chat composer, but only from
+the admin-configured list. They cannot choose arbitrary models or base URLs.
 
 Admins configure:
 
 - OpenAI-compatible base URL,
-- default model,
-- thinking level,
-- thinking format,
+- a model list with one default entry, where each entry carries its own
+  protocol, thinking level, and thinking format,
 - system prompt addendum.
 
-The backend uses the configured model even though the client sends a model
-object for Pi compatibility.
+The backend validates the client-sent model ID against the configured list and
+rejects unknown IDs, so the selector cannot reach unconfigured models.
 
 ### Tool Least Privilege
 

@@ -3,6 +3,8 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -28,30 +30,36 @@ var (
 // App is an example app plugin with a backend which can respond to data queries.
 type App struct {
 	backend.CallResourceHandler
-	settings            appSettings
-	httpClient          *http.Client
-	jsonnetFiles        *virtualJsonnetFileStore
-	agentSample         *agentContractSampleStore
-	llmProtocolMu       sync.RWMutex
-	resolvedLLMProtocol string
-	authzMu             sync.Mutex
-	authzToken          string
-	authzClient         authz.EnforcementClient
+	settings             appSettings
+	httpClient           *http.Client
+	jsonnetFiles         *virtualJsonnetFileStore
+	agentSample          *agentContractSampleStore
+	llmProtocolMu        sync.RWMutex
+	resolvedLLMProtocols map[string]string
+	authzMu              sync.Mutex
+	authzToken           string
+	authzClient          authz.EnforcementClient
 }
 
 type appSettings struct {
-	OpenAIBaseURL                   string   `json:"openAIBaseUrl"`
-	OpenAIProtocol                  string   `json:"openAIProtocol"`
-	DefaultModel                    string   `json:"defaultModel"`
-	ThinkingLevel                   string   `json:"thinkingLevel"`
-	ThinkingFormat                  string   `json:"thinkingFormat"`
-	AccessMode                      string   `json:"accessMode"`
-	AllowedUsers                    []string `json:"allowedUsers"`
-	AllowedPrometheusDatasourceUIDs []string `json:"allowedPrometheusDatasourceUids"`
-	SystemPromptAddendum            string   `json:"systemPromptAddendum"`
+	OpenAIBaseURL                   string          `json:"openAIBaseUrl"`
+	Models                          []modelSettings `json:"models"`
+	AccessMode                      string          `json:"accessMode"`
+	AllowedUsers                    []string        `json:"allowedUsers"`
+	AllowedPrometheusDatasourceUIDs []string        `json:"allowedPrometheusDatasourceUids"`
+	SystemPromptAddendum            string          `json:"systemPromptAddendum"`
 	OpenAIAPIKey                    string
 	PluginID                        string `json:"pluginId"`
 	EnableAgentContractSample       bool   `json:"enableAgentContractSample"`
+}
+
+type modelSettings struct {
+	ID             string `json:"id"`
+	Name           string `json:"name,omitempty"`
+	Default        bool   `json:"default,omitempty"`
+	Protocol       string `json:"protocol,omitempty"`
+	ThinkingLevel  string `json:"thinkingLevel,omitempty"`
+	ThinkingFormat string `json:"thinkingFormat,omitempty"`
 }
 
 const (
@@ -72,9 +80,10 @@ const (
 // NewApp creates a new example *App instance.
 func NewApp(_ context.Context, settings backend.AppInstanceSettings) (instancemgmt.Instance, error) {
 	app := App{
-		settings:     loadSettings(settings),
-		httpClient:   &http.Client{Timeout: 10 * time.Minute},
-		jsonnetFiles: newVirtualJsonnetFileStore(),
+		settings:             loadSettings(settings),
+		httpClient:           &http.Client{Timeout: 10 * time.Minute},
+		jsonnetFiles:         newVirtualJsonnetFileStore(),
+		resolvedLLMProtocols: map[string]string{},
 	}
 	if app.settings.EnableAgentContractSample {
 		app.agentSample = newAgentContractSampleStore(app.settings.PluginID)
@@ -104,6 +113,12 @@ func (a *App) CheckHealth(_ context.Context, _ *backend.CheckHealthRequest) (*ba
 			Message: "OpenAI-compatible API key is not configured",
 		}, nil
 	}
+	if len(a.settings.Models) == 0 {
+		return &backend.CheckHealthResult{
+			Status:  backend.HealthStatusError,
+			Message: "No assistant models are configured",
+		}, nil
+	}
 
 	return &backend.CheckHealthResult{
 		Status:  backend.HealthStatusOk,
@@ -114,7 +129,6 @@ func (a *App) CheckHealth(_ context.Context, _ *backend.CheckHealthRequest) (*ba
 func loadSettings(settings backend.AppInstanceSettings) appSettings {
 	loaded := appSettings{
 		OpenAIBaseURL: "https://api.openai.com/v1",
-		DefaultModel:  "gpt-4.1",
 	}
 
 	if len(settings.JSONData) > 0 {
@@ -125,12 +139,7 @@ func loadSettings(settings backend.AppInstanceSettings) appSettings {
 		loaded.OpenAIBaseURL = "https://api.openai.com/v1"
 	}
 	loaded.OpenAIBaseURL = strings.TrimRight(loaded.OpenAIBaseURL, "/")
-	loaded.OpenAIProtocol = normalizeOpenAIProtocol(loaded.OpenAIProtocol)
-	if loaded.DefaultModel == "" {
-		loaded.DefaultModel = "gpt-4.1"
-	}
-	loaded.ThinkingLevel = normalizeThinkingLevel(loaded.ThinkingLevel)
-	loaded.ThinkingFormat = normalizeThinkingFormat(loaded.ThinkingFormat)
+	loaded.Models = normalizeModels(loaded.Models)
 	loaded.AccessMode = normalizeAccessMode(loaded.AccessMode)
 	loaded.AllowedUsers = normalizeAllowedUsers(loaded.AllowedUsers)
 	loaded.OpenAIAPIKey = settings.DecryptedSecureJSONData["openAIAPIKey"]
@@ -149,6 +158,70 @@ func loadSettings(settings backend.AppInstanceSettings) appSettings {
 	}
 
 	return loaded
+}
+
+// normalizeModels trims and dedupes model entries, normalizes their per-model
+// protocol and thinking settings, and guarantees exactly one default entry
+// when the list is non-empty.
+func normalizeModels(models []modelSettings) []modelSettings {
+	normalized := make([]modelSettings, 0, len(models))
+	seen := map[string]bool{}
+	defaultIndex := -1
+	for _, model := range models {
+		model.ID = strings.TrimSpace(model.ID)
+		if model.ID == "" || seen[model.ID] {
+			continue
+		}
+		seen[model.ID] = true
+		model.Name = strings.TrimSpace(model.Name)
+		model.Protocol = normalizeOpenAIProtocol(model.Protocol)
+		model.ThinkingLevel = normalizeThinkingLevel(model.ThinkingLevel)
+		model.ThinkingFormat = normalizeThinkingFormat(model.ThinkingFormat)
+		if model.Default && defaultIndex == -1 {
+			defaultIndex = len(normalized)
+		}
+		model.Default = false
+		normalized = append(normalized, model)
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	if defaultIndex == -1 {
+		defaultIndex = 0
+	}
+	normalized[defaultIndex].Default = true
+	return normalized
+}
+
+func (a *App) defaultModelSettings() (modelSettings, bool) {
+	for _, model := range a.settings.Models {
+		if model.Default {
+			return model, true
+		}
+	}
+	return modelSettings{}, false
+}
+
+// resolveRequestModel maps a client-provided model ID onto the configured
+// model list. An empty ID selects the default model; unknown IDs are rejected.
+func (a *App) resolveRequestModel(id string) (modelSettings, error) {
+	if len(a.settings.Models) == 0 {
+		return modelSettings{}, errors.New("no assistant models are configured")
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		model, ok := a.defaultModelSettings()
+		if !ok {
+			return modelSettings{}, errors.New("no default assistant model is configured")
+		}
+		return model, nil
+	}
+	for _, model := range a.settings.Models {
+		if model.ID == id {
+			return model, nil
+		}
+	}
+	return modelSettings{}, fmt.Errorf("model %q is not configured", id)
 }
 
 func normalizeOpenAIProtocol(value string) string {

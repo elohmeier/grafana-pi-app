@@ -25,12 +25,18 @@ export type PiAppOpenAIProtocol = 'auto' | 'chat-completions' | 'responses';
 export type PiAppThinkingLevel = 'off' | 'low' | 'medium' | 'high';
 export type PiAppThinkingFormat = 'openai' | 'qwen' | 'qwen-chat-template';
 
-export type PiAppJsonData = {
-  openAIBaseUrl?: string;
-  openAIProtocol?: PiAppOpenAIProtocol;
-  defaultModel?: string;
+export type PiAppModelConfig = {
+  id?: string;
+  name?: string;
+  default?: boolean;
+  protocol?: PiAppOpenAIProtocol;
   thinkingLevel?: PiAppThinkingLevel;
   thinkingFormat?: PiAppThinkingFormat;
+};
+
+export type PiAppJsonData = {
+  openAIBaseUrl?: string;
+  models?: PiAppModelConfig[];
   isOpenAIAPIKeySet?: boolean;
   accessMode?: PiAppAccessMode;
   allowedUsers?: string[];

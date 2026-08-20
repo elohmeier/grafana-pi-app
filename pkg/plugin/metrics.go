@@ -241,9 +241,9 @@ var (
 			Namespace: "grafana_plugin",
 			Subsystem: "assistant",
 			Name:      "llm_requests_total",
-			Help:      "Total OpenAI-compatible LLM stream requests by status and terminal reason.",
+			Help:      "Total OpenAI-compatible LLM stream requests by status, terminal reason, and model.",
 		},
-		[]string{"status", "reason"},
+		[]string{"status", "reason", "model"},
 	)
 	assistantLLMRequestDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -253,7 +253,7 @@ var (
 			Help:      "OpenAI-compatible LLM stream request duration in seconds.",
 			Buckets:   []float64{0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600},
 		},
-		[]string{"status", "reason"},
+		[]string{"status", "reason", "model"},
 	)
 	assistantLLMTokensTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{

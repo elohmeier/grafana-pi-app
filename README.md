@@ -38,19 +38,22 @@ The alternate release asset name intentionally does not include `sidebar`; the f
 Configure the app plugin from Grafana's plugin settings page:
 
 - `openAIBaseUrl`: OpenAI-compatible API base URL, for example `https://api.openai.com/v1`.
-- `openAIProtocol`: Upstream API protocol, one of `auto`, `chat-completions`, or `responses`. `auto` starts with Chat Completions and switches to Responses only when the provider returns the specific `reasoning_effort` compatibility error that directs the caller to `/v1/responses`. Defaults to `auto`.
-- `defaultModel`: Central model ID used for all assistant requests, for example `gpt-4.1`.
-- `thinkingLevel`: Optional model reasoning effort, one of `off`, `low`, `medium`, or `high`. Defaults to `off`.
-- `thinkingFormat`: Chat Completions thinking parameter format, one of `openai`, `qwen`, or `qwen-chat-template`. Responses always uses `reasoning.effort`. Defaults to `openai`.
+- `models`: List of models chat users can pick from the assistant model selector. Each entry has an `id` (the upstream model ID), an optional display `name`, an optional `default` flag marking the model preselected for new chats, and per-model request settings:
+  - `protocol`: Upstream API protocol, one of `auto`, `chat-completions`, or `responses`. `auto` starts with Chat Completions and switches to Responses only when the provider returns the specific `reasoning_effort` compatibility error that directs the caller to `/v1/responses`. Defaults to `auto`.
+  - `thinkingLevel`: Optional model reasoning effort, one of `off`, `low`, `medium`, or `high`. Defaults to `off`.
+  - `thinkingFormat`: Chat Completions thinking parameter format, one of `openai`, `qwen`, or `qwen-chat-template`. Responses always uses `reasoning.effort`. Defaults to `openai`.
+
+  When no entry is flagged `default`, the first model is the default. All models share the configured base URL and API key.
+
 - `systemPromptAddendum`: Optional central instructions appended to the built-in system prompt. Do not include secrets because this is stored in `jsonData`.
 - `allowedPrometheusDatasourceUids`: Optional list of Prometheus datasource UIDs the assistant may discover, query, and reference in uploaded dashboards. Leave empty to allow all Prometheus datasources visible to the current Grafana user.
 - `customSkills`: Optional non-secret skill definitions stored in `jsonData`. Users activate explicit custom skills with `$skill-name`; admins can also configure keyword or regex activation.
 - `openAIAPIKey`: Secret API key stored in `secureJsonData`.
 
-Chat users cannot override the model, system prompt addendum, or datasource allow-list from the assistant page. The backend always uses the centrally configured model and appends the configured system prompt addendum when proxying LLM requests, and Grafana datasource tools enforce the central allow-list before querying.
+Chat users pick a model from the selector in the chat composer; the selection is stored per chat session, and new chats start with the configured default model. The backend validates every requested model against the configured list and rejects unknown model IDs, so users cannot reach arbitrary models. Users cannot override the system prompt addendum or datasource allow-list from the assistant page: the backend appends the configured system prompt addendum when proxying LLM requests, and Grafana datasource tools enforce the central allow-list before querying.
 
 For local Docker provisioning, `provisioning/plugins/app.yaml` reads `OPENAI_API_KEY`.
-The local demo config points Grafana at `http://host.docker.internal:8080/v1`, uses the `auto` protocol, sets the model to the Qwen llama-server model, enables medium `qwen-chat-template` thinking, and limits assistant datasource access to the provisioned `prometheus` datasource.
+The local demo config points Grafana at `http://host.docker.internal:8080/v1` and configures a single default model entry for the Qwen llama-server model with the `auto` protocol and medium `qwen-chat-template` thinking, and limits assistant datasource access to the provisioned `prometheus` datasource.
 When `OPENAI_API_KEY` is unset, Compose provides a local dummy key because llama-server only needs a bearer token-shaped value.
 
 Managed dashboard writes use the plugin service account declared in `plugin.json`. In local Docker, `docker-compose.yaml` enables Grafana's external service account support for this and starts Grafana image rendering so screenshot verification can run.

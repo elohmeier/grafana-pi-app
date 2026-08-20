@@ -150,14 +150,14 @@ type responseTextSignature struct {
 
 var errOpenAIResponsesStreamDone = errors.New("openai responses stream done")
 
-func (a *App) openAIProtocolForRequest() string {
-	configured := normalizeOpenAIProtocol(a.settings.OpenAIProtocol)
+func (a *App) openAIProtocolForRequest(model modelSettings) string {
+	configured := normalizeOpenAIProtocol(model.Protocol)
 	if configured != openAIProtocolAuto {
 		return configured
 	}
 
 	a.llmProtocolMu.RLock()
-	resolved := a.resolvedLLMProtocol
+	resolved := a.resolvedLLMProtocols[model.ID]
 	a.llmProtocolMu.RUnlock()
 	if resolved == openAIProtocolResponses {
 		return resolved
@@ -165,23 +165,26 @@ func (a *App) openAIProtocolForRequest() string {
 	return openAIProtocolChatCompletions
 }
 
-func (a *App) rememberOpenAIProtocol(protocol string) {
-	if normalizeOpenAIProtocol(a.settings.OpenAIProtocol) != openAIProtocolAuto || protocol != openAIProtocolResponses {
+func (a *App) rememberOpenAIProtocol(model modelSettings, protocol string) {
+	if normalizeOpenAIProtocol(model.Protocol) != openAIProtocolAuto || protocol != openAIProtocolResponses {
 		return
 	}
 	a.llmProtocolMu.Lock()
-	a.resolvedLLMProtocol = protocol
+	if a.resolvedLLMProtocols == nil {
+		a.resolvedLLMProtocols = map[string]string{}
+	}
+	a.resolvedLLMProtocols[model.ID] = protocol
 	a.llmProtocolMu.Unlock()
 }
 
-func (a *App) doOpenAIUpstreamRequest(ctx context.Context, req proxyStreamRequest, protocol string) (*http.Response, error) {
+func (a *App) doOpenAIUpstreamRequest(ctx context.Context, req proxyStreamRequest, model modelSettings, protocol string) (*http.Response, error) {
 	var payload any
 	path := "/chat/completions"
 	if protocol == openAIProtocolResponses {
-		payload = a.buildOpenAIResponsesRequest(req)
+		payload = a.buildOpenAIResponsesRequest(req, model)
 		path = "/responses"
 	} else {
-		payload = a.buildOpenAIChatRequest(req)
+		payload = a.buildOpenAIChatRequest(req, model)
 	}
 
 	body, err := json.Marshal(payload)
@@ -218,7 +221,7 @@ func isHTTPSuccess(status int) bool {
 	return status >= http.StatusOK && status < http.StatusMultipleChoices
 }
 
-func (a *App) buildOpenAIResponsesRequest(req proxyStreamRequest) openAIResponsesRequest {
+func (a *App) buildOpenAIResponsesRequest(req proxyStreamRequest, model modelSettings) openAIResponsesRequest {
 	input := make([]json.RawMessage, 0, len(req.Context.Messages)*2)
 	messageIndex := 0
 	for _, message := range req.Context.Messages {
@@ -303,7 +306,7 @@ func (a *App) buildOpenAIResponsesRequest(req proxyStreamRequest) openAIResponse
 	}
 
 	payload := openAIResponsesRequest{
-		Model:           a.settings.DefaultModel,
+		Model:           model.ID,
 		Instructions:    a.effectiveSystemPrompt(req.Context.SystemPrompt),
 		Input:           input,
 		Tools:           tools,
@@ -312,7 +315,7 @@ func (a *App) buildOpenAIResponsesRequest(req proxyStreamRequest) openAIResponse
 		Temperature:     req.Options.Temperature,
 		MaxOutputTokens: req.Options.MaxTokens,
 	}
-	if level := normalizeThinkingLevel(a.settings.ThinkingLevel); level != thinkingLevelOff {
+	if level := normalizeThinkingLevel(model.ThinkingLevel); level != thinkingLevelOff {
 		payload.Reasoning = &openAIResponsesReasoning{Effort: level, Summary: "auto"}
 		payload.Include = []string{"reasoning.encrypted_content"}
 	}

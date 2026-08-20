@@ -52,52 +52,97 @@ func TestLoadSettingsNormalizesAccessPolicy(t *testing.T) {
 	}
 }
 
-func TestLoadSettingsNormalizesThinkingSettings(t *testing.T) {
+func TestLoadSettingsNormalizesModels(t *testing.T) {
 	jsonData, _ := json.Marshal(map[string]any{
-		"thinkingLevel":  "medium",
-		"thinkingFormat": "qwen-chat-template",
+		"models": []map[string]any{
+			{"id": " gpt-4.1 ", "name": " GPT-4.1 ", "thinkingLevel": "minimal", "thinkingFormat": "deepseek", "protocol": "legacy"},
+			{"id": "gpt-4.1"},
+			{"id": ""},
+			{"id": "qwen", "default": true, "thinkingLevel": "medium", "thinkingFormat": "qwen-chat-template", "protocol": "responses"},
+		},
 	})
 
 	settings := loadSettings(backend.AppInstanceSettings{JSONData: jsonData})
 
-	if settings.ThinkingLevel != thinkingLevelMedium {
-		t.Fatalf("expected medium thinking level, got %q", settings.ThinkingLevel)
+	if len(settings.Models) != 2 {
+		t.Fatalf("expected trimmed and deduped model list, got %#v", settings.Models)
 	}
-	if settings.ThinkingFormat != thinkingFormatQwenChatTemplate {
-		t.Fatalf("expected qwen chat-template thinking format, got %q", settings.ThinkingFormat)
+	first := settings.Models[0]
+	if first.ID != "gpt-4.1" || first.Name != "GPT-4.1" || first.Default {
+		t.Fatalf("expected normalized non-default first model, got %#v", first)
 	}
-
-	jsonData, _ = json.Marshal(map[string]any{
-		"thinkingLevel":  "minimal",
-		"thinkingFormat": "deepseek",
-	})
-
-	settings = loadSettings(backend.AppInstanceSettings{JSONData: jsonData})
-
-	if settings.ThinkingLevel != thinkingLevelOff {
-		t.Fatalf("expected invalid thinking level to default off, got %q", settings.ThinkingLevel)
+	if first.ThinkingLevel != thinkingLevelOff || first.ThinkingFormat != thinkingFormatOpenAI || first.Protocol != openAIProtocolAuto {
+		t.Fatalf("expected invalid per-model settings to fall back to defaults, got %#v", first)
 	}
-	if settings.ThinkingFormat != thinkingFormatOpenAI {
-		t.Fatalf("expected invalid thinking format to default openai, got %q", settings.ThinkingFormat)
+	second := settings.Models[1]
+	if second.ID != "qwen" || !second.Default {
+		t.Fatalf("expected flagged model to stay default, got %#v", second)
+	}
+	if second.ThinkingLevel != thinkingLevelMedium || second.ThinkingFormat != thinkingFormatQwenChatTemplate || second.Protocol != openAIProtocolResponses {
+		t.Fatalf("expected per-model settings to be preserved, got %#v", second)
 	}
 }
 
-func TestLoadSettingsNormalizesOpenAIProtocol(t *testing.T) {
-	for _, test := range []struct {
-		configured string
-		expected   string
-	}{
-		{configured: "", expected: openAIProtocolAuto},
-		{configured: openAIProtocolAuto, expected: openAIProtocolAuto},
-		{configured: openAIProtocolChatCompletions, expected: openAIProtocolChatCompletions},
-		{configured: openAIProtocolResponses, expected: openAIProtocolResponses},
-		{configured: "legacy", expected: openAIProtocolAuto},
-	} {
-		jsonData, _ := json.Marshal(map[string]any{"openAIProtocol": test.configured})
-		settings := loadSettings(backend.AppInstanceSettings{JSONData: jsonData})
-		if settings.OpenAIProtocol != test.expected {
-			t.Fatalf("configured %q: expected %q, got %q", test.configured, test.expected, settings.OpenAIProtocol)
-		}
+func TestLoadSettingsDefaultsFirstModelWhenNoDefaultFlagged(t *testing.T) {
+	jsonData, _ := json.Marshal(map[string]any{
+		"models": []map[string]any{
+			{"id": "model-a"},
+			{"id": "model-b"},
+		},
+	})
+
+	settings := loadSettings(backend.AppInstanceSettings{JSONData: jsonData})
+
+	if len(settings.Models) != 2 || !settings.Models[0].Default || settings.Models[1].Default {
+		t.Fatalf("expected first model to become the default, got %#v", settings.Models)
+	}
+}
+
+func TestLoadSettingsKeepsFirstFlaggedDefaultModel(t *testing.T) {
+	jsonData, _ := json.Marshal(map[string]any{
+		"models": []map[string]any{
+			{"id": "model-a"},
+			{"id": "model-b", "default": true},
+			{"id": "model-c", "default": true},
+		},
+	})
+
+	settings := loadSettings(backend.AppInstanceSettings{JSONData: jsonData})
+
+	if len(settings.Models) != 3 || settings.Models[0].Default || !settings.Models[1].Default || settings.Models[2].Default {
+		t.Fatalf("expected only the first flagged model to stay default, got %#v", settings.Models)
+	}
+}
+
+func TestLoadSettingsWithoutModels(t *testing.T) {
+	settings := loadSettings(backend.AppInstanceSettings{})
+
+	if settings.Models != nil {
+		t.Fatalf("expected no configured models, got %#v", settings.Models)
+	}
+}
+
+func TestResolveRequestModel(t *testing.T) {
+	app := &App{settings: appSettings{Models: normalizeModels([]modelSettings{
+		{ID: "model-a"},
+		{ID: "model-b", Default: true},
+	})}}
+
+	model, err := app.resolveRequestModel("")
+	if err != nil || model.ID != "model-b" {
+		t.Fatalf("expected empty ID to resolve the default model, got %#v (%v)", model, err)
+	}
+	model, err = app.resolveRequestModel(" model-a ")
+	if err != nil || model.ID != "model-a" {
+		t.Fatalf("expected trimmed lookup to find model-a, got %#v (%v)", model, err)
+	}
+	if _, err = app.resolveRequestModel("model-c"); err == nil {
+		t.Fatal("expected unknown model to be rejected")
+	}
+
+	empty := &App{}
+	if _, err = empty.resolveRequestModel(""); err == nil {
+		t.Fatal("expected missing model configuration to be rejected")
 	}
 }
 

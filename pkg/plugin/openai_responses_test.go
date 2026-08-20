@@ -38,10 +38,12 @@ func TestBuildOpenAIResponsesRequestConvertsHistoryToolsAndReasoning(t *testing.
 	}
 
 	app := App{settings: appSettings{
-		DefaultModel:         "gpt-5.6-luna-grafana",
-		ThinkingLevel:        thinkingLevelMedium,
 		SystemPromptAddendum: "Prefer concise answers.",
 	}}
+	model := modelSettings{
+		ID:            "gpt-5.6-luna-grafana",
+		ThinkingLevel: thinkingLevelMedium,
+	}
 	payload := app.buildOpenAIResponsesRequest(proxyStreamRequest{
 		Context: proxyContext{
 			SystemPrompt: "You help.",
@@ -62,7 +64,7 @@ func TestBuildOpenAIResponsesRequestConvertsHistoryToolsAndReasoning(t *testing.
 			}},
 		},
 		Options: proxyOptions{MaxTokens: intPtr(2048)},
-	})
+	}, model)
 
 	if payload.Model != "gpt-5.6-luna-grafana" || payload.MaxOutputTokens == nil || *payload.MaxOutputTokens != 2048 {
 		t.Fatalf("unexpected Responses request settings: %#v", payload)
@@ -203,11 +205,14 @@ func TestLLMStreamAutoFallsBackToResponsesAndRemembersProtocol(t *testing.T) {
 	defer upstream.Close()
 
 	jsonData, _ := json.Marshal(appSettings{
-		OpenAIBaseURL:  upstream.URL,
-		OpenAIProtocol: openAIProtocolAuto,
-		DefaultModel:   "gpt-5.6-luna-grafana",
-		ThinkingLevel:  thinkingLevelMedium,
-		ThinkingFormat: thinkingFormatOpenAI,
+		OpenAIBaseURL: upstream.URL,
+		Models: []modelSettings{{
+			ID:             "gpt-5.6-luna-grafana",
+			Default:        true,
+			Protocol:       openAIProtocolAuto,
+			ThinkingLevel:  thinkingLevelMedium,
+			ThinkingFormat: thinkingFormatOpenAI,
+		}},
 	})
 	inst, err := NewApp(context.Background(), backend.AppInstanceSettings{
 		JSONData: jsonData,
@@ -273,21 +278,20 @@ func TestOpenAIProtocolSelectionRespectsExplicitAndResolvedModes(t *testing.T) {
 	tests := []struct {
 		name       string
 		configured string
-		resolved   string
+		resolved   map[string]string
 		expected   string
 	}{
 		{name: "auto starts with chat completions", configured: openAIProtocolAuto, expected: openAIProtocolChatCompletions},
-		{name: "auto remembers responses", configured: openAIProtocolAuto, resolved: openAIProtocolResponses, expected: openAIProtocolResponses},
-		{name: "explicit chat ignores remembered responses", configured: openAIProtocolChatCompletions, resolved: openAIProtocolResponses, expected: openAIProtocolChatCompletions},
+		{name: "auto remembers responses", configured: openAIProtocolAuto, resolved: map[string]string{"model-a": openAIProtocolResponses}, expected: openAIProtocolResponses},
+		{name: "auto ignores responses remembered for another model", configured: openAIProtocolAuto, resolved: map[string]string{"model-b": openAIProtocolResponses}, expected: openAIProtocolChatCompletions},
+		{name: "explicit chat ignores remembered responses", configured: openAIProtocolChatCompletions, resolved: map[string]string{"model-a": openAIProtocolResponses}, expected: openAIProtocolChatCompletions},
 		{name: "explicit responses", configured: openAIProtocolResponses, expected: openAIProtocolResponses},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			app := App{
-				settings:            appSettings{OpenAIProtocol: test.configured},
-				resolvedLLMProtocol: test.resolved,
-			}
-			if actual := app.openAIProtocolForRequest(); actual != test.expected {
+			app := App{resolvedLLMProtocols: test.resolved}
+			model := modelSettings{ID: "model-a", Protocol: test.configured}
+			if actual := app.openAIProtocolForRequest(model); actual != test.expected {
 				t.Fatalf("expected %q, got %q", test.expected, actual)
 			}
 		})

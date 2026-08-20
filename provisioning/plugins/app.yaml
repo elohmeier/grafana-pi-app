@@ -7,10 +7,12 @@ apps:
     disabled: false
     jsonData:
       openAIBaseUrl: $__env{PI_OPENAI_BASE_URL}
-      openAIProtocol: $__env{PI_OPENAI_PROTOCOL}
-      defaultModel: $__env{PI_DEFAULT_MODEL}
-      thinkingLevel: $__env{PI_THINKING_LEVEL}
-      thinkingFormat: $__env{PI_THINKING_FORMAT}
+      models:
+        - id: $__env{PI_DEFAULT_MODEL}
+          default: true
+          protocol: $__env{PI_OPENAI_PROTOCOL}
+          thinkingLevel: $__env{PI_THINKING_LEVEL}
+          thinkingFormat: $__env{PI_THINKING_FORMAT}
       accessMode: all
       allowedUsers: []
       systemPromptAddendum: ''

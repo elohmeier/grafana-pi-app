@@ -323,8 +323,8 @@ func TestLLMStreamRelaysOpenAICompatibleChunks(t *testing.T) {
 		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode payload: %s", err)
 		}
-		if payload.Model != "gpt-default" {
-			t.Fatalf("expected centrally configured model gpt-default, got %s", payload.Model)
+		if payload.Model != "gpt-user-selected" {
+			t.Fatalf("expected requested configured model gpt-user-selected, got %s", payload.Model)
 		}
 
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -334,7 +334,10 @@ func TestLLMStreamRelaysOpenAICompatibleChunks(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	jsonData, _ := json.Marshal(appSettings{OpenAIBaseURL: upstream.URL, DefaultModel: "gpt-default"})
+	jsonData, _ := json.Marshal(appSettings{OpenAIBaseURL: upstream.URL, Models: []modelSettings{
+		{ID: "gpt-default", Default: true},
+		{ID: "gpt-user-selected"},
+	}})
 	inst, err := NewApp(context.Background(), backend.AppInstanceSettings{
 		JSONData: jsonData,
 		DecryptedSecureJSONData: map[string]string{
@@ -352,7 +355,7 @@ func TestLLMStreamRelaysOpenAICompatibleChunks(t *testing.T) {
 		Method:        http.MethodPost,
 		Path:          "llm/stream",
 		Body: []byte(`{
-			"model":{"id":"gpt-user-supplied"},
+			"model":{"id":"gpt-user-selected"},
 			"context":{
 				"systemPrompt":"You help.",
 				"messages":[{"role":"user","content":"Say hello"}]
@@ -372,8 +375,87 @@ func TestLLMStreamRelaysOpenAICompatibleChunks(t *testing.T) {
 	}
 }
 
+func TestLLMStreamUsesDefaultModelWhenRequestOmitsModel(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var payload openAIChatRequest
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode payload: %s", err)
+		}
+		if payload.Model != "gpt-default" {
+			t.Fatalf("expected default model gpt-default, got %s", payload.Model)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	jsonData, _ := json.Marshal(appSettings{OpenAIBaseURL: upstream.URL, Models: []modelSettings{
+		{ID: "gpt-other"},
+		{ID: "gpt-default", Default: true},
+	}})
+	inst, err := NewApp(context.Background(), backend.AppInstanceSettings{
+		JSONData:                jsonData,
+		DecryptedSecureJSONData: map[string]string{"openAIAPIKey": "secret"},
+	})
+	if err != nil {
+		t.Fatalf("new app: %s", err)
+	}
+	app := inst.(*App)
+
+	var sender mockCallResourceResponseSender
+	err = app.CallResource(context.Background(), &backend.CallResourceRequest{
+		PluginContext: adminPluginContext(),
+		Method:        http.MethodPost,
+		Path:          "llm/stream",
+		Body:          []byte(`{"context":{"messages":[{"role":"user","content":"hello"}]},"options":{}}`),
+	}, &sender)
+	if err != nil {
+		t.Fatalf("CallResource error: %s", err)
+	}
+	if combined := joinBodies(sender.responses); !strings.Contains(combined, `"type":"done"`) {
+		t.Fatalf("expected completed proxy stream, got %s", combined)
+	}
+}
+
+func TestLLMStreamRejectsUnknownModel(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		t.Fatalf("upstream must not be contacted for unknown models, got %s", req.URL.Path)
+	}))
+	defer upstream.Close()
+
+	jsonData, _ := json.Marshal(appSettings{OpenAIBaseURL: upstream.URL, Models: []modelSettings{
+		{ID: "gpt-default", Default: true},
+	}})
+	inst, err := NewApp(context.Background(), backend.AppInstanceSettings{
+		JSONData:                jsonData,
+		DecryptedSecureJSONData: map[string]string{"openAIAPIKey": "secret"},
+	})
+	if err != nil {
+		t.Fatalf("new app: %s", err)
+	}
+	app := inst.(*App)
+
+	var sender mockCallResourceResponseSender
+	err = app.CallResource(context.Background(), &backend.CallResourceRequest{
+		PluginContext: adminPluginContext(),
+		Method:        http.MethodPost,
+		Path:          "llm/stream",
+		Body:          []byte(`{"model":{"id":"gpt-unknown"},"context":{"messages":[]}}`),
+	}, &sender)
+	if err != nil {
+		t.Fatalf("CallResource error: %s", err)
+	}
+	if len(sender.responses) != 1 || sender.responses[0].Status != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown model, got %#v", sender.responses)
+	}
+	if !strings.Contains(string(sender.responses[0].Body), "gpt-unknown") {
+		t.Fatalf("expected error to name the rejected model, got %s", string(sender.responses[0].Body))
+	}
+}
+
 func TestOpenAIRequestAppendsConfiguredSystemPromptAddendum(t *testing.T) {
-	app := App{settings: appSettings{DefaultModel: "gpt-default", SystemPromptAddendum: "Prefer concise incident summaries."}}
+	app := App{settings: appSettings{SystemPromptAddendum: "Prefer concise incident summaries."}}
 
 	payload := app.buildOpenAIChatRequest(proxyStreamRequest{
 		Context: proxyContext{
@@ -382,7 +464,7 @@ func TestOpenAIRequestAppendsConfiguredSystemPromptAddendum(t *testing.T) {
 				{Role: "user", Content: json.RawMessage(`"Summarize this incident"`)},
 			},
 		},
-	})
+	}, modelSettings{ID: "gpt-default"})
 
 	if len(payload.Messages) != 2 {
 		t.Fatalf("expected system and user messages, got %d", len(payload.Messages))
@@ -398,7 +480,7 @@ func TestOpenAIRequestAppendsConfiguredSystemPromptAddendum(t *testing.T) {
 }
 
 func TestOpenAIRequestOmitsThinkingFieldsByDefault(t *testing.T) {
-	app := App{settings: appSettings{DefaultModel: "gpt-default"}}
+	app := App{}
 
 	payload := app.buildOpenAIChatRequest(proxyStreamRequest{
 		Context: proxyContext{
@@ -407,7 +489,7 @@ func TestOpenAIRequestOmitsThinkingFieldsByDefault(t *testing.T) {
 			},
 		},
 		Options: proxyOptions{Reasoning: thinkingLevelHigh},
-	})
+	}, modelSettings{ID: "gpt-default"})
 
 	if payload.ReasoningEffort != "" {
 		t.Fatalf("default payload should not include reasoning_effort, got %q", payload.ReasoningEffort)
@@ -478,7 +560,7 @@ func TestOpenAIRequestAppliesConfiguredThinkingFormat(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			app := App{settings: appSettings{DefaultModel: "gpt-default", ThinkingLevel: thinkingLevelMedium, ThinkingFormat: tt.format}}
+			app := App{}
 
 			payload := app.buildOpenAIChatRequest(proxyStreamRequest{
 				Context: proxyContext{
@@ -486,7 +568,7 @@ func TestOpenAIRequestAppliesConfiguredThinkingFormat(t *testing.T) {
 						{Role: "user", Content: json.RawMessage(`"Hello"`)},
 					},
 				},
-			})
+			}, modelSettings{ID: "gpt-default", ThinkingLevel: thinkingLevelMedium, ThinkingFormat: tt.format})
 
 			tt.assert(t, payload)
 		})
@@ -505,7 +587,7 @@ func TestLLMStreamParsesMultilineSSEAndBufferedToolArguments(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	jsonData, _ := json.Marshal(appSettings{OpenAIBaseURL: upstream.URL, DefaultModel: "gpt-default"})
+	jsonData, _ := json.Marshal(appSettings{OpenAIBaseURL: upstream.URL, Models: []modelSettings{{ID: "gpt-default", Default: true}}})
 	inst, err := NewApp(context.Background(), backend.AppInstanceSettings{
 		JSONData: jsonData,
 		DecryptedSecureJSONData: map[string]string{
@@ -645,7 +727,7 @@ func TestTelemetryEndpointAcceptsAggregateEvents(t *testing.T) {
 }
 
 func TestOpenAIRequestKeepsUserAndToolContentNonEmpty(t *testing.T) {
-	app := App{settings: appSettings{DefaultModel: "gpt-default"}}
+	app := App{}
 
 	payload := app.buildOpenAIChatRequest(proxyStreamRequest{
 		Context: proxyContext{
@@ -659,7 +741,7 @@ func TestOpenAIRequestKeepsUserAndToolContentNonEmpty(t *testing.T) {
 				},
 			},
 		},
-	})
+	}, modelSettings{ID: "gpt-default"})
 
 	if len(payload.Messages) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(payload.Messages))
@@ -680,7 +762,7 @@ func TestOpenAIRequestKeepsUserAndToolContentNonEmpty(t *testing.T) {
 }
 
 func TestOpenAIRequestSerializesEmptyAssistantContentAsString(t *testing.T) {
-	app := App{settings: appSettings{DefaultModel: "gpt-default"}}
+	app := App{}
 
 	payload := app.buildOpenAIChatRequest(proxyStreamRequest{
 		Context: proxyContext{
@@ -690,7 +772,7 @@ func TestOpenAIRequestSerializesEmptyAssistantContentAsString(t *testing.T) {
 				{Role: "user", Content: json.RawMessage(`"follow-up after stop"`)},
 			},
 		},
-	})
+	}, modelSettings{ID: "gpt-default"})
 
 	encodedPayload, err := json.Marshal(payload)
 	if err != nil {
@@ -716,7 +798,7 @@ func TestOpenAIRequestSerializesEmptyAssistantContentAsString(t *testing.T) {
 }
 
 func TestOpenAIRequestPrefixesFailedToolResults(t *testing.T) {
-	app := App{settings: appSettings{DefaultModel: "gpt-default"}}
+	app := App{}
 
 	payload := app.buildOpenAIChatRequest(proxyStreamRequest{
 		Context: proxyContext{
@@ -732,7 +814,7 @@ func TestOpenAIRequestPrefixesFailedToolResults(t *testing.T) {
 				},
 			},
 		},
-	})
+	}, modelSettings{ID: "gpt-default"})
 
 	if len(payload.Messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(payload.Messages))

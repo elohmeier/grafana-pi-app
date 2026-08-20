@@ -146,11 +146,12 @@ func (a *App) handleLLMStream(w http.ResponseWriter, req *http.Request) {
 	startedAt := time.Now()
 	status := "failed"
 	reason := "error"
+	modelID := ""
 	usage := zeroUsage()
 	assistantLLMRequestsInFlight.Inc()
 	defer func() {
 		assistantLLMRequestsInFlight.Dec()
-		recordLLMRequestMetrics(status, reason, time.Since(startedAt), usage)
+		recordLLMRequestMetrics(status, reason, modelID, time.Since(startedAt), usage)
 	}()
 
 	if req.Method != http.MethodPost {
@@ -171,8 +172,16 @@ func (a *App) handleLLMStream(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	protocol := a.openAIProtocolForRequest()
-	upstreamRes, err := a.doOpenAIUpstreamRequest(req.Context(), body, protocol)
+	model, err := a.resolveRequestModel(body.Model.ID)
+	if err != nil {
+		reason = "bad_request"
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	modelID = model.ID
+
+	protocol := a.openAIProtocolForRequest(model)
+	upstreamRes, err := a.doOpenAIUpstreamRequest(req.Context(), body, model, protocol)
 	if err != nil {
 		stream := startProxyStream(w)
 		_ = stream.write(errorEvent(err.Error()))
@@ -180,13 +189,13 @@ func (a *App) handleLLMStream(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var upstreamError []byte
-	if normalizeOpenAIProtocol(a.settings.OpenAIProtocol) == openAIProtocolAuto && protocol == openAIProtocolChatCompletions && !isHTTPSuccess(upstreamRes.StatusCode) {
+	if normalizeOpenAIProtocol(model.Protocol) == openAIProtocolAuto && protocol == openAIProtocolChatCompletions && !isHTTPSuccess(upstreamRes.StatusCode) {
 		upstreamError, _ = io.ReadAll(io.LimitReader(upstreamRes.Body, 32_768))
 		_ = upstreamRes.Body.Close()
 		if shouldRetryWithResponses(upstreamRes.StatusCode, upstreamError) {
 			protocol = openAIProtocolResponses
-			a.rememberOpenAIProtocol(protocol)
-			upstreamRes, err = a.doOpenAIUpstreamRequest(req.Context(), body, protocol)
+			a.rememberOpenAIProtocol(model, protocol)
+			upstreamRes, err = a.doOpenAIUpstreamRequest(req.Context(), body, model, protocol)
 			upstreamError = nil
 			if err != nil {
 				stream := startProxyStream(w)
@@ -223,9 +232,7 @@ func (a *App) handleLLMStream(w http.ResponseWriter, req *http.Request) {
 	status = "completed"
 }
 
-func (a *App) buildOpenAIChatRequest(req proxyStreamRequest) openAIChatRequest {
-	model := a.settings.DefaultModel
-
+func (a *App) buildOpenAIChatRequest(req proxyStreamRequest, model modelSettings) openAIChatRequest {
 	messages := make([]openAIMessage, 0, len(req.Context.Messages)+1)
 	if systemPrompt := a.effectiveSystemPrompt(req.Context.SystemPrompt); systemPrompt != "" {
 		messages = append(messages, openAIMessage{
@@ -249,7 +256,7 @@ func (a *App) buildOpenAIChatRequest(req proxyStreamRequest) openAIChatRequest {
 	}
 
 	payload := openAIChatRequest{
-		Model:         model,
+		Model:         model.ID,
 		Messages:      messages,
 		Tools:         tools,
 		Stream:        true,
@@ -257,22 +264,23 @@ func (a *App) buildOpenAIChatRequest(req proxyStreamRequest) openAIChatRequest {
 		Temperature:   req.Options.Temperature,
 		MaxTokens:     req.Options.MaxTokens,
 	}
-	a.applyThinkingOptions(&payload, a.settings.ThinkingLevel)
+	applyThinkingOptions(&payload, model)
 	return payload
 }
 
-func (a *App) applyThinkingOptions(payload *openAIChatRequest, reasoning string) {
-	if normalizeThinkingLevel(reasoning) == thinkingLevelOff {
+func applyThinkingOptions(payload *openAIChatRequest, model modelSettings) {
+	level := normalizeThinkingLevel(model.ThinkingLevel)
+	if level == thinkingLevelOff {
 		return
 	}
 
-	switch normalizeThinkingFormat(a.settings.ThinkingFormat) {
+	switch normalizeThinkingFormat(model.ThinkingFormat) {
 	case thinkingFormatQwen:
 		payload.EnableThinking = boolPtr(true)
 	case thinkingFormatQwenChatTemplate:
 		payload.ChatTemplateKwargs = &openAIChatTemplateKwargs{EnableThinking: true}
 	default:
-		payload.ReasoningEffort = normalizeThinkingLevel(reasoning)
+		payload.ReasoningEffort = level
 	}
 }
 

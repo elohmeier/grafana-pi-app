@@ -1,7 +1,10 @@
 import React, { ChangeEvent, FormEvent, useMemo, useState } from 'react';
 import {
   Button,
+  Checkbox,
+  Combobox,
   Field,
+  IconButton,
   Input,
   useStyles2,
   FieldSet,
@@ -20,16 +23,13 @@ import type {
   PiAppAccessMode,
   PiAppCustomSkill,
   PiAppJsonData,
+  PiAppModelConfig,
   PiAppOpenAIProtocol,
   PiAppThinkingFormat,
   PiAppThinkingLevel,
 } from '../../types';
 import { GRAFANA_SKILLS } from '../../pages/Chat/skills/catalog';
-import {
-  getConfiguredOpenAIProtocol,
-  getConfiguredThinkingFormat,
-  getConfiguredThinkingLevel,
-} from '../../pages/Chat/model';
+import { normalizeOpenAIProtocol, normalizeThinkingFormat, normalizeThinkingLevel } from '../../pages/Chat/model';
 import {
   APP_ACCESS_ACTION,
   accessModeOptions,
@@ -46,10 +46,7 @@ import {
 
 type State = {
   openAIBaseUrl: string;
-  openAIProtocol: PiAppOpenAIProtocol;
-  defaultModel: string;
-  thinkingLevel: PiAppThinkingLevel;
-  thinkingFormat: PiAppThinkingFormat;
+  models: PiAppModelConfig[];
   isOpenAIAPIKeySet: boolean;
   openAIAPIKey: string;
   accessMode: PiAppAccessMode;
@@ -59,6 +56,71 @@ type State = {
   customSkills: PiAppCustomSkill[];
 };
 
+const emptyModelRow = (isDefault: boolean): PiAppModelConfig => ({
+  id: '',
+  name: '',
+  default: isDefault,
+  protocol: 'auto',
+  thinkingLevel: 'off',
+  thinkingFormat: 'openai',
+});
+
+const initialModelRows = (models?: PiAppModelConfig[]): PiAppModelConfig[] => {
+  const rows = Array.isArray(models) ? models.filter((model) => (model?.id ?? '').trim()) : [];
+  if (rows.length === 0) {
+    return [emptyModelRow(true)];
+  }
+  return rows.map((model) => ({
+    id: model.id ?? '',
+    name: model.name ?? '',
+    default: Boolean(model.default),
+    protocol: normalizeOpenAIProtocol(model.protocol),
+    thinkingLevel: normalizeThinkingLevel(model.thinkingLevel),
+    thinkingFormat: normalizeThinkingFormat(model.thinkingFormat),
+  }));
+};
+
+// Mirrors backend normalization: trim and dedupe IDs, drop empty rows, and
+// keep exactly one default entry.
+const serializeModels = (rows: PiAppModelConfig[]): PiAppModelConfig[] => {
+  const seen = new Set<string>();
+  const models: PiAppModelConfig[] = [];
+  for (const row of rows) {
+    const id = (row.id ?? '').trim();
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    const name = (row.name ?? '').trim();
+    models.push({
+      id,
+      ...(name && name !== id ? { name } : {}),
+      ...(row.default ? { default: true } : {}),
+      protocol: normalizeOpenAIProtocol(row.protocol),
+      thinkingLevel: normalizeThinkingLevel(row.thinkingLevel),
+      thinkingFormat: normalizeThinkingFormat(row.thinkingFormat),
+    });
+  }
+  if (models.length > 0 && !models.some((model) => model.default)) {
+    models[0] = { ...models[0], default: true };
+  }
+  return models;
+};
+
+const validateModelRows = (rows: PiAppModelConfig[]): string | undefined => {
+  const ids = rows.map((row) => (row.id ?? '').trim()).filter(Boolean);
+  if (ids.length === 0) {
+    return 'Add at least one model with a model ID.';
+  }
+  if (new Set(ids).size !== ids.length) {
+    return 'Model IDs must be unique.';
+  }
+  if (rows.some((row) => !(row.id ?? '').trim())) {
+    return 'Remove empty model rows or fill in their model IDs.';
+  }
+  return undefined;
+};
+
 export interface AppConfigProps extends PluginConfigPageProps<AppPluginMeta<PiAppJsonData>> {}
 
 const AppConfig = ({ plugin }: AppConfigProps) => {
@@ -66,10 +128,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
   const { enabled, pinned, jsonData } = plugin.meta;
   const [state, setState] = useState<State>({
     openAIBaseUrl: jsonData?.openAIBaseUrl || 'https://api.openai.com/v1',
-    openAIProtocol: getConfiguredOpenAIProtocol(jsonData),
-    defaultModel: jsonData?.defaultModel || 'gpt-4.1',
-    thinkingLevel: getConfiguredThinkingLevel(jsonData),
-    thinkingFormat: getConfiguredThinkingFormat(jsonData),
+    models: initialModelRows(jsonData?.models),
     openAIAPIKey: '',
     isOpenAIAPIKeySet: Boolean(jsonData?.isOpenAIAPIKeySet),
     accessMode: getConfiguredAccessMode(jsonData),
@@ -95,9 +154,11 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
       ? 'Enter at least one Grafana login or email.'
       : undefined;
 
+  const modelsError = useMemo(() => validateModelRows(state.models), [state.models]);
+
   const isSubmitDisabled = Boolean(
     !state.openAIBaseUrl ||
-    !state.defaultModel ||
+    modelsError ||
     (!state.isOpenAIAPIKeySet && !state.openAIAPIKey) ||
     allowedUsersError ||
     customSkillsError
@@ -124,31 +185,35 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     });
   };
 
-  const onChangeDefaultModel = (event: ChangeEvent<HTMLInputElement>) => {
+  const onChangeModelRow = (index: number, patch: Partial<PiAppModelConfig>) => {
     setState({
       ...state,
-      defaultModel: event.target.value.trim(),
+      models: state.models.map((model, modelIndex) => (modelIndex === index ? { ...model, ...patch } : model)),
     });
   };
 
-  const onChangeOpenAIProtocol = (openAIProtocol: PiAppOpenAIProtocol) => {
+  const onSetDefaultModel = (index: number) => {
     setState({
       ...state,
-      openAIProtocol,
+      models: state.models.map((model, modelIndex) => ({ ...model, default: modelIndex === index })),
     });
   };
 
-  const onChangeThinkingLevel = (thinkingLevel: PiAppThinkingLevel) => {
+  const onAddModel = () => {
     setState({
       ...state,
-      thinkingLevel,
+      models: [...state.models, emptyModelRow(state.models.length === 0)],
     });
   };
 
-  const onChangeThinkingFormat = (thinkingFormat: PiAppThinkingFormat) => {
+  const onRemoveModel = (index: number) => {
+    const models = state.models.filter((_, modelIndex) => modelIndex !== index);
+    if (models.length > 0 && !models.some((model) => model.default)) {
+      models[0] = { ...models[0], default: true };
+    }
     setState({
       ...state,
-      thinkingFormat,
+      models,
     });
   };
 
@@ -196,10 +261,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
       pinned,
       jsonData: {
         openAIBaseUrl: state.openAIBaseUrl,
-        openAIProtocol: state.openAIProtocol,
-        defaultModel: state.defaultModel,
-        thinkingLevel: state.thinkingLevel,
-        thinkingFormat: state.thinkingFormat,
+        models: serializeModels(state.models),
         isOpenAIAPIKeySet: true,
         accessMode: state.accessMode,
         allowedUsers,
@@ -280,63 +342,102 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         </Field>
 
         <Field
-          label="API protocol"
-          description="Select the upstream OpenAI-compatible request and streaming format."
+          label="Models"
+          description="Models chat users can pick from the assistant model selector. The default model is preselected for new chats. Per-model protocol and thinking settings apply to requests with that model."
           className={s.marginTop}
+          invalid={Boolean(modelsError)}
+          error={modelsError}
         >
-          <div data-testid={testIds.appConfig.openAIProtocol}>
-            <RadioButtonGroup<PiAppOpenAIProtocol>
-              options={openAIProtocolOptions}
-              value={state.openAIProtocol}
-              onChange={onChangeOpenAIProtocol}
-            />
-          </div>
-        </Field>
-
-        <Field
-          label="Model"
-          description="Central model used for all assistant requests. Chat users cannot override it."
-          className={s.marginTop}
-        >
-          <Input
-            width={40}
-            id="default-model"
-            data-testid={testIds.appConfig.defaultModel}
-            value={state.defaultModel}
-            placeholder="gpt-4.1"
-            onChange={onChangeDefaultModel}
-          />
-        </Field>
-
-        <Field
-          label="Thinking level"
-          description="Optional reasoning effort for models that support it. Off preserves the current request shape."
-          className={s.marginTop}
-        >
-          <div data-testid={testIds.appConfig.thinkingLevel}>
-            <RadioButtonGroup<PiAppThinkingLevel>
-              options={thinkingLevelOptions}
-              value={state.thinkingLevel}
-              onChange={onChangeThinkingLevel}
-            />
-          </div>
-        </Field>
-
-        {state.openAIProtocol !== 'responses' && (
-          <Field
-            label="Thinking format"
-            description="Provider-specific Chat Completions request field used when thinking is enabled."
-            className={s.marginTop}
-          >
-            <div data-testid={testIds.appConfig.thinkingFormat}>
-              <RadioButtonGroup<PiAppThinkingFormat>
-                options={thinkingFormatOptions}
-                value={state.thinkingFormat}
-                onChange={onChangeThinkingFormat}
-              />
+          <div className={s.modelList}>
+            {state.models.map((model, index) => (
+              <div className={s.modelRow} data-testid={testIds.appConfig.modelRow} key={index}>
+                <div className={s.modelRowLine}>
+                  <Field className={s.modelRowField} label="Model ID">
+                    <Input
+                      width={30}
+                      data-testid={testIds.appConfig.modelId}
+                      value={model.id ?? ''}
+                      placeholder="gpt-4.1"
+                      onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                        onChangeModelRow(index, { id: event.target.value.trim() })
+                      }
+                    />
+                  </Field>
+                  <Field className={s.modelRowField} label="Display name (optional)">
+                    <Input
+                      width={24}
+                      data-testid={testIds.appConfig.modelName}
+                      value={model.name ?? ''}
+                      placeholder={model.id?.trim() || 'Shown in the chat selector'}
+                      onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                        onChangeModelRow(index, { name: event.target.value })
+                      }
+                    />
+                  </Field>
+                  <div className={s.modelRowControls}>
+                    <Checkbox
+                      data-testid={testIds.appConfig.modelDefault}
+                      label="Default"
+                      checked={Boolean(model.default)}
+                      onChange={() => onSetDefaultModel(index)}
+                    />
+                    <IconButton
+                      aria-label="Remove model"
+                      data-testid={testIds.appConfig.modelDelete}
+                      disabled={state.models.length === 1}
+                      name="trash-alt"
+                      tooltip="Remove model"
+                      onClick={() => onRemoveModel(index)}
+                    />
+                  </div>
+                </div>
+                <div className={s.modelRowLine}>
+                  <Field className={s.modelRowField} label="API protocol">
+                    <Combobox<PiAppOpenAIProtocol>
+                      data-testid={testIds.appConfig.modelProtocol}
+                      options={openAIProtocolOptions}
+                      value={normalizeOpenAIProtocol(model.protocol)}
+                      width={22}
+                      onChange={(option) => onChangeModelRow(index, { protocol: option.value })}
+                    />
+                  </Field>
+                  <Field className={s.modelRowField} label="Thinking level">
+                    <Combobox<PiAppThinkingLevel>
+                      data-testid={testIds.appConfig.modelThinkingLevel}
+                      options={thinkingLevelOptions}
+                      value={normalizeThinkingLevel(model.thinkingLevel)}
+                      width={16}
+                      onChange={(option) => onChangeModelRow(index, { thinkingLevel: option.value })}
+                    />
+                  </Field>
+                  {normalizeOpenAIProtocol(model.protocol) !== 'responses' && (
+                    <Field className={s.modelRowField} label="Thinking format">
+                      <Combobox<PiAppThinkingFormat>
+                        data-testid={testIds.appConfig.modelThinkingFormat}
+                        options={thinkingFormatOptions}
+                        value={normalizeThinkingFormat(model.thinkingFormat)}
+                        width={20}
+                        onChange={(option) => onChangeModelRow(index, { thinkingFormat: option.value })}
+                      />
+                    </Field>
+                  )}
+                </div>
+              </div>
+            ))}
+            <div>
+              <Button
+                data-testid={testIds.appConfig.modelAdd}
+                icon="plus"
+                size="sm"
+                type="button"
+                variant="secondary"
+                onClick={onAddModel}
+              >
+                Add model
+              </Button>
             </div>
-          </Field>
-        )}
+          </div>
+        </Field>
 
         <Field
           label="System prompt addendum"
@@ -410,6 +511,32 @@ const getStyles = (theme: GrafanaTheme2) => ({
     max-width: 640px;
     width: 100%;
     font-family: ${theme.typography.fontFamilyMonospace};
+  `,
+  modelList: css`
+    display: flex;
+    flex-direction: column;
+    gap: ${theme.spacing(1)};
+    max-width: 760px;
+  `,
+  modelRow: css`
+    border: 1px solid ${theme.colors.border.weak};
+    border-radius: ${theme.shape.radius.default};
+    padding: ${theme.spacing(1.5)};
+  `,
+  modelRowLine: css`
+    display: flex;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: ${theme.spacing(2)};
+  `,
+  modelRowField: css`
+    margin-bottom: ${theme.spacing(1)};
+  `,
+  modelRowControls: css`
+    display: flex;
+    align-items: center;
+    gap: ${theme.spacing(1)};
+    margin-bottom: ${theme.spacing(1.5)};
   `,
 });
 
