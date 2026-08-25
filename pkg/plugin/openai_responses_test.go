@@ -63,7 +63,7 @@ func TestBuildOpenAIResponsesRequestConvertsHistoryToolsAndReasoning(t *testing.
 				Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`),
 			}},
 		},
-		Options: proxyOptions{MaxTokens: intPtr(2048)},
+		Options: proxyOptions{MaxTokens: intPtr(2048), Reasoning: thinkingLevelHigh},
 	}, model)
 
 	if payload.Model != "gpt-5.6-luna-grafana" || payload.MaxOutputTokens == nil || *payload.MaxOutputTokens != 2048 {
@@ -72,7 +72,7 @@ func TestBuildOpenAIResponsesRequestConvertsHistoryToolsAndReasoning(t *testing.
 	if !strings.Contains(payload.Instructions, "You help.") || !strings.Contains(payload.Instructions, "Prefer concise answers.") {
 		t.Fatalf("unexpected instructions: %q", payload.Instructions)
 	}
-	if payload.Reasoning == nil || payload.Reasoning.Effort != thinkingLevelMedium || payload.Reasoning.Summary != "auto" {
+	if payload.Reasoning == nil || payload.Reasoning.Effort != thinkingLevelHigh || payload.Reasoning.Summary != "auto" {
 		t.Fatalf("unexpected reasoning settings: %#v", payload.Reasoning)
 	}
 	if len(payload.Include) != 1 || payload.Include[0] != "reasoning.encrypted_content" {
@@ -236,7 +236,7 @@ func TestLLMStreamAutoFallsBackToResponsesAndRemembersProtocol(t *testing.T) {
 					"messages":[{"role":"user","content":"hello"}],
 					"tools":[{"name":"query_prometheus","description":"Run PromQL","parameters":{"type":"object"}}]
 				},
-				"options":{}
+				"options":{"reasoning":"medium"}
 			}`),
 		}, &sender)
 		if err != nil {

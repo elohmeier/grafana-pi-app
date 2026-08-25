@@ -55,7 +55,13 @@ import {
   type VirtualJsonnetFileSnapshot,
 } from './grafanaTools';
 import { formatAssistantError, type AssistantErrorView } from './llmErrors';
-import { createOpenAICompatibleModel, getActiveModel, getConfiguredModels, type PiAppJsonData } from './model';
+import {
+  createOpenAICompatibleModel,
+  getActiveModel,
+  getConfiguredModels,
+  type PiAppJsonData,
+  type PiAppThinkingLevel,
+} from './model';
 import { convertChatMessagesToLlm, hasPersistableMessages } from './chatMessages';
 import { getGrafanaSkills, renderGrafanaSystemPrompt, selectGrafanaSkills } from './skills';
 import { isFailedDashboardMutationResult } from './tools/result';
@@ -134,6 +140,7 @@ type SessionIndexItem = {
 type StoredSession = SessionIndexItem & {
   messages: AgentMessage[];
   modelId?: string;
+  thinkingLevel?: PiAppThinkingLevel;
   virtualJsonnetFiles?: Record<string, VirtualJsonnetFileSnapshot>;
   investigationReport?: InvestigationReport;
   artifacts?: Record<string, Artifact>;
@@ -182,6 +189,16 @@ const ASSISTANT_SIDEBAR_PLUGIN_ID = 'grafana-assistant-app';
 const GENERAL_FOLDER_TITLE = 'General';
 const STREAMING_REVISION_WATCHDOG_MS = 80;
 const sessionKey = (id: string) => `sessions:${id}`;
+const THINKING_LEVEL_OPTIONS: Array<{
+  description: string;
+  label: string;
+  value: PiAppThinkingLevel;
+}> = [
+  { label: 'Off', value: 'off', description: 'Do not request model thinking.' },
+  { label: 'Low', value: 'low', description: 'Faster responses with a smaller reasoning budget.' },
+  { label: 'Medium', value: 'medium', description: 'A balanced reasoning budget.' },
+  { label: 'High', value: 'high', description: 'More reasoning that can take longer.' },
+];
 
 type ChatSessionExport = {
   kind: typeof CHAT_SESSION_EXPORT_KIND;
@@ -263,9 +280,31 @@ export function ChatApp({
   );
   const configuredModels = useMemo(() => getConfiguredModels(jsonData), [jsonData]);
   const [selectedModelId, setSelectedModelId] = useState<string>();
+  const [selectedThinkingLevel, setSelectedThinkingLevel] = useState<PiAppThinkingLevel>();
+  const [isModelSettingsOpen, setIsModelSettingsOpen] = useState(false);
+  const modelSelectId = useId();
+  const thinkingLevelSelectId = useId();
   const activeModel = useMemo(() => getActiveModel(jsonData, selectedModelId), [jsonData, selectedModelId]);
   const llmModel = useMemo(() => createOpenAICompatibleModel(jsonData, activeModel), [jsonData, activeModel]);
-  const thinkingLevel = activeModel.thinkingLevel;
+  const canCustomizeThinking = activeModel.thinkingLevel !== 'off';
+  const usesBinaryThinking = activeModel.protocol !== 'responses' && activeModel.thinkingFormat !== 'openai';
+  const thinkingLevel: PiAppThinkingLevel = !canCustomizeThinking
+    ? 'off'
+    : usesBinaryThinking
+      ? selectedThinkingLevel === 'off'
+        ? 'off'
+        : activeModel.thinkingLevel
+      : (selectedThinkingLevel ?? activeModel.thinkingLevel);
+  const thinkingLevelOptions = usesBinaryThinking
+    ? [
+        { label: 'Off', value: 'off' as const, description: 'Do not request model thinking.' },
+        {
+          label: 'On',
+          value: activeModel.thinkingLevel,
+          description: 'Use the thinking mode configured for this model.',
+        },
+      ]
+    : THINKING_LEVEL_OPTIONS;
   const skills = useMemo(() => getGrafanaSkills(jsonData), [jsonData]);
   const assistantTelemetry = useMemo(() => createAssistantTelemetryReporter(), []);
   const streamFn = useCallback<StreamFn>(
@@ -714,6 +753,7 @@ export function ChatApp({
         ...indexItem,
         messages,
         modelId: llmModel.id,
+        thinkingLevel,
         virtualJsonnetFiles: virtualJsonnetFilesRef.current,
         investigationReport: investigationReportRef.current,
         artifacts: artifactsRef.current,
@@ -724,7 +764,7 @@ export function ChatApp({
       await storage.setItem(sessionKey(id), JSON.stringify(stored));
       await persistIndex(next);
     },
-    [llmModel.id, persistIndex, storage]
+    [llmModel.id, persistIndex, storage, thinkingLevel]
   );
 
   const handleAgentEvent = useCallback(
@@ -822,6 +862,7 @@ export function ChatApp({
     sessionIdRef.current = id;
     titleRef.current = 'New chat';
     setSelectedModelId(undefined);
+    setSelectedThinkingLevel(undefined);
     virtualJsonnetFilesRef.current = {};
     virtualJsonnetHydratedRef.current = {};
     investigationReportRef.current = undefined;
@@ -960,6 +1001,7 @@ export function ChatApp({
       sessionIdRef.current = run.id;
       titleRef.current = run.title;
       setSelectedModelId(run.agent.state.model?.id || undefined);
+      setSelectedThinkingLevel(parseStoredThinkingLevel(run.agent.state.thinkingLevel));
       virtualJsonnetFilesRef.current = run.virtualJsonnetFiles;
       virtualJsonnetHydratedRef.current = run.virtualJsonnetHydrated;
       investigationReportRef.current = run.investigationReport;
@@ -1331,6 +1373,7 @@ export function ChatApp({
       sessionIdRef.current = id;
       titleRef.current = stored.title;
       setSelectedModelId(stored.modelId || undefined);
+      setSelectedThinkingLevel(parseStoredThinkingLevel(stored.thinkingLevel));
       setChatSessionParamInLocation(id);
       virtualJsonnetFilesRef.current = stored.virtualJsonnetFiles ?? {};
       virtualJsonnetHydratedRef.current = {};
@@ -1725,6 +1768,7 @@ export function ChatApp({
           createdAt: indexItem?.createdAt ?? exportedAt,
           updatedAt: exportedAt,
           modelId: llmModel.id,
+          thinkingLevel,
           messages,
           virtualJsonnetFiles: virtualJsonnetFilesRef.current,
           investigationReport: investigationReportRef.current,
@@ -1740,7 +1784,7 @@ export function ChatApp({
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [llmModel.id]
+    [llmModel.id, thinkingLevel]
   );
 
   const openImportSessionPicker = useCallback(() => {
@@ -1781,6 +1825,7 @@ export function ChatApp({
         sessionIdRef.current = id;
         titleRef.current = title;
         setSelectedModelId(imported.modelId || undefined);
+        setSelectedThinkingLevel(parseStoredThinkingLevel(imported.thinkingLevel));
         virtualJsonnetFilesRef.current = imported.virtualJsonnetFiles ?? {};
         virtualJsonnetHydratedRef.current = {};
         investigationReportRef.current = imported.investigationReport;
@@ -1870,6 +1915,7 @@ export function ChatApp({
       </Menu>
     </div>
   );
+  const modelSettingsLabel = `Chat settings, current model ${activeModel.name}`;
 
   return (
     <div
@@ -1883,6 +1929,64 @@ export function ChatApp({
         onDeny={() => settleToolConfirmation(false)}
       />
       <ChatLeaveGuardModal action={leaveGuardAction} onCancel={cancelLeaveGuard} onConfirm={confirmLeaveGuard} />
+      <Modal
+        className={styles.modelSettingsModal}
+        closeOnEscape
+        isOpen={isModelSettingsOpen}
+        title="Chat settings"
+        onDismiss={() => setIsModelSettingsOpen(false)}
+      >
+        {configuredModels.length > 0 && (
+          <Field
+            description={
+              configuredModels.length === 1
+                ? 'The model configured for this assistant.'
+                : 'Used for future responses in this chat.'
+            }
+            htmlFor={modelSelectId}
+            label="Model"
+          >
+            <Combobox
+              disabled={isBusy || !hasLLMConfig || configuredModels.length === 1}
+              id={modelSelectId}
+              options={configuredModels.map((model) => ({
+                description: model.name === model.id ? undefined : model.id,
+                label: model.name,
+                value: model.id,
+              }))}
+              value={activeModel.id}
+              onChange={(option) => {
+                setSelectedModelId(option.value);
+                setSelectedThinkingLevel(undefined);
+              }}
+            />
+          </Field>
+        )}
+        {canCustomizeThinking && (
+          <Field
+            description={
+              usesBinaryThinking
+                ? 'This model format supports turning thinking on or off.'
+                : 'Controls reasoning effort for future responses in this chat. Higher levels can take longer.'
+            }
+            htmlFor={thinkingLevelSelectId}
+            label="Thinking level"
+          >
+            <Combobox<PiAppThinkingLevel>
+              disabled={isBusy || !hasLLMConfig}
+              id={thinkingLevelSelectId}
+              options={thinkingLevelOptions}
+              value={thinkingLevel}
+              onChange={(option) => setSelectedThinkingLevel(option.value)}
+            />
+          </Field>
+        )}
+        <Modal.ButtonRow>
+          <Button type="button" onClick={() => setIsModelSettingsOpen(false)}>
+            Done
+          </Button>
+        </Modal.ButtonRow>
+      </Modal>
       <input
         accept="application/json,.json"
         data-testid={testIds.chat.importInput}
@@ -1961,17 +2065,33 @@ export function ChatApp({
                   variant="secondary"
                   onClick={requestNewSession}
                 />
-                <Button
-                  aria-label="Open full page"
-                  disabled={isBusy}
-                  icon="external-link-alt"
-                  size="sm"
-                  title="Open full page"
-                  type="button"
-                  variant="secondary"
-                  onClick={requestOpenFullPage}
-                />
               </>
+            )}
+            {configuredModels.length > 0 && (
+              <Button
+                aria-label={modelSettingsLabel}
+                data-testid={testIds.chat.modelSelect}
+                disabled={isBusy || !hasLLMConfig}
+                fill={isSidebarVariant ? undefined : 'text'}
+                icon="sliders-v-alt"
+                size={isSidebarVariant ? 'sm' : 'md'}
+                title={modelSettingsLabel}
+                type="button"
+                variant="secondary"
+                onClick={() => setIsModelSettingsOpen(true)}
+              />
+            )}
+            {isSidebarVariant && (
+              <Button
+                aria-label="Open full page"
+                disabled={isBusy}
+                icon="external-link-alt"
+                size="sm"
+                title="Open full page"
+                type="button"
+                variant="secondary"
+                onClick={requestOpenFullPage}
+              />
             )}
             {isStreaming && !isSidebarVariant && (
               <Button
@@ -2123,19 +2243,6 @@ export function ChatApp({
             />
           </div>
           <div className={cx(styles.composerActions, isSidebarVariant && styles.composerActionsSidebar)}>
-            {configuredModels.length > 1 && (
-              <div className={styles.modelSelect} data-testid={testIds.chat.modelSelect}>
-                <Combobox
-                  aria-label="Model"
-                  disabled={isBusy || !hasLLMConfig}
-                  options={configuredModels.map((model) => ({ label: model.name, value: model.id }))}
-                  value={activeModel.id}
-                  width="auto"
-                  minWidth={14}
-                  onChange={(option) => setSelectedModelId(option.value)}
-                />
-              </div>
-            )}
             {isStreaming && (
               <Button
                 aria-label="Abort response"
@@ -3318,6 +3425,7 @@ function parseChatSessionExport(value: unknown): StoredSession {
     createdAt: normalizeDateString(value.session.createdAt),
     updatedAt: normalizeDateString(value.session.updatedAt),
     modelId: typeof value.session.modelId === 'string' ? value.session.modelId : undefined,
+    thinkingLevel: parseStoredThinkingLevel(value.session.thinkingLevel),
     messages,
     virtualJsonnetFiles: parseVirtualJsonnetFiles(value.session.virtualJsonnetFiles),
     investigationReport: parseInvestigationReport(value.session.investigationReport),
@@ -3468,6 +3576,10 @@ function isAgentMessageLike(value: unknown): value is AgentMessage {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseStoredThinkingLevel(value: unknown): PiAppThinkingLevel | undefined {
+  return value === 'off' || value === 'low' || value === 'medium' || value === 'high' ? value : undefined;
 }
 
 function normalizeSessionTitle(value: unknown) {
@@ -3944,9 +4056,6 @@ const getStyles = (theme: GrafanaTheme2) => ({
     gap: theme.spacing(1),
     flexWrap: 'wrap',
   }),
-  modelSelect: css({
-    marginRight: 'auto',
-  }),
   composerActionsSidebar: css({
     flexWrap: 'nowrap',
   }),
@@ -4019,6 +4128,12 @@ const getStyles = (theme: GrafanaTheme2) => ({
   }),
   leaveGuardModal: css({
     width: 'min(500px, calc(100vw - 32px))',
+  }),
+  modelSettingsModal: css({
+    width: 'min(440px, calc(100vw - 32px))',
+    maxHeight: 'calc(100vh - 32px)',
+    top: '50%',
+    transform: 'translateY(-50%)',
   }),
   leaveGuard: css({
     display: 'grid',

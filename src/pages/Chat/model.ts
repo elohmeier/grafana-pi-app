@@ -1,7 +1,7 @@
 import type { Model } from '@earendil-works/pi-ai';
 import type { PiAppJsonData, PiAppOpenAIProtocol, PiAppThinkingFormat, PiAppThinkingLevel } from '../../types';
 
-export type { PiAppJsonData } from '../../types';
+export type { PiAppJsonData, PiAppThinkingLevel } from '../../types';
 
 export const DEFAULT_THINKING_LEVEL: PiAppThinkingLevel = 'off';
 export const DEFAULT_THINKING_FORMAT: PiAppThinkingFormat = 'openai';

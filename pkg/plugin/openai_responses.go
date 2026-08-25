@@ -315,7 +315,7 @@ func (a *App) buildOpenAIResponsesRequest(req proxyStreamRequest, model modelSet
 		Temperature:     req.Options.Temperature,
 		MaxOutputTokens: req.Options.MaxTokens,
 	}
-	if level := normalizeThinkingLevel(model.ThinkingLevel); level != thinkingLevelOff {
+	if level := effectiveThinkingLevel(model, req.Options.Reasoning); level != thinkingLevelOff {
 		payload.Reasoning = &openAIResponsesReasoning{Effort: level, Summary: "auto"}
 		payload.Include = []string{"reasoning.encrypted_content"}
 	}

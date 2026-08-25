@@ -511,6 +511,30 @@ func TestOpenAIRequestOmitsThinkingFieldsByDefault(t *testing.T) {
 	}
 }
 
+func TestOpenAIRequestUsesRequestedThinkingLevel(t *testing.T) {
+	app := App{}
+	model := modelSettings{
+		ID:             "gpt-default",
+		ThinkingLevel:  thinkingLevelMedium,
+		ThinkingFormat: thinkingFormatOpenAI,
+	}
+
+	overridden := app.buildOpenAIChatRequest(proxyStreamRequest{
+		Context: proxyContext{Messages: []proxyMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}}},
+		Options: proxyOptions{Reasoning: thinkingLevelHigh},
+	}, model)
+	if overridden.ReasoningEffort != thinkingLevelHigh {
+		t.Fatalf("expected requested reasoning_effort high, got %q", overridden.ReasoningEffort)
+	}
+
+	disabled := app.buildOpenAIChatRequest(proxyStreamRequest{
+		Context: proxyContext{Messages: []proxyMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}}},
+	}, model)
+	if disabled.ReasoningEffort != "" {
+		t.Fatalf("expected omitted request reasoning to turn thinking off, got %q", disabled.ReasoningEffort)
+	}
+}
+
 func TestOpenAIRequestAppliesConfiguredThinkingFormat(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -568,6 +592,7 @@ func TestOpenAIRequestAppliesConfiguredThinkingFormat(t *testing.T) {
 						{Role: "user", Content: json.RawMessage(`"Hello"`)},
 					},
 				},
+				Options: proxyOptions{Reasoning: thinkingLevelMedium},
 			}, modelSettings{ID: "gpt-default", ThinkingLevel: thinkingLevelMedium, ThinkingFormat: tt.format})
 
 			tt.assert(t, payload)

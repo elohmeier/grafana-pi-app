@@ -5,9 +5,172 @@ import { testIds } from '../src/components/testIds';
 const SIDEBAR_VARIANT_ENABLED =
   process.env.PLUGIN_VARIANT_ID === 'grafana-assistant-app' ||
   (process.env.GRAFANA_URL ? new URL(process.env.GRAFANA_URL).port === '3001' : false);
+const PLUGIN_ID = process.env.E2E_PLUGIN_ID ?? 'grafana-assistant-app';
+const LLM_ROUTE = `**/api/plugins/${PLUGIN_ID}/resources/llm/api/stream`;
+
+type AppSettings = {
+  enabled: boolean;
+  pinned: boolean;
+  jsonData: {
+    models?: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+};
 
 test.describe('Assistant sidebar layout', () => {
   test.skip(!SIDEBAR_VARIANT_ENABLED, 'The extension sidebar is only available in the grafana-assistant-app variant.');
+
+  test('keeps multi-model selection in a centered settings dialog without overflowing the composer', async ({
+    page,
+  }) => {
+    const settingsResponse = await page.request.get(`/api/plugins/${PLUGIN_ID}/settings`);
+    expect(settingsResponse).toBeOK();
+    const originalSettings = (await settingsResponse.json()) as AppSettings;
+    const defaultModelName = 'Default test model';
+    const alternateModelName = 'Review model with a deliberately long display name';
+    const originalDefaultModel = originalSettings.jsonData.models?.[0] ?? {};
+    const llmRequests: Array<{ options?: { reasoning?: string } }> = [];
+    const fixtureSettings: AppSettings = {
+      enabled: originalSettings.enabled,
+      pinned: originalSettings.pinned,
+      jsonData: {
+        ...originalSettings.jsonData,
+        models: [
+          {
+            ...originalDefaultModel,
+            id: 'default-test-model',
+            name: defaultModelName,
+            default: true,
+            protocol: 'responses',
+            thinkingLevel: 'medium',
+            thinkingFormat: 'openai',
+          },
+          {
+            id: 'alternate-review-model-with-a-long-id',
+            name: alternateModelName,
+            default: false,
+            protocol: 'auto',
+            thinkingLevel: 'off',
+            thinkingFormat: 'openai',
+          },
+        ],
+      },
+    };
+    const suffix = Date.now().toString(36);
+    const dashboardUid = `assistant-model-menu-${suffix}`;
+    const dashboardTitle = `Assistant model menu ${suffix}`;
+    const thinkingPrompt = `Thinking high ${suffix}`;
+
+    await page.route(LLM_ROUTE, async (route) => {
+      llmRequests.push((await route.request().postDataJSON()) as { options?: { reasoning?: string } });
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: textResponse('Thinking override received.'),
+      });
+    });
+    await updatePluginSettings(page, fixtureSettings);
+
+    try {
+      await seedDashboard(page, dashboardUid, dashboardTitle);
+      await page.goto(`/d/${dashboardUid}/assistant-model-menu?orgId=1`);
+      await expect(page.getByRole('heading', { name: 'Sidebar layout fixture' })).toBeVisible();
+      await openAssistantSidebar(page, dashboardUid);
+
+      const container = page.getByTestId(testIds.chat.container);
+      const modelSettingsButton = container.getByTestId(testIds.chat.modelSelect);
+      const composer = container.getByTestId(testIds.chat.composer);
+      const send = container.getByTestId(testIds.chat.send);
+
+      await expect(modelSettingsButton).toBeVisible();
+      await expect(modelSettingsButton).toHaveAccessibleName(`Chat settings, current model ${defaultModelName}`);
+      await expect(container.getByRole('combobox')).toHaveCount(0);
+
+      const [containerBox, composerBox, sendBox] = await Promise.all([
+        container.boundingBox(),
+        composer.boundingBox(),
+        send.boundingBox(),
+      ]);
+      expect(containerBox).not.toBeNull();
+      expect(composerBox).not.toBeNull();
+      expect(sendBox).not.toBeNull();
+      expect(composerBox!.x + composerBox!.width).toBeLessThanOrEqual(containerBox!.x + containerBox!.width + 1);
+      expect(sendBox!.x + sendBox!.width).toBeLessThanOrEqual(containerBox!.x + containerBox!.width + 1);
+      expect(await container.evaluate((element) => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1);
+
+      await modelSettingsButton.focus();
+      await page.keyboard.press('Enter');
+      const settingsDialog = page.getByRole('dialog', { name: 'Chat settings' });
+      const modelSelect = settingsDialog.getByRole('combobox', { name: 'Model' });
+      const thinkingLevelSelect = settingsDialog.getByRole('combobox', { name: 'Thinking level' });
+      await expect(settingsDialog).toBeVisible();
+      await expect(modelSelect).toHaveValue(defaultModelName);
+      await expect(thinkingLevelSelect).toHaveValue('Medium');
+
+      const [dialogBox, viewport] = await Promise.all([
+        settingsDialog.boundingBox(),
+        Promise.resolve(page.viewportSize()),
+      ]);
+      expect(dialogBox).not.toBeNull();
+      expect(viewport).not.toBeNull();
+      expect(Math.abs(dialogBox!.x + dialogBox!.width / 2 - viewport!.width / 2)).toBeLessThanOrEqual(2);
+      expect(Math.abs(dialogBox!.y + dialogBox!.height / 2 - viewport!.height / 2)).toBeLessThanOrEqual(2);
+
+      await thinkingLevelSelect.click();
+      await thinkingLevelSelect.fill('High');
+      await page.getByRole('option').filter({ hasText: 'High' }).first().click();
+      await expect(thinkingLevelSelect).toHaveValue('High');
+
+      await settingsDialog.getByRole('button', { name: 'Done' }).click();
+      await expect(settingsDialog).toBeHidden();
+      await expect(modelSettingsButton).toBeFocused();
+
+      await composer.fill(thinkingPrompt);
+      await send.click();
+      await expect(container.getByText('Thinking override received.')).toBeVisible();
+      expect(llmRequests).toHaveLength(1);
+      expect(llmRequests[0].options?.reasoning).toBe('high');
+
+      await container.getByRole('button', { name: 'New chat' }).click();
+      await expect(container.getByRole('heading', { name: 'New chat' })).toBeVisible();
+      await modelSettingsButton.press('Enter');
+      await expect(settingsDialog).toBeVisible();
+      await expect(thinkingLevelSelect).toHaveValue('Medium');
+      await settingsDialog.getByRole('button', { name: 'Done' }).click();
+
+      await container.getByRole('button', { name: 'Sessions' }).click();
+      const sessionsMenu = page.getByRole('menu', { name: 'Assistant sessions' });
+      await sessionsMenu.getByText(thinkingPrompt, { exact: true }).click();
+      await expect(container.getByRole('heading', { name: thinkingPrompt })).toBeVisible();
+
+      await modelSettingsButton.press('Enter');
+      await expect(settingsDialog).toBeVisible();
+      await expect(thinkingLevelSelect).toHaveValue('High');
+
+      await modelSelect.click();
+      await modelSelect.fill(alternateModelName);
+      await page.getByRole('option').filter({ hasText: alternateModelName }).first().click();
+      await expect(modelSelect).toHaveValue(alternateModelName);
+      await expect(settingsDialog.getByRole('combobox', { name: 'Thinking level' })).toHaveCount(0);
+
+      await settingsDialog.getByRole('button', { name: 'Done' }).click();
+      await expect(settingsDialog).toBeHidden();
+      await expect(modelSettingsButton).toBeFocused();
+      await expect(modelSettingsButton).toHaveAccessibleName(`Chat settings, current model ${alternateModelName}`);
+
+      await modelSettingsButton.press('Enter');
+      await expect(settingsDialog).toBeVisible();
+      await expect(modelSelect).toHaveValue(alternateModelName);
+      await expect(settingsDialog.getByRole('combobox', { name: 'Thinking level' })).toHaveCount(0);
+      await page.keyboard.press('Escape');
+      await expect(settingsDialog).toBeHidden();
+      await expect(modelSettingsButton).toBeFocused();
+    } finally {
+      await page.unroute(LLM_ROUTE).catch(() => undefined);
+      await updatePluginSettings(page, originalSettings);
+      await page.request.delete(`/api/dashboards/uid/${encodeURIComponent(dashboardUid)}`).catch(() => undefined);
+    }
+  });
 
   test('keeps an imported investigation report in one collapsible reading column', async ({ page }, testInfo) => {
     const suffix = Date.now().toString(36);
@@ -133,10 +296,43 @@ async function seedDashboard(page: Page, uid: string, title: string) {
   expect(response).toBeOK();
 }
 
+async function updatePluginSettings(page: Page, settings: AppSettings) {
+  const response = await page.request.post(`/api/plugins/${PLUGIN_ID}/settings`, {
+    data: settings,
+  });
+  expect(response).toBeOK();
+}
+
+function textResponse(text: string) {
+  const events = [
+    { type: 'start' },
+    { type: 'text_start', contentIndex: 0 },
+    { type: 'text_delta', contentIndex: 0, delta: text },
+    { type: 'text_end', contentIndex: 0 },
+    {
+      type: 'done',
+      reason: 'stop',
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    },
+  ];
+  return events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
+}
+
 async function openAssistantSidebar(page: Page, dashboardUid: string) {
   const locators = [
-    page.getByRole('button', { name: /^Open Assistant$/ }).first(),
-    page.locator('[aria-label="Open Assistant"], [title="Open Assistant"]').first(),
+    page.getByRole('button', { name: /^Open (Grafana )?Assistant$/ }).first(),
+    page
+      .locator(
+        '[aria-label="Open Assistant"], [title="Open Assistant"], [aria-label="Open Grafana Assistant"], [title="Open Grafana Assistant"]'
+      )
+      .first(),
   ];
 
   for (const locator of locators) {

@@ -264,12 +264,12 @@ func (a *App) buildOpenAIChatRequest(req proxyStreamRequest, model modelSettings
 		Temperature:   req.Options.Temperature,
 		MaxTokens:     req.Options.MaxTokens,
 	}
-	applyThinkingOptions(&payload, model)
+	applyThinkingOptions(&payload, model, req.Options.Reasoning)
 	return payload
 }
 
-func applyThinkingOptions(payload *openAIChatRequest, model modelSettings) {
-	level := normalizeThinkingLevel(model.ThinkingLevel)
+func applyThinkingOptions(payload *openAIChatRequest, model modelSettings, requestedLevel string) {
+	level := effectiveThinkingLevel(model, requestedLevel)
 	if level == thinkingLevelOff {
 		return
 	}
@@ -282,6 +282,13 @@ func applyThinkingOptions(payload *openAIChatRequest, model modelSettings) {
 	default:
 		payload.ReasoningEffort = level
 	}
+}
+
+func effectiveThinkingLevel(model modelSettings, requestedLevel string) string {
+	if normalizeThinkingLevel(model.ThinkingLevel) == thinkingLevelOff {
+		return thinkingLevelOff
+	}
+	return normalizeThinkingLevel(requestedLevel)
 }
 
 func (a *App) effectiveSystemPrompt(systemPrompt string) string {
