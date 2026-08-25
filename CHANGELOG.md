@@ -1,3 +1,10 @@
+# [3.1.0](https://github.com/elohmeier/grafana-pi-app/compare/v3.0.0...v3.1.0) (2026-08-25)
+
+
+### Features
+
+* add per-chat model and thinking settings ([c6e6ea0](https://github.com/elohmeier/grafana-pi-app/commit/c6e6ea0d67f0b93ca22fec427531587a9f1a52f4))
+
 # [3.0.0](https://github.com/elohmeier/grafana-pi-app/compare/v2.18.3...v3.0.0) (2026-08-20)
 
 

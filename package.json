@@ -1,6 +1,6 @@
 {
   "name": "g42-pi-app",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "scripts": {
     "generate:skills": "node scripts/generate-bundled-skills.mjs",
     "frontend:build": "npm run generate:skills && webpack -c ./webpack.config.ts --env production",
