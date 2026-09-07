@@ -118,18 +118,27 @@ type openAIStreamChunk struct {
 }
 
 type openAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int `json:"prompt_tokens"`
+	CompletionTokens    int `json:"completion_tokens"`
+	TotalTokens         int `json:"total_tokens"`
+	PromptTokensDetails struct {
+		CachedTokens     int `json:"cached_tokens"`
+		CacheWriteTokens int `json:"cache_write_tokens"`
+	} `json:"prompt_tokens_details"`
+	CompletionTokensDetails struct {
+		ReasoningTokens *int `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
 }
 
 type proxyUsage struct {
-	Input       int            `json:"input"`
-	Output      int            `json:"output"`
-	CacheRead   int            `json:"cacheRead"`
-	CacheWrite  int            `json:"cacheWrite"`
-	TotalTokens int            `json:"totalTokens"`
-	Cost        map[string]int `json:"cost"`
+	Reported        bool           `json:"reported"`
+	ReasoningTokens *int           `json:"reasoningTokens,omitempty"`
+	Input           int            `json:"input"`
+	Output          int            `json:"output"`
+	CacheRead       int            `json:"cacheRead"`
+	CacheWrite      int            `json:"cacheWrite"`
+	TotalTokens     int            `json:"totalTokens"`
+	Cost            map[string]int `json:"cost"`
 }
 
 type streamedToolCall struct {
@@ -634,13 +643,24 @@ func (w proxyEventWriter) write(event map[string]interface{}) error {
 }
 
 func usageFromOpenAI(usage *openAIUsage) proxyUsage {
+	if usage == nil {
+		return zeroUsage()
+	}
+	// Cache tokens are subsets of prompt tokens; reasoning is a subset of output.
+	input := max(0, usage.PromptTokens-usage.PromptTokensDetails.CachedTokens-usage.PromptTokensDetails.CacheWriteTokens)
+	total := usage.TotalTokens
+	if total == 0 {
+		total = usage.PromptTokens + usage.CompletionTokens
+	}
 	return proxyUsage{
-		Input:       usage.PromptTokens,
-		Output:      usage.CompletionTokens,
-		CacheRead:   0,
-		CacheWrite:  0,
-		TotalTokens: usage.TotalTokens,
-		Cost:        zeroCost(),
+		Reported:        true,
+		ReasoningTokens: usage.CompletionTokensDetails.ReasoningTokens,
+		Input:           input,
+		Output:          usage.CompletionTokens,
+		CacheRead:       usage.PromptTokensDetails.CachedTokens,
+		CacheWrite:      usage.PromptTokensDetails.CacheWriteTokens,
+		TotalTokens:     total,
+		Cost:            zeroCost(),
 	}
 }
 

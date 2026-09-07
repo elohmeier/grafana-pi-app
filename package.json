@@ -18,6 +18,8 @@
     "lint:fix": "npm run lint -- --fix && prettier --write --list-different .",
     "e2e": "playwright test",
     "benchmark:agent": "node scripts/benchmark-agent.mjs",
+    "benchmark:run": "node scripts/benchmark-run.mjs",
+    "benchmark:test": "node --test scripts/benchmarks/*.test.mjs",
     "benchmark:analysis": "node scripts/benchmark-analysis.mjs",
     "benchmark:artifact-jq": "node scripts/benchmark-artifact-jq.mjs",
     "benchmark:robust-dashboard": "node scripts/benchmark-robust-dashboard.mjs",

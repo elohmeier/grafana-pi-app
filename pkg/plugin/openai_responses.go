@@ -114,8 +114,12 @@ type openAIResponsesUsage struct {
 	OutputTokens       int `json:"output_tokens"`
 	TotalTokens        int `json:"total_tokens"`
 	InputTokensDetails struct {
-		CachedTokens int `json:"cached_tokens"`
+		CachedTokens     int `json:"cached_tokens"`
+		CacheWriteTokens int `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
+	OutputTokensDetails struct {
+		ReasoningTokens *int `json:"reasoning_tokens"`
+	} `json:"output_tokens_details"`
 }
 
 type openAIResponsesError struct {
@@ -700,17 +704,23 @@ func usageFromOpenAIResponses(usage *openAIResponsesUsage) proxyUsage {
 	if usage == nil {
 		return zeroUsage()
 	}
-	input := usage.InputTokens - usage.InputTokensDetails.CachedTokens
+	input := usage.InputTokens - usage.InputTokensDetails.CachedTokens - usage.InputTokensDetails.CacheWriteTokens
 	if input < 0 {
 		input = 0
 	}
+	total := usage.TotalTokens
+	if total == 0 {
+		total = usage.InputTokens + usage.OutputTokens
+	}
 	return proxyUsage{
-		Input:       input,
-		Output:      usage.OutputTokens,
-		CacheRead:   usage.InputTokensDetails.CachedTokens,
-		CacheWrite:  0,
-		TotalTokens: usage.TotalTokens,
-		Cost:        zeroCost(),
+		Reported:        true,
+		ReasoningTokens: usage.OutputTokensDetails.ReasoningTokens,
+		Input:           input,
+		Output:          usage.OutputTokens,
+		CacheRead:       usage.InputTokensDetails.CachedTokens,
+		CacheWrite:      usage.InputTokensDetails.CacheWriteTokens,
+		TotalTokens:     total,
+		Cost:            zeroCost(),
 	}
 }
 

@@ -277,6 +277,15 @@ llama-server -hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL \
 
 Use a recent llama.cpp build with `draft-mtp` support; older `llama-server` builds reject that `--spec-type` value or fail to load the MTP GGUF.
 
+To run all benchmark cases for one model/hosting/thinking configuration and save a versioned JSON result with token usage and latency, use:
+
+```bash
+npm run benchmark:run -- --config benchmarks/qwen-local.example.json --dry-run
+npm run benchmark:run -- --config benchmarks/qwen-local.example.json
+```
+
+See [model comparison runs](benchmarks/README.md) for profiles, repetitions, usage semantics, artifacts, and comparison guidance. With the model server already running, the comparison runner prepares Grafana and seeds data as needed, preserving existing volumes. `--prepare` forces fresh isolated fixtures; `--reuse-stack` skips preparation. Starting a configured local model server requires the explicit `--start-model-server` flag.
+
 Run the local agent benchmark against the configured llama-server with:
 
 ```bash

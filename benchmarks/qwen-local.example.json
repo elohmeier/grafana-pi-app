@@ -1,0 +1,45 @@
+{
+  "label": "qwen3.6-local-thinking",
+  "model": {
+    "id": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL",
+    "provider": "llama.cpp",
+    "baseUrl": "http://host.docker.internal:8080/v1",
+    "protocol": "chat-completions",
+    "thinkingLevel": "medium",
+    "thinkingFormat": "qwen-chat-template"
+  },
+  "hosting": {
+    "label": "local-llama-server",
+    "hardware": "fill in CPU/GPU and memory",
+    "quantization": "UD-Q4_K_XL",
+    "serverVersion": "fill in llama.cpp revision",
+    "serverArgs": "copy the actual launch arguments here"
+  },
+  "repetitions": 1,
+  "notes": "Thinking enabled (binary qwen-chat-template). Model server is managed externally by default; --start-model-server explicitly opts into runner ownership. Grafana and fixture data are prepared as needed. No excluded warmup.",
+  "localServer": {
+    "command": "llama-server",
+    "args": [
+      "-hf",
+      "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "8080",
+      "--temp",
+      "1.0",
+      "--top-p",
+      "0.95",
+      "--top-k",
+      "20",
+      "--presence-penalty",
+      "1.5",
+      "--min-p",
+      "0.00",
+      "--spec-type",
+      "draft-mtp",
+      "--spec-draft-n-max",
+      "2"
+    ]
+  }
+}

@@ -305,20 +305,11 @@ async function seedAlertRule(
 }
 
 async function openAssistantSidebar(page: Page, dashboardUid: string) {
-  const locators = [
-    page.getByRole('button', { name: /^Open Assistant$/ }).first(),
-    page.locator('[aria-label="Open Assistant"], [title="Open Assistant"]').first(),
-  ];
-
-  for (const locator of locators) {
-    if (await locator.isVisible({ timeout: 1500 }).catch(() => false)) {
-      await locator.click();
-      await expect(page).toHaveURL(new RegExp(`/d/${escapeRegExp(dashboardUid)}/`));
-      return;
-    }
-  }
-
-  throw new Error('Could not find the Assistant sidebar trigger on the dashboard page.');
+  await page
+    .getByRole('button', { name: /^Open (?:Grafana )?Assistant$/ })
+    .first()
+    .click();
+  await expect(page).toHaveURL(new RegExp(`/d/${escapeRegExp(dashboardUid)}/`));
 }
 
 async function installBenchmarkRecorder(page: Page) {
