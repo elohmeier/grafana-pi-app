@@ -1,3 +1,10 @@
+## [3.2.1](https://github.com/elohmeier/grafana-pi-app/compare/v3.2.0...v3.2.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* build reload artifacts for Docker engine architecture ([4d19baa](https://github.com/elohmeier/grafana-pi-app/commit/4d19baac3f0f176e2d2d9e64a529789b996cc9ca))
+
 # [3.2.0](https://github.com/elohmeier/grafana-pi-app/compare/v3.1.0...v3.2.0) (2026-09-07)
 
 
