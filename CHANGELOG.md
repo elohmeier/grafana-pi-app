@@ -1,3 +1,10 @@
+# [3.2.0](https://github.com/elohmeier/grafana-pi-app/compare/v3.1.0...v3.2.0) (2026-09-07)
+
+
+### Features
+
+* add model comparison benchmark runner ([de8570b](https://github.com/elohmeier/grafana-pi-app/commit/de8570baca84d4bea1d7d46dc4397d67702a7d6a))
+
 # [3.1.0](https://github.com/elohmeier/grafana-pi-app/compare/v3.0.0...v3.1.0) (2026-08-25)
 
 
