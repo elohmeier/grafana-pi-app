@@ -33,6 +33,8 @@
     "benchmark:agent-contract-sample": "node scripts/benchmark-agent-contract-sample.mjs",
     "benchmark:explore-metrics": "node scripts/benchmark-explore-metrics.mjs",
     "dev:import:skills": "node scripts/sync-dev-plugin-provisioning.mjs",
+    "dev:model": "node scripts/configure-pi-model.mjs",
+    "dev:model:test": "node --test scripts/configure-pi-model.test.mjs",
     "dev:seed:samples": "node scripts/seed-dev-samples.mjs",
     "dev:import:dashboard": "node scripts/import-dashboard.mjs",
     "dev:import:dashboards": "node scripts/import-dashboards.mjs",
