@@ -1,8 +1,21 @@
+[tasks."dev:build:backend:docker"]
+description = "Build the backend for the Docker engine's architecture."
+hide = true
+run = '''
+docker_arch=$(docker info --format '{% raw %}{{.Architecture}}{% endraw %}')
+case "$docker_arch" in
+  amd64|x86_64) backend_arch=amd64 ;;
+  arm64|aarch64) backend_arch=arm64 ;;
+  *) echo "Unsupported Docker engine architecture: $docker_arch" >&2; exit 1 ;;
+esac
+npm run "backend:build:linux-$backend_arch"
+'''
+
 [tasks."dev:reload"]
 description = "Rebuild frontend/backend plugin artifacts and start or reload the local Docker stack."
 run = [
   "npm run build",
-  "npm run backend:build:linux-arm64",
+  "mise run dev:build:backend:docker",
   "docker compose up -d --build --remove-orphans",
   "docker compose restart grafana",
 ]
@@ -11,7 +24,7 @@ run = [
 description = "Build the grafana-assistant-app variant and start or reload the local Docker stack on port 3001."
 run = [
   "npm run build:variant",
-  "GRAFANA_PLUGIN_ID=grafana-assistant-app npm run backend:build:linux-arm64",
+  "GRAFANA_PLUGIN_ID=grafana-assistant-app mise run dev:build:backend:docker",
   "docker compose --profile assistant-variant up -d --build --remove-orphans grafana-assistant-variant",
   "docker compose restart grafana-assistant-variant",
 ]
