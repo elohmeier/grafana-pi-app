@@ -19,12 +19,18 @@ test('full CLI retains failed cases, continues serial scenarios and repetitions,
     await copyFile(new URL('../benchmark-run.mjs', import.meta.url), path.join(directory, 'scripts/benchmark-run.mjs'));
     await copyFile(new URL('./core.mjs', import.meta.url), path.join(directory, 'scripts/benchmarks/core.mjs'));
     await copyFile(new URL('./prepare.mjs', import.meta.url), path.join(directory, 'scripts/benchmarks/prepare.mjs'));
+    await copyFile(new URL('./profile.mjs', import.meta.url), path.join(directory, 'scripts/benchmarks/profile.mjs'));
+    await copyFile(
+      new URL('../configure-pi-model.mjs', import.meta.url),
+      path.join(directory, 'scripts/configure-pi-model.mjs')
+    );
     await writeFile(
       path.join(directory, 'config.json'),
       JSON.stringify({
         label: 'test',
         model: { id: 'mock', provider: 'mock', baseUrl: 'http://model.invalid/v1' },
         hosting: { label: 'mock' },
+        apiKeyPi: 'models.json',
         repetitions: 2,
         suites: ['agent'],
       })
@@ -35,6 +41,7 @@ test('full CLI retains failed cases, continues serial scenarios and repetitions,
 const fs = require('node:fs');
 const path = require('node:path');
 const listing = process.argv.includes('--list');
+if (!listing && process.env.OPENAI_API_KEY !== 'private-test-key') throw new Error('Pi key was not passed to the benchmark');
 const failed = process.argv.some(arg => arg.endsWith(':10'));
 const specs = (listing ? [10, 20] : [failed ? 10 : 20]).map(line => ({
   title: 'case ' + line, file: 'agentBenchmark.spec.ts', line,
@@ -45,21 +52,38 @@ if (!listing) fs.writeFileSync(path.join(process.env.BENCH_CASE_DIR, 'capture.js
 process.exitCode = failed ? 1 : 0;
 `
     );
-    const result = await new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, ['scripts/benchmark-run.mjs', '--config', 'config.json', '--reuse-stack'], {
-        cwd: directory,
-        env: { ...process.env, GRAFANA_URL: `http://127.0.0.1:${server.address().port}` },
-        stdio: ['ignore', 'pipe', 'pipe'],
+    const runCli = (args) =>
+      new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, ['scripts/benchmark-run.mjs', '--config', 'config.json', ...args], {
+          cwd: directory,
+          env: { ...process.env, GRAFANA_URL: `http://127.0.0.1:${server.address().port}` },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let output = '';
+        child.stdout.on('data', (chunk) => (output += chunk));
+        child.stderr.on('data', (chunk) => (output += chunk));
+        child.on('error', reject);
+        child.on('close', (code) => resolve({ code, output }));
       });
-      let output = '';
-      child.stdout.on('data', (chunk) => (output += chunk));
-      child.stderr.on('data', (chunk) => (output += chunk));
-      child.on('error', reject);
-      child.on('close', (code) => resolve({ code, output }));
-    });
+    // The referenced Pi file does not exist yet: planning must not even read it.
+    const preview = await runCli(['--dry-run']);
+    assert.equal(preview.code, 0, preview.output);
+    const runsDirectory = path.join(directory, 'artifacts/benchmark-runs');
+    const [plannedId] = await readdir(runsDirectory);
+    const planned = JSON.parse(await readFile(path.join(runsDirectory, plannedId, 'run.json')));
+    assert.equal(planned.status, 'planned');
+    await writeFile(
+      path.join(directory, 'models.json'),
+      JSON.stringify({
+        providers: { mock: { apiKey: '!printf private-test-key', models: [{ id: 'mock' }] } },
+      })
+    );
+    const result = await runCli(['--reuse-stack']);
     assert.equal(result.code, 1, result.output);
-    const [id] = await readdir(path.join(directory, 'artifacts/benchmark-runs'));
+    assert.ok(!result.output.includes('private-test-key'));
+    const id = (await readdir(runsDirectory)).find((id) => id !== plannedId);
     const run = JSON.parse(await readFile(path.join(directory, 'artifacts/benchmark-runs', id, 'run.json')));
+    assert.ok(!JSON.stringify(run).includes('private-test-key'));
     assert.equal(run.schemaVersion, 1);
     assert.deepEqual(
       run.cases.map((entry) => entry.status),

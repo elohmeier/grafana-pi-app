@@ -12,6 +12,39 @@ import { isDeepStrictEqual, parseArgs } from 'node:util';
 const protocols = { 'openai-completions': 'chat-completions', 'openai-responses': 'responses' };
 const expandHome = (value) => (value.startsWith('~/') ? path.join(os.homedir(), value.slice(2)) : value);
 
+export const piModelOptions = {
+  list: { type: 'boolean' },
+  provider: { type: 'string' },
+  model: { type: 'string' },
+  'models-file': { type: 'string' },
+  'base-url': { type: 'string' },
+  'api-key-env': { type: 'string' },
+  thinking: { type: 'string' },
+  'thinking-format': { type: 'string' },
+};
+
+export function piModelsFile(modelsFile, env = process.env) {
+  const file = modelsFile ?? path.join(env.PI_CODING_AGENT_DIR ?? '~/.pi/agent', 'models.json');
+  return file.startsWith('~/') ? file : path.resolve(file);
+}
+
+export async function readPiModels(modelsFile, env = process.env) {
+  const file = expandHome(piModelsFile(modelsFile, env));
+  try {
+    return JSON.parse(await readFile(file, 'utf8'));
+  } catch {
+    throw new Error(`Cannot read valid Pi model JSON from ${file}.`);
+  }
+}
+
+export function printModels(config) {
+  for (const { provider, settings, model } of listModels(config)) {
+    console.log(
+      `${provider}\t${model.id}\t${model.api ?? settings.api ?? 'unspecified API'}\t${model.name ?? model.id}`
+    );
+  }
+}
+
 export function listModels(config) {
   if (!config?.providers || typeof config.providers !== 'object' || Array.isArray(config.providers)) {
     throw new Error('Expected a Pi models.json object with providers.');
@@ -187,14 +220,7 @@ export async function configureGrafana(grafanaUrl, pluginId, configuration, apiK
 async function main() {
   const { values } = parseArgs({
     options: {
-      list: { type: 'boolean' },
-      provider: { type: 'string' },
-      model: { type: 'string' },
-      'models-file': { type: 'string' },
-      'base-url': { type: 'string' },
-      'api-key-env': { type: 'string' },
-      thinking: { type: 'string' },
-      'thinking-format': { type: 'string' },
+      ...piModelOptions,
       'dry-run': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
@@ -208,6 +234,7 @@ Selects one default model, replacing Grafana's model list and shared endpoint/ke
 Options: --models-file PATH, --thinking off|low|medium|high,
          --thinking-format openai|qwen|qwen-chat-template,
          --base-url URL (also disables Docker loopback rewriting), --api-key-env NAME.
+Create a benchmark JSON profile with npm run benchmark:profile -- --provider NAME --model ID.
 Target: GRAFANA_URL=http://localhost:3001, E2E_PLUGIN_ID=grafana-assistant-app.
 Auth: GRAFANA_USER/GRAFANA_PASSWORD (admin/admin), or GRAFANA_TOKEN.
 Preview/list never resolve API keys, execute Pi key commands, or contact Grafana.
@@ -218,21 +245,9 @@ The model server must already be running; Grafana provisioning can overwrite thi
   if (existsSync(envPath)) {
     loadEnvFile(envPath);
   }
-  const file = expandHome(
-    values['models-file'] ?? path.join(expandHome(process.env.PI_CODING_AGENT_DIR ?? '~/.pi/agent'), 'models.json')
-  );
-  let config;
-  try {
-    config = JSON.parse(await readFile(file, 'utf8'));
-  } catch {
-    throw new Error(`Cannot read valid Pi model JSON from ${file}.`);
-  }
+  const config = await readPiModels(values['models-file']);
   if (values.list || (!values.provider && !values.model)) {
-    for (const { provider, settings, model } of listModels(config)) {
-      console.log(
-        `${provider}\t${model.id}\t${model.api ?? settings.api ?? 'unspecified API'}\t${model.name ?? model.id}`
-      );
-    }
+    printModels(config);
     return;
   }
   const selected = selectModel(config, values);

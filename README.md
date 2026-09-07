@@ -277,7 +277,19 @@ llama-server -hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL \
 
 Use a recent llama.cpp build with `draft-mtp` support; older `llama-server` builds reject that `--spec-type` value or fail to load the MTP GGUF.
 
-To run all benchmark cases for one model/hosting/thinking configuration and save a versioned JSON result with token usage and latency, use:
+To generate a benchmark profile from a model already configured in Pi, reuse the provider/model IDs from `dev:model -- --list`:
+
+```bash
+npm run dev:model -- --list
+npm run benchmark:profile -- --provider azure-qwen --model qwen--qwen3.8-27b \
+  --region westeurope --output benchmarks/qwen38-azure.json
+npm run benchmark:run -- --config benchmarks/qwen38-azure.json --dry-run
+npm run benchmark:run -- --config benchmarks/qwen38-azure.json
+```
+
+Generate and run each model's profile manually in turn. The generator imports the endpoint, protocol, and supported thinking settings, and references Pi credentials for resolution at run time. `--thinking`, `--repetitions`, and hosting metadata flags customize the profile; `--api-key-env NAME` selects separate credentials. Profile creation and dry runs never resolve keys or call the model. Applying `dev:model` beforehand is unnecessary: the benchmark runner configures Grafana during preparation.
+
+To run all benchmark cases for one model/hosting/thinking configuration and save a versioned JSON result with token usage and latency, you can also use the local example:
 
 ```bash
 npm run benchmark:run -- --config benchmarks/qwen-local.example.json --dry-run

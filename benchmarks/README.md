@@ -6,7 +6,39 @@ The initial catalog contains 12 suites and 15 cases. The batch-editing command i
 
 ## Running
 
-Copy [qwen-local.example.json](qwen-local.example.json), fill in the hosting details, and set the exact model ID accepted by your endpoint. Model labels are descriptive; they are not a model registry.
+For models already configured in Pi, generate a profile using the same selection as `npm run dev:model`. For example:
+
+```bash
+npm run dev:model -- --list
+
+# Create one profile from Pi's endpoint, API and thinking compatibility settings.
+npm run benchmark:profile -- \
+  --provider azure-qwen --model qwen--qwen3.8-27b \
+  --thinking medium --region westeurope \
+  --label qwen3.8-27b-azure-medium --output benchmarks/qwen38-azure.json
+
+# Inspect the cases, then run this model when ready.
+npm run benchmark:run -- --config benchmarks/qwen38-azure.json --dry-run
+npm run benchmark:run -- --config benchmarks/qwen38-azure.json
+
+# Generate the next profile and run it separately.
+npm run benchmark:profile -- \
+  --provider azure --model gpt-5.6-sol-grafana \
+  --region westeurope --output benchmarks/sol-azure.json
+npm run benchmark:run -- --config benchmarks/sol-azure.json
+```
+
+You do not need to apply `dev:model` first: normal benchmark preparation configures Grafana from the profile. Run one profile at a time. `benchmark:profile -- --list` shows the same models as `dev:model -- --list`.
+
+Profile generation reads `~/.pi/agent/models.json`, or `PI_CODING_AGENT_DIR/models.json`, with `--models-file PATH` as an override. It reuses `dev:model`'s protocol mapping, supported thinking settings, compatibility validation, and Docker loopback URL rewriting. Use `--thinking`, `--thinking-format`, or `--base-url` for explicit overrides. Unsupported APIs, OAuth, and custom headers are rejected as they are by `dev:model`.
+
+The default filename is `benchmarks/<provider>-<model>-<thinking>.json`, with filename-unsafe characters replaced by `-`. Existing files are never overwritten. `--dry-run` prints the profile without writing it. Creating, listing, and previewing profiles never resolve credentials, execute Pi key commands, or contact Grafana or the model endpoint.
+
+Generated profiles default to one repetition, all suites, the provider as the hosting label, and `unknown` region/service tier. Set `--repetitions N`, `--suites agent,analysis`, `--hosting-label`, `--region`, `--service-tier`, `--label`, and `--notes` as needed. Hosting details are descriptive; region and tier are not inferred from the endpoint. Edit the resulting JSON for further workload or local-server options.
+
+By default, `apiKeyPi` records the Pi models file path. At the start of an actual benchmark run, the runner looks up the profile's exact provider/model and resolves its current provider key using the same literal, environment interpolation, and trusted `!command` handling as `dev:model`. The key is passed through the existing provisioning environment and is not copied into the profile or run metadata. Model/endpoint/thinking settings remain fixed in the generated profile; regenerate it to pick up Pi configuration changes. A benchmark `--dry-run` does not read the referenced Pi file or resolve its credentials. Use `--api-key-env BENCHMARK_PROVIDER_API_KEY` when generating a profile to use a separate environment variable instead.
+
+Alternatively, copy [qwen-local.example.json](qwen-local.example.json), fill in the hosting details, and set the exact model ID accepted by your endpoint. Model labels are descriptive; they are not a model registry.
 
 ```bash
 # Inspect all selected cases and write a planned run.json without contacting Grafana or an LLM.
@@ -68,7 +100,7 @@ A hosted profile has this structure (replace the placeholder model and hosting v
 }
 ```
 
-`apiKeyEnv` names an environment variable; its value is never copied into the run metadata. During preparation, it becomes the plugin's `secureJsonData` key through the existing provisioning flow. Keep credentials out of JSON profiles, hosting metadata, URLs, and server arguments. Profiles and their public metadata are copied into the result. Full scenario artifacts contain prompts, answers, and Grafana data.
+`apiKeyEnv` names an environment variable; alternatively, `apiKeyPi` names a Pi models JSON file, for example `"apiKeyPi": "~/.pi/agent/models.json"`. Choose only one. Pi authentication uses `model.provider` and `model.id` to select the key source; paths beginning with `~/` expand to your home directory, and relative paths resolve from the repository root. Generated profiles preserve custom models file locations as absolute paths (or `~/` paths). Credential values are never copied into the run metadata. During preparation, the resolved key becomes the plugin's `secureJsonData` key through the existing provisioning flow. Keep credentials out of JSON profiles, hosting metadata, URLs, and server arguments. Profiles and their public metadata are copied into the result. Full scenario artifacts contain prompts, answers, and Grafana data.
 
 Optional `localServer` provides a trusted local startup command and argument array, as shown in the Qwen example. `startTimeoutMs` defaults to 900000. The runner probes `/models` and checks the requested ID. With `--start-model-server`, it starts the command if no ready server exists and waits for readiness; otherwise it reports the missing server without launching anything. It does not replace an existing server that advertises a different model. For hosted endpoints, omit `localServer`. `hosting.serverArgs` is descriptive metadata; executable launch settings belong in `localServer.args`.
 

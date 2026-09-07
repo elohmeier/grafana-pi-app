@@ -41,7 +41,7 @@ export function validateConfig(value) {
       throw new Error(`model.${field} must be one of ${choices.join(', ')}`);
     }
   }
-  // Copy only declared fields. Credentials belong in an environment variable.
+  // Copy only declared fields. Credentials stay in environment variables or Pi's config.
   const allowedModel = ['id', 'provider', 'baseUrl', 'protocol', 'thinkingLevel', 'thinkingFormat'];
   for (const key of Object.keys(config.model)) {
     if (!allowedModel.includes(key)) {
@@ -56,6 +56,7 @@ export function validateConfig(value) {
         'hosting',
         'localServer',
         'apiKeyEnv',
+        'apiKeyPi',
         'repetitions',
         'suites',
         'timeoutMs',
@@ -78,8 +79,17 @@ export function validateConfig(value) {
       throw new Error('localServer.startTimeoutMs must be a positive integer');
     }
   }
-  if (config.apiKeyEnv && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.apiKeyEnv)) {
-    throw new Error('Invalid apiKeyEnv');
+  if (config.apiKeyEnv !== undefined) {
+    required(config.apiKeyEnv, 'apiKeyEnv');
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.apiKeyEnv)) {
+      throw new Error('Invalid apiKeyEnv');
+    }
+  }
+  if (config.apiKeyPi !== undefined) {
+    required(config.apiKeyPi, 'apiKeyPi');
+    if (config.apiKeyEnv !== undefined) {
+      throw new Error('Use either apiKeyEnv or apiKeyPi');
+    }
   }
   config.repetitions ??= 1;
   for (const key of ['repetitions', 'timeoutMs']) {

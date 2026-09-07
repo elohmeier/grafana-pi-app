@@ -8,6 +8,7 @@ import path from 'node:path';
 import process, { loadEnvFile } from 'node:process';
 import { parseArgs } from 'node:util';
 import { ensureModelServer, prepareFixtureEnvironment, inspectPreparedStack } from './benchmarks/prepare.mjs';
+import { resolveBenchmarkApiKey } from './benchmarks/profile.mjs';
 import {
   suites,
   validateConfig,
@@ -64,12 +65,6 @@ Object.assign(env, {
   BENCH_LLM_BASE_URL: config.model.baseUrl,
   BENCH_EXPECTED_MODEL: JSON.stringify(config.model),
 });
-if (config.apiKeyEnv && !values['dry-run']) {
-  if (!process.env[config.apiKeyEnv]) {
-    throw new Error(`Missing API key environment variable: ${config.apiKeyEnv}`);
-  }
-  env.OPENAI_API_KEY = process.env[config.apiKeyEnv];
-}
 const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
 const directory = path.resolve(values.output, id);
 await mkdir(directory, { recursive: true });
@@ -142,6 +137,10 @@ try {
       );
     }
     await lock.writeFile(JSON.stringify({ pid: process.pid, directory }));
+    const apiKey = await resolveBenchmarkApiKey(config);
+    if (apiKey !== undefined) {
+      env.OPENAI_API_KEY = apiKey;
+    }
   }
   const discoveryPath = path.join(directory, 'discovery.json');
   const discovery = await command(
