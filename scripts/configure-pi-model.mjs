@@ -106,8 +106,8 @@ export function modelConfiguration({ settings, model }, options = {}) {
   const reasoningEffortUnsupported =
     protocol === 'chat-completions' && thinkingFormat === 'openai' && compat.supportsReasoningEffort === false;
   const thinkingLevel = options.thinking ?? (model.reasoning && !reasoningEffortUnsupported ? 'medium' : 'off');
-  if (!['off', 'low', 'medium', 'high'].includes(thinkingLevel)) {
-    throw new Error('--thinking must be off, low, medium, or high.');
+  if (!['off', 'low', 'medium', 'high', 'xhigh'].includes(thinkingLevel)) {
+    throw new Error('--thinking must be off, low, medium, high, or xhigh.');
   }
   if (thinkingLevel !== 'off' && (model.reasoning === false || reasoningEffortUnsupported)) {
     throw new Error(
@@ -231,7 +231,7 @@ async function main() {
 
 Reads ~/.pi/agent/models.json (or PI_CODING_AGENT_DIR/models.json).
 Selects one default model, replacing Grafana's model list and shared endpoint/key.
-Options: --models-file PATH, --thinking off|low|medium|high,
+Options: --models-file PATH, --thinking off|low|medium|high|xhigh,
          --thinking-format openai|qwen|qwen-chat-template,
          --base-url URL (also disables Docker loopback rewriting), --api-key-env NAME.
 Create a benchmark JSON profile with npm run benchmark:profile -- --provider NAME --model ID.

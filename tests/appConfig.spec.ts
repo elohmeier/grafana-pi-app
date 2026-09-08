@@ -189,7 +189,7 @@ function readThinkingFormat(value: string | undefined): PiAppThinkingFormat {
 }
 
 function isThinkingLevel(value: string | undefined): value is PiAppThinkingLevel {
-  return value === 'off' || value === 'low' || value === 'medium' || value === 'high';
+  return value === 'off' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh';
 }
 
 function isThinkingFormat(value: string | undefined): value is PiAppThinkingFormat {
@@ -207,6 +207,7 @@ const thinkingLevelLabels: Record<PiAppThinkingLevel, string> = {
   low: 'Low',
   medium: 'Medium',
   high: 'High',
+  xhigh: 'Extra high',
 };
 
 const thinkingFormatLabels: Record<PiAppThinkingFormat, string> = {

@@ -71,6 +71,7 @@ const (
 	thinkingLevelLow    = "low"
 	thinkingLevelMedium = "medium"
 	thinkingLevelHigh   = "high"
+	thinkingLevelXHigh  = "xhigh"
 
 	thinkingFormatOpenAI           = "openai"
 	thinkingFormatQwen             = "qwen"
@@ -235,7 +236,7 @@ func normalizeOpenAIProtocol(value string) string {
 
 func normalizeThinkingLevel(value string) string {
 	switch value {
-	case thinkingLevelLow, thinkingLevelMedium, thinkingLevelHigh:
+	case thinkingLevelLow, thinkingLevelMedium, thinkingLevelHigh, thinkingLevelXHigh:
 		return value
 	default:
 		return thinkingLevelOff

@@ -71,15 +71,16 @@ describe('createOpenAICompatibleModel', () => {
 
   it('enables OpenAI-compatible reasoning metadata when configured', () => {
     const [configured] = getConfiguredModels({
-      models: [{ id: 'gpt-4.1', thinkingLevel: 'medium', thinkingFormat: 'openai' }],
+      models: [{ id: 'gpt-4.1', thinkingLevel: 'xhigh', thinkingFormat: 'openai' }],
     });
     const model = createOpenAICompatibleModel({}, configured);
 
+    expect(configured.thinkingLevel).toBe('xhigh');
     expect(model.reasoning).toBe(true);
     if (model.api !== 'openai-completions') {
       throw new Error('expected Chat Completions model');
     }
-    expect(model.thinkingLevelMap?.medium).toBe('medium');
+    expect(model.thinkingLevelMap?.xhigh).toBe('xhigh');
     expect(model.compat?.thinkingFormat).toBe('openai');
     expect(model.compat?.supportsReasoningEffort).toBe(true);
   });

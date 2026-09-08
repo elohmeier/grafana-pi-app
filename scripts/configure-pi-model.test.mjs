@@ -81,7 +81,7 @@ test('rejects incompatible transports, headers, thinking mappings and secret-bea
     () => modelConfiguration({ settings, model: { ...model, thinkingLevelMap: { off: null } } }, { thinking: 'off' }),
     /disabled/
   );
-  assert.throws(() => modelConfiguration({ settings, model }, { thinking: 'xhigh' }), /must be/);
+  assert.equal(modelConfiguration({ settings, model }, { thinking: 'xhigh' }).models[0].thinkingLevel, 'xhigh');
 });
 
 test('resolves Pi literals, interpolation, escapes and commands without exposing failed commands', () => {

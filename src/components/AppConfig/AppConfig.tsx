@@ -545,6 +545,7 @@ const thinkingLevelOptions: Array<{ label: string; value: PiAppThinkingLevel; de
   { label: 'Low', value: 'low', description: 'Small reasoning budget.' },
   { label: 'Medium', value: 'medium', description: 'Balanced reasoning budget.' },
   { label: 'High', value: 'high', description: 'Higher reasoning budget.' },
+  { label: 'Extra high', value: 'xhigh', description: 'Maximum reasoning budget for supported models.' },
 ];
 
 const openAIProtocolOptions: Array<{ label: string; value: PiAppOpenAIProtocol; description: string }> = [

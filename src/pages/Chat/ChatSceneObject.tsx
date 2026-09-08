@@ -198,6 +198,7 @@ const THINKING_LEVEL_OPTIONS: Array<{
   { label: 'Low', value: 'low', description: 'Faster responses with a smaller reasoning budget.' },
   { label: 'Medium', value: 'medium', description: 'A balanced reasoning budget.' },
   { label: 'High', value: 'high', description: 'More reasoning that can take longer.' },
+  { label: 'Extra high', value: 'xhigh', description: 'Maximum reasoning for models that support it.' },
 ];
 
 type ChatSessionExport = {
@@ -3579,7 +3580,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function parseStoredThinkingLevel(value: unknown): PiAppThinkingLevel | undefined {
-  return value === 'off' || value === 'low' || value === 'medium' || value === 'high' ? value : undefined;
+  return value === 'off' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh'
+    ? value
+    : undefined;
 }
 
 function normalizeSessionTitle(value: unknown) {

@@ -33,7 +33,7 @@ export function validateConfig(value) {
   }
   for (const [field, choices, fallback] of [
     ['protocol', ['auto', 'chat-completions', 'responses'], 'chat-completions'],
-    ['thinkingLevel', ['off', 'low', 'medium', 'high'], 'off'],
+    ['thinkingLevel', ['off', 'low', 'medium', 'high', 'xhigh'], 'off'],
     ['thinkingFormat', ['openai', 'qwen', 'qwen-chat-template'], 'openai'],
   ]) {
     config.model[field] ??= fallback;

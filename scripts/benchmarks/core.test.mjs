@@ -37,7 +37,11 @@ test('scenario event attachments retain timing and errors without retaining tran
 test('validates profiles without silently normalizing unsupported reasoning levels', () => {
   const config = validateConfig(example);
   assert.equal(config.suites.length, 12);
-  for (const thinkingLevel of ['xhigh', 'minimal', 'typo']) {
+  assert.equal(
+    validateConfig({ ...example, model: { ...example.model, thinkingLevel: 'xhigh' } }).model.thinkingLevel,
+    'xhigh'
+  );
+  for (const thinkingLevel of ['minimal', 'typo']) {
     assert.throws(() => validateConfig({ ...example, model: { ...example.model, thinkingLevel } }));
   }
   assert.throws(() =>
