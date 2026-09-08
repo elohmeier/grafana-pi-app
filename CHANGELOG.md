@@ -1,3 +1,10 @@
+# [3.4.0](https://github.com/elohmeier/grafana-pi-app/compare/v3.3.0...v3.4.0) (2026-09-08)
+
+
+### Features
+
+* add opt-in concurrent assistant load benchmark ([ddc4f17](https://github.com/elohmeier/grafana-pi-app/commit/ddc4f17c72f8304d958209c1c8ebcc75efa6783d))
+
 # [3.3.0](https://github.com/elohmeier/grafana-pi-app/compare/v3.2.1...v3.3.0) (2026-09-08)
 
 
