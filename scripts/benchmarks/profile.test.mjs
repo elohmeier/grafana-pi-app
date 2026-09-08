@@ -79,7 +79,7 @@ test('profile generation preserves Docker mapping, compatibility checks, and wor
     'http://localhost:9090/v1'
   );
   for (const options of [
-    { thinking: 'xhigh' },
+    { thinking: 'unsupported' },
     { repetitions: '0' },
     { repetitions: '1.2' },
     { repetitions: 'NaN' },
@@ -90,6 +90,7 @@ test('profile generation preserves Docker mapping, compatibility checks, and wor
   ]) {
     assert.throws(() => createProfile(selected, options));
   }
+  assert.equal(createProfile(selected, { thinking: 'xhigh' }).model.thinkingLevel, 'xhigh');
   assert.throws(() =>
     createProfile({ ...selected, model: { ...selected.model, reasoning: false } }, { thinking: 'high' })
   );

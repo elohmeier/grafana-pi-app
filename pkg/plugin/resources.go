@@ -224,7 +224,9 @@ func (a *App) handleLLMStream(w http.ResponseWriter, req *http.Request) {
 		if upstreamError == nil {
 			upstreamError, _ = io.ReadAll(io.LimitReader(upstreamRes.Body, 32_768))
 		}
-		_ = stream.write(errorEvent(string(upstreamError)))
+		event := errorEvent(string(upstreamError))
+		event["upstreamStatus"] = upstreamRes.StatusCode
+		_ = stream.write(event)
 		return
 	}
 

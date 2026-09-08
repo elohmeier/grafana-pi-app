@@ -298,6 +298,8 @@ npm run benchmark:run -- --config benchmarks/qwen-local.example.json
 
 See [model comparison runs](benchmarks/README.md) for profiles, repetitions, usage semantics, artifacts, and comparison guidance. With the model server already running, the comparison runner prepares Grafana and seeds data as needed, preserving existing volumes. `--prepare` forces fresh isolated fixtures; `--reuse-stack` skips preparation. Starting a configured local model server requires the explicit `--start-model-server` flag.
 
+To measure simultaneous assistant conversations, use the separate opt-in [load benchmark](benchmarks/load/README.md): `npm run benchmark:load -- --config benchmarks/qwen-local.example.json --load-config benchmarks/load/assistant.example.json --dry-run`. Remove `--dry-run` to execute the configured concurrency sweep. This workload is excluded from the default benchmark set.
+
 Run the local agent benchmark against the configured llama-server with:
 
 ```bash

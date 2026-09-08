@@ -18,6 +18,7 @@ export default defineConfig<PluginOptions>({
   /* Tests share Grafana plugin settings, so keep the suite serialized. */
   fullyParallel: false,
   workers: 1,
+  testIgnore: ['**/agentLoadBenchmark.spec.ts'],
   grepInvert: process.env.RUN_AGENT_BENCHMARKS === '1' ? undefined : /benchmark/,
   /* Fail the build on CI if you accidentally left test.only in the source code. */
   forbidOnly: !!process.env.CI,

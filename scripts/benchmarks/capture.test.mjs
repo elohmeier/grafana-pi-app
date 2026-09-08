@@ -85,3 +85,19 @@ test('passes unrelated requests through and records aborted fetches', async () =
   assert.equal([...records.values()][0].state, 'failed');
   assert.equal([...records.values()][0].error, 'AbortError');
 });
+
+test('preserves upstream status and SSE error text behind a successful proxy response', async () => {
+  const { window, records } = install(
+    async () =>
+      new Response(
+        'data: {"type":"start"}\n\ndata: {"type":"error","reason":"error","upstreamStatus":429,"errorMessage":"Too many requests"}\n\n'
+      )
+  );
+  await window.fetch(url, request);
+  await window.__PI_COMPARISON_FLUSH__();
+  const record = [...records.values()][0];
+  assert.equal(record.httpStatus, 200);
+  assert.equal(record.upstreamStatus, 429);
+  assert.equal(record.error, 'Too many requests');
+  assert.equal(record.state, 'failed');
+});

@@ -1,0 +1,21 @@
+{
+  "concurrency": [1, 2, 4, 8, 16],
+  "workloads": ["explore-metrics", "analysis"],
+  "repetitions": 1,
+  "rampUpMs": 10000,
+  "warmupMs": 30000,
+  "durationMs": 300000,
+  "drainMs": 180000,
+  "sessionTimeoutMs": 180000,
+  "setupTimeoutMs": 120000,
+  "thinkTimeMs": 0,
+  "cooldownMs": 5000,
+  "followUp": false,
+  "minSessions": 20,
+  "thresholds": {
+    "successRate": 0.95,
+    "sessionP95Ms": 180000,
+    "firstContentP95Ms": 10000
+  },
+  "metrics": []
+}

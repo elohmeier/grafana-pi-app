@@ -18,6 +18,7 @@ test('full CLI retains failed cases, continues serial scenarios and repetitions,
     await mkdir(path.join(directory, 'node_modules/@playwright/test'), { recursive: true });
     await copyFile(new URL('../benchmark-run.mjs', import.meta.url), path.join(directory, 'scripts/benchmark-run.mjs'));
     await copyFile(new URL('./core.mjs', import.meta.url), path.join(directory, 'scripts/benchmarks/core.mjs'));
+    await copyFile(new URL('./runtime.mjs', import.meta.url), path.join(directory, 'scripts/benchmarks/runtime.mjs'));
     await copyFile(new URL('./prepare.mjs', import.meta.url), path.join(directory, 'scripts/benchmarks/prepare.mjs'));
     await copyFile(new URL('./profile.mjs', import.meta.url), path.join(directory, 'scripts/benchmarks/profile.mjs'));
     await copyFile(

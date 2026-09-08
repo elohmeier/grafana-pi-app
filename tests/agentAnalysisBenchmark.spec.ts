@@ -5,14 +5,9 @@ import { ROUTES } from '../src/constants';
 import { testIds } from '../src/components/testIds';
 import type { Page } from '@playwright/test';
 
-const BENCHMARK_PROMPT = [
-  'Use exactly one run_investigation_agent tool call to analyze the demo Prometheus incident.',
-  'Do not call run_query_agent, query_prometheus, or any dashboard tool directly at top level; this benchmark is measuring run_investigation_agent as the top-level analysis tool.',
-  'Analyze the last 6 hours of the demo Prometheus data and summarize what is wrong.',
-  'Use at most eight tool calls; prefer batched query_prometheus calls for HTTP 500s by vm/route, latency, node_load1, and CPU.',
-  'Final answer must be exactly five short bullets: finding, affected host, affected route/status, CPU/load/latency corroboration, validated PromQL.',
-  'Do not create, render, sync, upload, or modify dashboards.',
-].join(' ');
+import { workloadPrompts } from '../scripts/benchmarks/workloads.mjs';
+
+const BENCHMARK_PROMPT = workloadPrompts['analysis'];
 const DEFAULT_TIMEOUT_MS = 180_000;
 const FORBIDDEN_WRITE_TOOLS = new Set([
   'write_jsonnet',

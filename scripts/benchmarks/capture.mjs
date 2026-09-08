@@ -81,6 +81,10 @@ export function installLLMCapture() {
             record.stopReason = event.reason;
             record.usage = event.usage ?? null;
             record.durationMs = elapsed;
+            if (event.type === 'error') {
+              record.error = event.errorMessage ?? 'Upstream stream error';
+              record.upstreamStatus = event.upstreamStatus ?? null;
+            }
             // Preserve usage even if the stream is aborted after its terminal event.
             void emit();
           }

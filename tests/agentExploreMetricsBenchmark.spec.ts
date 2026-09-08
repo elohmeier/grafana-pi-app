@@ -5,13 +5,9 @@ import { ROUTES } from '../src/constants';
 import { testIds } from '../src/components/testIds';
 import type { Page } from '@playwright/test';
 
-const BENCHMARK_PROMPT = [
-  'Use exactly one run_query_agent tool call to discover the demo Prometheus metrics for HTTP request errors, HTTP latency histograms, node load, and CPU usage.',
-  'Do not call list_datasources, list_metrics, inspect_metric_series, list_label_values, query_prometheus, or any dashboard tool directly; this benchmark is measuring run_query_agent as the only top-level tool call.',
-  'Call run_query_agent with this task: Find HTTP error rate (500s), latency, node_load1, and CPU usage metrics in the default Prometheus datasource. Search by prefixes http, node_load, and node_cpu. List exact metric names and labels for HTTP requests by status code, route, and vm; histogram latency by route and vm; node load; and CPU utilization. Validate candidate PromQL with query_prometheus before returning.',
-  'After the tool returns, answer with exactly four short bullets: metric coverage, labels/values, useful PromQL, caveats.',
-  'Do not create, render, sync, upload, or modify dashboards.',
-].join(' ');
+import { workloadPrompts } from '../scripts/benchmarks/workloads.mjs';
+
+const BENCHMARK_PROMPT = workloadPrompts['explore-metrics'];
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_EXPLORE_MAX_TOOL_MS = 120_000;
 const DEFAULT_EXPLORE_MAX_NESTED_CALLS = 14;

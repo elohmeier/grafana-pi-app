@@ -20,6 +20,7 @@
     "benchmark:agent": "node scripts/benchmark-agent.mjs",
     "benchmark:profile": "node scripts/benchmark-profile.mjs",
     "benchmark:run": "node scripts/benchmark-run.mjs",
+    "benchmark:load": "node scripts/benchmark-load.mjs",
     "benchmark:test": "node --test scripts/benchmarks/*.test.mjs",
     "benchmark:analysis": "node scripts/benchmark-analysis.mjs",
     "benchmark:artifact-jq": "node scripts/benchmark-artifact-jq.mjs",
