@@ -1,3 +1,10 @@
+# [3.3.0](https://github.com/elohmeier/grafana-pi-app/compare/v3.2.1...v3.3.0) (2026-09-08)
+
+
+### Features
+
+* support extra-high reasoning levels ([da665c5](https://github.com/elohmeier/grafana-pi-app/commit/da665c59faf369adfceb5634b33a941b224a9d58))
+
 ## [3.2.1](https://github.com/elohmeier/grafana-pi-app/compare/v3.2.0...v3.2.1) (2026-09-07)
 
 
