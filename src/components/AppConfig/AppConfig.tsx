@@ -1,4 +1,4 @@
-import React, { ChangeEvent, FormEvent, useMemo, useState } from 'react';
+import React, { ChangeEvent, SubmitEvent, useMemo, useState } from 'react';
 import {
   Button,
   Checkbox,
@@ -252,7 +252,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     });
   };
 
-  const onSubmit = (event: FormEvent) => {
+  const onSubmit = (event: SubmitEvent) => {
     event.preventDefault();
     const customSkills = serializeCustomSkills(state.customSkills);
 

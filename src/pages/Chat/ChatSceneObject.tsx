@@ -1,5 +1,5 @@
 import React, {
-  FormEvent,
+  SyntheticEvent,
   memo,
   useCallback,
   useEffect,
@@ -317,15 +317,15 @@ export function ChatApp({
       }),
     []
   );
-  const sessionIdRef = useRef<string>();
+  const sessionIdRef = useRef<string>(undefined);
   const virtualJsonnetFilesRef = useRef<Record<string, VirtualJsonnetFileSnapshot>>({});
   const virtualJsonnetHydratedRef = useRef<Record<string, number>>({});
-  const investigationReportRef = useRef<InvestigationReport>();
+  const investigationReportRef = useRef<InvestigationReport>(undefined);
   const artifactsRef = useRef<Record<string, Artifact>>({});
   const artifactCounterRef = useRef(0);
-  const dashboardLaunchRef = useRef<DashboardAssistantLaunch>();
-  const externalLaunchRef = useRef<ExternalAssistantLaunch>();
-  const agentWorkspaceRef = useRef<AgentWorkspaceState>();
+  const dashboardLaunchRef = useRef<DashboardAssistantLaunch>(undefined);
+  const externalLaunchRef = useRef<ExternalAssistantLaunch>(undefined);
+  const agentWorkspaceRef = useRef<AgentWorkspaceState>(undefined);
   const [investigationReport, setInvestigationReport] = useState<InvestigationReport>();
   useEffect(() => {
     if (pluginMetaJsonData.isOpenAIAPIKeySet) {
@@ -456,32 +456,32 @@ export function ChatApp({
     []
   );
   const [agent, setAgent] = useState<Agent>();
-  const agentRef = useRef<Agent>();
+  const agentRef = useRef<Agent>(undefined);
   const { revision, flushRevision, scheduleRevision } = useFrameRevision();
   const [input, setInput] = useState('');
   const [pendingToolConfirmation, setPendingToolConfirmationState] = useState<ToolConfirmationView>();
-  const pendingToolConfirmationRef = useRef<ToolConfirmationView>();
+  const pendingToolConfirmationRef = useRef<ToolConfirmationView>(undefined);
   const [sessions, setSessions] = useState<SessionIndexItem[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>();
   const [currentTitle, setCurrentTitle] = useState('New chat');
   const [error, setError] = useState<string>();
   const [toolRuns, setToolRuns] = useState<ToolRunState>({});
   const [runStatus, setRunStatus] = useState<ChatRunStatus>();
-  const unsubscribeRef = useRef<() => void>();
+  const unsubscribeRef = useRef<() => void>(undefined);
   const titleRef = useRef('New chat');
   const sessionsRef = useRef<SessionIndexItem[]>([]);
   const storageRef = useRef(storage);
-  const runStatusRef = useRef<ChatRunStatus>();
+  const runStatusRef = useRef<ChatRunStatus>(undefined);
   const importSessionInputRef = useRef<HTMLInputElement | null>(null);
   const messagesContainerRef = useRef<HTMLElement | null>(null);
   const autoScrollRef = useRef(true);
   const sidebarRouteRef = useRef<string | undefined>(sidebarRoute);
   const lastScrollTopRef = useRef(0);
-  const touchStartYRef = useRef<number>();
-  const toolConfirmationResolverRef = useRef<(approved: boolean) => void>();
+  const touchStartYRef = useRef<number>(undefined);
+  const toolConfirmationResolverRef = useRef<(approved: boolean) => void>(undefined);
   const initialLoadStartedRef = useRef(false);
   const isChatDirtyRef = useRef(false);
-  const pendingLeaveActionRef = useRef<() => void>();
+  const pendingLeaveActionRef = useRef<() => void>(undefined);
   const allowNextLocationChangeRef = useRef(false);
   const [leaveGuardAction, setLeaveGuardAction] = useState<ChatLeaveGuardAction>();
   const [blockedLocation, setBlockedLocation] = useState<ReturnType<typeof locationService.getLocation>>();
@@ -1353,7 +1353,7 @@ export function ChatApp({
     ]
   );
 
-  const submitPrompt = async (event: FormEvent) => {
+  const submitPrompt = async (event: SyntheticEvent) => {
     event.preventDefault();
     await submitPromptText(input.trim());
   };
@@ -3263,7 +3263,7 @@ function useRunElapsedMs(active: boolean, startedAt: number | undefined) {
 
 function useFrameRevision() {
   const [revision, setRevision] = useState(0);
-  const frameRef = useRef<ScheduledRevision>();
+  const frameRef = useRef<ScheduledRevision>(undefined);
 
   const bumpRevision = useCallback(() => {
     setRevision((value) => value + 1);

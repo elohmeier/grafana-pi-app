@@ -104,7 +104,7 @@ Key manifest choices:
   read, and write dashboards and folders through Grafana APIs.
 - `extensions.addedLinks` declares three dashboard panel menu actions
   (`Explain in Assistant`, `Troubleshoot panel`, `Suggest improvements`).
-- `grafanaDependency` is `>=13.0.0`.
+- `grafanaDependency` is `>=13.2.0`.
 
 Frontend registration happens in `src/module.tsx`:
 

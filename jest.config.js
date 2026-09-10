@@ -13,5 +13,12 @@ module.exports = {
     '^@earendil-works/pi-agent-core$': '<rootDir>/src/test/piAgentCoreJestShim.ts',
     '^@earendil-works/pi-ai$': '<rootDir>/src/test/piAiJestShim.ts',
   },
-  transformIgnorePatterns: [nodeModulesToTransform([...grafanaESModules, '@earendil-works/pi-agent-core'])],
+  transformIgnorePatterns: [
+    nodeModulesToTransform([
+      ...grafanaESModules,
+      '@earendil-works/pi-agent-core',
+      '@react-hookz/web',
+      '@ver0/deep-equal',
+    ]),
+  ],
 };
