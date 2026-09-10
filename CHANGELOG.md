@@ -1,3 +1,13 @@
+## [4.0.0](https://github.com/elohmeier/grafana-pi-app/compare/v3.4.0...v4.0.0) (2026-09-10)
+
+### ⚠ BREAKING CHANGES
+
+* require Grafana 13.2
+
+### Features
+
+* require Grafana 13.2 ([4b5a094](https://github.com/elohmeier/grafana-pi-app/commit/4b5a09473d6ab6005a220ab09dac7b5ef0253324))
+
 # [3.4.0](https://github.com/elohmeier/grafana-pi-app/compare/v3.3.0...v3.4.0) (2026-09-08)
 
 
