@@ -76,6 +76,7 @@ jobs:
           -p @semantic-release/npm@13
           -p @semantic-release/commit-analyzer@13
           -p @semantic-release/release-notes-generator@14
+          -p conventional-changelog-conventionalcommits@9
           semantic-release
 
   package-plugin:
