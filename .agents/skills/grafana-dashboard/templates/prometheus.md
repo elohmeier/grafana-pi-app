@@ -39,6 +39,6 @@ d.dashboard.new(
 )
 ```
 
-Use only verified metrics and labels. For rate/trend panels, validate candidate PromQL with `query_prometheus` `type="range"` over the same time range as the dashboard before writing Jsonnet. If `http_requests_total` or `status` is not present, inspect available metrics and adjust before writing panels.
+Use only verified metrics and labels. For rate/trend panels, validate candidate PromQL with a range query (`grafana-prom query EXPR --from ...`) over the same time range as the dashboard before writing Jsonnet. If `http_requests_total` or `status` is not present, inspect available metrics and adjust before writing panels.
 
 Use `time={ from: 'now-6h', to: 'now' }` for the dashboard time range. Do not use `timeframe`, `timeFrom`, or `timeTo` with `d.dashboard.new`.

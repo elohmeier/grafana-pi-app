@@ -188,6 +188,7 @@ func (a *App) handleLLMStream(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	modelID = model.ID
+	body.Options.MaxTokens = clampRequestMaxTokens(body.Options.MaxTokens, model)
 
 	protocol := a.openAIProtocolForRequest(model)
 	upstreamRes, err := a.doOpenAIUpstreamRequest(req.Context(), body, model, protocol)
@@ -700,6 +701,12 @@ func errorEvent(message string) map[string]interface{} {
 	}
 }
 
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
 func writeJSONError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -713,18 +720,9 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	// can use Pi's client-side proxy stream implementation unchanged.
 	mux.HandleFunc("/llm/api/stream", a.withAppAccess(a.handleLLMStream))
 	mux.HandleFunc("/telemetry/events", a.withAppAccess(a.handleTelemetryEvents))
-	mux.HandleFunc("/jsonnet-dashboards/render", a.withAppAccess(a.handleJsonnetDashboardRender))
-	mux.HandleFunc("/jsonnet-dashboards/save", a.withAppAccess(a.handleJsonnetDashboardSave))
-	mux.HandleFunc("/jsonnet-dashboards/jsonnet-files/write", a.withAppAccess(a.handleJsonnetFileWrite))
-	mux.HandleFunc("/jsonnet-dashboards/jsonnet-files/edit", a.withAppAccess(a.handleJsonnetFileEdit))
-	mux.HandleFunc("/jsonnet-dashboards/jsonnet-files/repair", a.withAppAccess(a.handleJsonnetFileRepair))
-	mux.HandleFunc("/jsonnet-dashboards/jsonnet-files/read", a.withAppAccess(a.handleJsonnetFileRead))
+	mux.HandleFunc("/jsonnet/eval", a.withAppAccess(a.handleJsonnetEval))
+	mux.HandleFunc("/jsonnet/fix", a.withAppAccess(a.handleJsonnetFix))
 	mux.HandleFunc("/jsonnet-libs/search", a.withAppAccess(a.handleJsonnetLibSearch))
 	mux.HandleFunc("/jsonnet-libs/read", a.withAppAccess(a.handleJsonnetLibRead))
 	mux.HandleFunc("/jsonnet-libs/list", a.withAppAccess(a.handleJsonnetLibList))
-	if a.agentSample != nil {
-		mux.HandleFunc("/agent/capabilities", a.withAppAccess(a.handleAgentContractSampleCapabilities))
-		mux.HandleFunc("/agent/workspaces", a.withAppAccess(a.handleAgentContractSampleWorkspaces))
-		mux.HandleFunc("/agent/workspaces/", a.withAppAccess(a.handleAgentContractSampleWorkspaceResource))
-	}
 }

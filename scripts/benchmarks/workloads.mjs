@@ -1,23 +1,30 @@
 export const workloadPrompts = {
   analysis: [
-    'Use exactly one run_investigation_agent tool call to analyze the demo Prometheus incident.',
-    'Do not call run_query_agent, query_prometheus, or any dashboard tool directly at top level; this benchmark is measuring run_investigation_agent as the top-level analysis tool.',
     'Analyze the last 6 hours of the demo Prometheus data and summarize what is wrong.',
-    'Use at most eight tool calls; prefer batched query_prometheus calls for HTTP 500s by vm/route, latency, node_load1, and CPU.',
+    'Check HTTP 500s by vm and route, latency, node_load1, and CPU, and validate the PromQL your conclusions rely on.',
     'Final answer must be exactly five short bullets: finding, affected host, affected route/status, CPU/load/latency corroboration, validated PromQL.',
-    'Do not create, render, sync, upload, or modify dashboards.',
+    'Do not create or modify dashboards.',
   ].join(' '),
   'explore-metrics': [
-    'Use exactly one run_query_agent tool call to discover the demo Prometheus metrics for HTTP request errors, HTTP latency histograms, node load, and CPU usage.',
-    'Do not call list_datasources, list_metrics, inspect_metric_series, list_label_values, query_prometheus, or any dashboard tool directly; this benchmark is measuring run_query_agent as the only top-level tool call.',
-    'Call run_query_agent with this task: Find HTTP error rate (500s), latency, node_load1, and CPU usage metrics in the default Prometheus datasource. Search by prefixes http, node_load, and node_cpu. List exact metric names and labels for HTTP requests by status code, route, and vm; histogram latency by route and vm; node load; and CPU utilization. Validate candidate PromQL with query_prometheus before returning.',
-    'After the tool returns, answer with exactly four short bullets: metric coverage, labels/values, useful PromQL, caveats.',
-    'Do not create, render, sync, upload, or modify dashboards.',
+    'Find the metrics for HTTP request errors (500s), HTTP latency histograms, node load, and CPU usage in the default demo Prometheus datasource.',
+    'List the exact metric names and the labels for HTTP requests by status code, route, and vm; histogram latency by route and vm; node load; and CPU utilization.',
+    'Validate useful PromQL for each signal before answering.',
+    'Answer with exactly four short bullets: metric coverage, labels/values, useful PromQL, caveats.',
+    'Do not create or modify dashboards.',
   ].join(' '),
 };
 
 export const followUpPrompt =
   'Using only the evidence already collected, give two short bullets with a validated PromQL expression and what it shows. Do not call tools or modify anything.';
+
+// Budgets for one workload turn. Generous enough for recovery, finite to catch loops.
+export const workloadBudgets = {
+  analysis: { maxToolCalls: 16 },
+  'explore-metrics': { maxToolCalls: 14 },
+};
+
+const LIVE_DASHBOARD_WRITE_TOOL =
+  /^(rename_live_dashboard_panel|update_live_dashboard_|add_live_dashboard_|move_or_resize_live_dashboard_|apply_live_dashboard_)/;
 
 export function finalAnswer(events) {
   const message = [...events]
@@ -28,6 +35,32 @@ export function finalAnswer(events) {
     .map((b) => b.text)
     .join('\n')
     .trim();
+}
+
+/** Completed bash tool calls with the details reported by the session shell. */
+export function bashToolCalls(events) {
+  const starts = new Map(
+    events.filter((e) => e.type === 'tool_execution_start' && e.toolName === 'bash').map((e) => [e.toolCallId, e])
+  );
+  return events
+    .filter((e) => e.type === 'tool_execution_end' && starts.has(e.toolCallId))
+    .map((end) => {
+      const details = end.result?.details ?? {};
+      return {
+        command:
+          typeof details.command === 'string' ? details.command : (starts.get(end.toolCallId).args?.command ?? ''),
+        exitCode: details.exitCode,
+        stdout: typeof details.stdout === 'string' ? details.stdout : '',
+        isError: end.isError === true,
+        timedOut: details.timedOut === true,
+      };
+    });
+}
+
+export function successfulPromQueries(events) {
+  return bashToolCalls(events).filter(
+    (call) => /\bgrafana-prom\s+query\b/.test(call.command) && !call.isError && !call.timedOut && call.exitCode === 0
+  );
 }
 
 // A load session must perform useful work. These are evidence gates without the
@@ -50,31 +83,22 @@ export function workloadQualityError(workload, events, followUp = false) {
   if (followUp) {
     return starts.length ? 'Follow-up unexpectedly called tools' : undefined;
   }
-  const expected = workload === 'analysis' ? 'run_investigation_agent' : 'run_query_agent';
-  if (starts.length !== 1 || starts[0].toolName !== expected) {
-    return `Expected exactly one ${expected} call`;
+  const budget = workloadBudgets[workload];
+  if (budget && starts.length > budget.maxToolCalls) {
+    return `Used ${starts.length} tool calls, budget is ${budget.maxToolCalls}`;
   }
-  const end = events.find((e) => e.type === 'tool_execution_end' && e.toolCallId === starts[0].toolCallId);
-  if (!end || end.isError) {
-    return `${expected} did not complete successfully`;
-  }
-  const nested = end.result?.details?.toolCalls ?? [];
-  if (!nested.some((c) => c.name === 'query_prometheus' && c.status === 'completed' && !c.isError)) {
-    return 'Missing successful PromQL evidence';
-  }
-  if (nested.some((c) => c.isError || c.status === 'failed')) {
-    return 'A nested tool failed';
-  }
+  const bash = bashToolCalls(events);
   if (
-    nested.some((c) =>
-      /^(write_jsonnet|edit_jsonnet|fix_jsonnet|render_dashboard|save_dashboard|upload_dashboard|delete_dashboard)$/.test(
-        c.name
-      )
-    )
+    bash.some((call) => /\bworkspace\s+apply\b/.test(call.command)) ||
+    starts.some((e) => LIVE_DASHBOARD_WRITE_TOOL.test(e.toolName ?? ''))
   ) {
-    return 'Workload used a dashboard write tool';
+    return 'Workload attempted a dashboard write';
   }
-  const evidence = answer + '\n' + JSON.stringify(end.result?.content ?? []);
+  const queries = successfulPromQueries(events);
+  if (!queries.length) {
+    return 'Missing successful PromQL evidence (grafana-prom query)';
+  }
+  const evidence = [answer, ...queries.map((call) => `${call.command}\n${call.stdout}`)].join('\n');
   const patterns =
     workload === 'analysis'
       ? [/vm-web-01/i, /\/render\/report/i, /500|5xx/i, /cpu|load|latenc/i]

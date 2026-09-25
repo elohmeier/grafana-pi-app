@@ -2,6 +2,7 @@ import {
   createOpenAICompatibleModel,
   getConfiguredModels,
   getDefaultConfiguredModel,
+  normalizeModelLimits,
   resolveConfiguredModel,
 } from './model';
 
@@ -120,5 +121,21 @@ describe('createOpenAICompatibleModel', () => {
     expect(model.id).toBe('gpt-4.1');
     expect(model.name).toBe('Fast model');
     expect(model.baseUrl).toBe('http://llm.local/v1');
+  });
+});
+
+describe('model limits', () => {
+  it('defaults, parses provisioning strings, and keeps output within half the window', () => {
+    expect(normalizeModelLimits(undefined, undefined)).toEqual({ contextWindow: 131072, maxOutputTokens: 16384 });
+    expect(normalizeModelLimits('262144', '32768')).toEqual({ contextWindow: 262144, maxOutputTokens: 32768 });
+    expect(normalizeModelLimits(1000, 999999)).toEqual({ contextWindow: 4096, maxOutputTokens: 2048 });
+    expect(normalizeModelLimits('', 'abc')).toEqual({ contextWindow: 131072, maxOutputTokens: 16384 });
+  });
+
+  it('passes limits into the Pi model', () => {
+    const [configured] = getConfiguredModels({ models: [{ id: 'm', contextWindow: 65536, maxOutputTokens: 8192 }] });
+    const model = createOpenAICompatibleModel({ openAIBaseUrl: 'http://x/v1' }, configured);
+    expect(model.contextWindow).toBe(65536);
+    expect(model.maxTokens).toBe(8192);
   });
 });

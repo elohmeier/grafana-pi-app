@@ -47,18 +47,6 @@ func (i *embeddedJsonnetImporter) Import(importedFrom, importedPath string) (jso
 	return jsonnet.Contents{}, "", fmt.Errorf("jsonnet import not found: %s", importedPath)
 }
 
-func renderJsonnetSource(source string) ([]byte, error) {
-	vm := jsonnet.MakeVM()
-	vm.Importer(&embeddedJsonnetImporter{files: jsonnetAssets, contents: map[string]jsonnet.Contents{}})
-
-	rendered, err := vm.EvaluateAnonymousSnippet("dashboard.jsonnet", source)
-	if err != nil {
-		return nil, err
-	}
-
-	return []byte(rendered), nil
-}
-
 func isEmbeddedJsonnetPathAllowed(candidate string) bool {
 	if strings.Contains(candidate, "\x00") {
 		return false

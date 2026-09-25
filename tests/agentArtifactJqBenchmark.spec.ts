@@ -4,99 +4,54 @@ import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { ROUTES } from '../src/constants';
 import { testIds } from '../src/components/testIds';
+import {
+  bashCalls,
+  dashboardWriteAttempts,
+  findBudgetError,
+  findFinalAssistantError,
+  findFinalAssistantText,
+  formatDuration,
+  formatLiveEvent,
+  formatToolTimeline,
+  getRecord,
+  hasSuccessfulPromEvidence,
+  promQueryCalls,
+  readPositiveInteger,
+  stringField,
+  summarizeToolCalls,
+  summarizeUsage,
+  type BenchmarkEvent,
+} from './benchmarkOutcomes';
 
-const JQ_FILTER = '.results[] | {query, validationError, totalSeries, series: [.series[]? | {name, labels, last}]}';
-const QUERY_AGENT_TASK = [
-  'Run one batched query_prometheus call that creates a JSON artifact for the artifact registry.',
-  'Use these PromQL queries in the batch:',
-  '1. sum by (vm, route) (increase(http_requests_total{status="500"}[6h]))',
-  '2. sum by (vm) (increase(http_requests_total{status="500"}[6h]))',
-  '3. topk(6, sum by (vm, route) (rate(http_requests_total{status="500"}[5m])))',
-  '4. histogram_quantile(0.95, sum by (vm, route, le) (rate(http_request_duration_seconds_bucket[5m])))',
-  '5. histogram_quantile(0.95, sum by (route, le) (rate(http_request_duration_seconds_bucket[5m])))',
-  '6. node_load1{job="node"}',
-  '7. avg_over_time(node_load1{job="node"}[5m])',
-  '8. 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)',
-  'Return a compact note that the query batch ran. Do not call read_artifact yourself.',
-].join('\n');
+const QUERIES = [
+  'sum by (vm, route) (increase(http_requests_total{status="500"}[6h]))',
+  'sum by (vm) (increase(http_requests_total{status="500"}[6h]))',
+  'topk(6, sum by (vm, route) (rate(http_requests_total{status="500"}[5m])))',
+  'histogram_quantile(0.95, sum by (vm, route, le) (rate(http_request_duration_seconds_bucket[5m])))',
+  'histogram_quantile(0.95, sum by (route, le) (rate(http_request_duration_seconds_bucket[5m])))',
+  'node_load1{job="node"}',
+  'avg_over_time(node_load1{job="node"}[5m])',
+  '100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)',
+];
 const BENCHMARK_PROMPT = [
-  'This is an artifact registry jq e2e check.',
-  'Use exactly two top-level tool calls in this order: run_query_agent, then read_artifact.',
-  `For run_query_agent, use this exact task:\n${QUERY_AGENT_TASK}`,
-  `After run_query_agent returns, call read_artifact with id "artifact_1", mode "jq", and jq filter: ${JQ_FILTER}`,
-  'Do not call dashboard tools. Do not use read_artifact mode "full".',
-  'Final answer must be one short sentence that says the jq-mode artifact read completed.',
-].join('\n\n');
+  'Run these PromQL queries against the demo Prometheus data for the last 6 hours in one batch:',
+  ...QUERIES.map((query, index) => `${index + 1}. ${query}`),
+  'The results are stored as artifacts under /artifacts. Extract only the query, validationError, totalSeries, and each series name, labels, and last value from the stored results with jq instead of reading them in full.',
+  'Then answer in two short sentences: which vm has the most HTTP 500s, and which route has the highest p95 latency.',
+  'Do not create or modify dashboards.',
+].join('\n');
 const DEFAULT_TIMEOUT_MS = 180_000;
-const FORBIDDEN_WRITE_TOOLS = new Set([
-  'write_jsonnet',
-  'edit_jsonnet',
-  'fix_jsonnet',
-  'render_dashboard',
-  'save_dashboard',
-  'upload_dashboard',
-  'delete_dashboard',
-]);
-
-type BenchmarkEvent = {
-  type: string;
-  timestamp: number;
-  toolCallId?: string;
-  toolName?: string;
-  args?: unknown;
-  partialResult?: unknown;
-  result?: unknown;
-  isError?: boolean;
-  message?: {
-    role?: unknown;
-    stopReason?: unknown;
-    errorMessage?: unknown;
-    content?: unknown;
-  };
-  messageCount?: number;
-};
-
-type ToolCallSummary = {
-  id: string;
-  name: string;
-  status: 'running' | 'completed' | 'failed';
-  startedAt: number;
-  endedAt?: number;
-  durationMs?: number;
-  args?: unknown;
-  isError?: boolean;
-  nestedToolCalls?: NestedToolCallSummary[];
-  errorText?: string;
-  resultText?: string;
-  result?: unknown;
-};
-
-type NestedToolCallSummary = {
-  name: string;
-  status?: string;
-  isError?: boolean;
-  args?: unknown;
-  result?: unknown;
-};
-
-type LiveBenchmarkState = {
-  toolStarts: Map<string, BenchmarkEvent>;
-  toolUpdates: Map<string, string>;
-};
+const BUDGET = { maxToolCalls: 12 };
 
 test.describe.configure({ mode: 'serial' });
 test.setTimeout(readPositiveInteger(process.env.BENCH_TEST_TIMEOUT_MS, DEFAULT_TIMEOUT_MS + 60_000));
 
 test.describe('agent artifact jq benchmark', () => {
-  test('reads a stored Prometheus artifact with jq-wasm', async ({ gotoPage, page }, testInfo) => {
+  test('reads a stored Prometheus artifact with jq', async ({ gotoPage, page }, testInfo) => {
     const timeoutMs = readPositiveInteger(process.env.BENCH_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
-    const liveState: LiveBenchmarkState = {
-      toolStarts: new Map(),
-      toolUpdates: new Map(),
-    };
 
     await page.exposeFunction('__PI_AGENT_BENCHMARK_STREAM_EVENT__', (event: BenchmarkEvent) => {
-      const line = formatLiveBenchmarkEvent(event, liveState);
+      const line = formatLiveEvent('artifact-jq-benchmark', event);
       if (line) {
         console.log(line);
       }
@@ -184,8 +139,8 @@ async function readBenchmarkEvents(page: Page): Promise<BenchmarkEvent[]> {
     page.frames().map((frame) =>
       frame
         .evaluate(() => {
-          const benchmarkWindow = window as typeof window & { __PI_AGENT_BENCHMARK_EVENTS__?: BenchmarkEvent[] };
-          return benchmarkWindow.__PI_AGENT_BENCHMARK_EVENTS__ ?? [];
+          const benchmarkWindow = window as typeof window & { __PI_AGENT_BENCHMARK_EVENTS__?: unknown[] };
+          return (benchmarkWindow.__PI_AGENT_BENCHMARK_EVENTS__ ?? []) as BenchmarkEvent[];
         })
         .catch(() => [] as BenchmarkEvent[])
     )
@@ -206,58 +161,6 @@ async function waitForBenchmarkAgentEnd(page: Page, timeoutMs: number) {
   throw new Error(`Agent artifact jq benchmark timed out after ${timeoutMs}ms.`);
 }
 
-function formatLiveBenchmarkEvent(event: BenchmarkEvent, state: LiveBenchmarkState) {
-  if (event.type === 'tool_execution_start' && event.toolCallId && event.toolName) {
-    state.toolStarts.set(event.toolCallId, event);
-    return `[artifact-jq-benchmark:live] tool_start ${event.toolName} args=${summarizeJson(event.args)}`;
-  }
-
-  if (event.type === 'tool_execution_update' && event.toolCallId && event.toolName) {
-    const nestedCalls = extractNestedToolCalls(event.partialResult)?.length;
-    const resultText = truncateOneLine(extractResultText(event.partialResult) ?? '', 240);
-    if (nestedCalls === undefined && !resultText) {
-      return undefined;
-    }
-
-    const updateKey = `${nestedCalls ?? ''}|${resultText}`;
-    if (state.toolUpdates.get(event.toolCallId) === updateKey) {
-      return undefined;
-    }
-    state.toolUpdates.set(event.toolCallId, updateKey);
-
-    const parts = [`[artifact-jq-benchmark:live] tool_update ${event.toolName}`];
-    if (nestedCalls !== undefined) {
-      parts.push(`nested=${nestedCalls}`);
-    }
-    if (resultText) {
-      parts.push(`text=${resultText}`);
-    }
-    return parts.join(' ');
-  }
-
-  if (event.type === 'tool_execution_end' && event.toolCallId && event.toolName) {
-    const start = state.toolStarts.get(event.toolCallId);
-    const duration = start ? formatDuration(event.timestamp - start.timestamp) : 'unknown';
-    const status = event.isError ? 'failed' : 'completed';
-    const nestedCalls = extractNestedToolCalls(event.result)?.length;
-    const resultText = truncateOneLine(extractResultText(event.result) ?? '', event.isError ? 600 : 240);
-    const parts = [`[artifact-jq-benchmark:live] tool_end ${event.toolName} ${status} duration=${duration}`];
-    if (nestedCalls !== undefined) {
-      parts.push(`nested=${nestedCalls}`);
-    }
-    if (resultText) {
-      parts.push(event.isError ? `error=${resultText}` : `text=${resultText}`);
-    }
-    return parts.join(' ');
-  }
-
-  if (event.type === 'agent_end') {
-    return '[artifact-jq-benchmark:live] agent_end';
-  }
-
-  return undefined;
-}
-
 function formatBenchmarkReport(
   events: BenchmarkEvent[],
   options: { promptStartedAt: number; timeoutMs: number; timedOut: boolean; finalAnswer: string }
@@ -266,6 +169,7 @@ function formatBenchmarkReport(
   const agentEnd = [...events].reverse().find((event) => event.type === 'agent_end')?.timestamp;
   const elapsedMs = (agentEnd ?? Date.now()) - agentStart;
   const toolCalls = summarizeToolCalls(events);
+  const usage = summarizeUsage(events);
   const qualityError = options.timedOut ? undefined : findArtifactJqQualityError(events);
   const lines = [
     '',
@@ -276,39 +180,14 @@ function formatBenchmarkReport(
     `Timeout: ${formatDuration(options.timeoutMs)}`,
     `Status: ${options.timedOut ? 'timed out' : qualityError ? 'failed' : 'completed'}`,
     `Elapsed: ${formatDuration(elapsedMs)}`,
+    `Token usage: input=${usage.input}, output=${usage.output}, total=${usage.totalTokens}`,
     `Quality gate: ${options.timedOut ? 'not run' : qualityError ? `failed: ${qualityError}` : 'passed'}`,
     `Events: ${events.length}`,
-    `Tool calls: ${toolCalls.length}`,
+    `Tool calls: ${toolCalls.length} (budget ${BUDGET.maxToolCalls})`,
   ];
 
   if (toolCalls.length > 0) {
-    lines.push('', 'Tool call timeline');
-    for (const [index, call] of toolCalls.entries()) {
-      const parts = [
-        `${index + 1}. ${call.name}`,
-        call.status,
-        call.durationMs === undefined ? 'duration pending' : formatDuration(call.durationMs),
-      ];
-      if (call.nestedToolCalls?.length) {
-        parts.push(`${call.nestedToolCalls.length} nested calls`);
-      }
-      if (call.isError) {
-        parts.push('error');
-      }
-
-      lines.push(parts.join(' | '));
-      lines.push(`   id=${call.id}`);
-      lines.push(`   args=${summarizeJson(call.args)}`);
-      if (call.nestedToolCalls?.length) {
-        lines.push(`   nested=${call.nestedToolCalls.map(formatNestedToolCall).join(', ')}`);
-      }
-      if (call.resultText) {
-        lines.push(`   result=${truncateReportText(call.resultText, 1000)}`);
-      }
-      if (call.errorText) {
-        lines.push(`   error=${call.errorText}`);
-      }
-    }
+    lines.push('', 'Tool call timeline', ...formatToolTimeline(events));
   }
 
   if (options.finalAnswer.trim()) {
@@ -318,61 +197,35 @@ function formatBenchmarkReport(
   return lines.join('\n');
 }
 
-function summarizeToolCalls(events: BenchmarkEvent[]): ToolCallSummary[] {
-  const calls = new Map<string, ToolCallSummary>();
-
-  for (const event of events) {
-    if (!event.toolCallId || !event.toolName) {
+/**
+ * Finds the first projection of a stored query artifact that happened after the query ran:
+ * jq/read over /artifacts in bash, the read tool on an /artifacts path, or read_artifact.
+ */
+function findArtifactProjection(events: BenchmarkEvent[], after: number) {
+  const bash = bashCalls(events).find(
+    (call) =>
+      call.startedAt > after &&
+      /\/artifacts\b/.test(call.command) &&
+      /\bjq\b/.test(call.command) &&
+      call.exitCode === 0 &&
+      !call.isError
+  );
+  if (bash) {
+    return { kind: 'bash jq', text: bash.stdout };
+  }
+  for (const call of summarizeToolCalls(events)) {
+    if (call.startedAt <= after || call.status !== 'completed' || call.isError) {
       continue;
     }
-
-    if (event.type === 'tool_execution_start') {
-      calls.set(event.toolCallId, {
-        id: event.toolCallId,
-        name: event.toolName,
-        status: 'running',
-        startedAt: event.timestamp,
-        args: event.args,
-      });
-      continue;
+    const args = getRecord(call.args);
+    if (call.name === 'read_artifact' && (args?.mode === 'jq' || typeof args?.jq === 'string')) {
+      return { kind: 'read_artifact jq', text: call.resultText ?? '' };
     }
-
-    const existing =
-      calls.get(event.toolCallId) ??
-      ({
-        id: event.toolCallId,
-        name: event.toolName,
-        status: 'running',
-        startedAt: event.timestamp,
-        args: event.args,
-      } satisfies ToolCallSummary);
-
-    if (event.type === 'tool_execution_update') {
-      calls.set(event.toolCallId, {
-        ...existing,
-        args: event.args ?? existing.args,
-        nestedToolCalls: extractNestedToolCalls(event.partialResult) ?? existing.nestedToolCalls,
-      });
-      continue;
-    }
-
-    if (event.type === 'tool_execution_end') {
-      const durationMs = event.timestamp - existing.startedAt;
-      calls.set(event.toolCallId, {
-        ...existing,
-        status: event.isError ? 'failed' : 'completed',
-        endedAt: event.timestamp,
-        durationMs,
-        isError: event.isError,
-        nestedToolCalls: extractNestedToolCalls(event.result) ?? existing.nestedToolCalls,
-        errorText: event.isError ? extractResultText(event.result) : undefined,
-        resultText: extractResultText(event.result),
-        result: event.result,
-      });
+    if (call.name === 'read' && (stringField(args, 'path') ?? '').startsWith('/artifacts/')) {
+      return { kind: 'read', text: call.resultText ?? '' };
     }
   }
-
-  return [...calls.values()].sort((left, right) => left.startedAt - right.startedAt);
+  return undefined;
 }
 
 function findArtifactJqQualityError(events: BenchmarkEvent[]) {
@@ -380,68 +233,39 @@ function findArtifactJqQualityError(events: BenchmarkEvent[]) {
     return 'benchmark recorder captured no events';
   }
 
-  const toolCalls = summarizeToolCalls(events);
-  const queryAgent = toolCalls.find((call) => call.name === 'run_query_agent');
-  if (!queryAgent || queryAgent.status !== 'completed' || queryAgent.isError) {
-    return 'run_query_agent did not complete successfully';
+  if (!hasSuccessfulPromEvidence(events)) {
+    return 'no successful grafana-prom query ran';
+  }
+  const firstQuery = promQueryCalls(events)[0];
+  const queried = promQueryCalls(events)
+    .map((call) => call.command)
+    .join('\n');
+  if (!queried.includes('http_requests_total') || !queried.includes('http_request_duration_seconds_bucket')) {
+    return 'grafana-prom query did not cover the HTTP error and latency queries';
   }
 
-  const jqRead = toolCalls.find((call) => call.name === 'read_artifact' && isJqArtifactReadArgs(call.args));
-  if (!jqRead || jqRead.status !== 'completed' || jqRead.isError) {
-    return 'read_artifact jq call did not complete successfully';
+  const projection = findArtifactProjection(events, firstQuery.startedAt);
+  if (!projection) {
+    return 'stored query results under /artifacts were never projected with jq or read';
+  }
+  if (!/query/.test(projection.text) || !/totalSeries|validationError|series|last/.test(projection.text)) {
+    return `${projection.kind} result did not contain projected artifact fields`;
   }
 
-  const jqDetails = getRecord(getRecord(jqRead.result)?.details);
-  if (jqDetails?.mode !== 'jq' || jqDetails.exitCode !== 0) {
-    return 'read_artifact jq call did not report jq mode with exitCode 0';
+  const writes = dashboardWriteAttempts(events);
+  if (writes.length > 0) {
+    return `read-only jq benchmark attempted dashboard writes: ${writes.join(', ')}`;
   }
 
-  const unexpected = toolCalls.find((call) => call.name !== 'run_query_agent' && call.name !== 'read_artifact');
-  if (unexpected) {
-    return `unexpected top-level tool call: ${unexpected.name}`;
+  const answer = findFinalAssistantText(events);
+  if (!/vm-web-01/i.test(answer)) {
+    return 'final answer does not name vm-web-01 as the vm with the most HTTP 500s';
+  }
+  if (!/\/\S+/.test(answer)) {
+    return 'final answer does not name a route';
   }
 
-  const forbidden = findForbiddenToolCall(toolCalls);
-  if (forbidden) {
-    return `read-only jq benchmark used dashboard write tool: ${forbidden}`;
-  }
-
-  if (!hasArtifactizedPrometheusQuery(queryAgent)) {
-    return 'run_query_agent did not produce an artifactized query_prometheus result';
-  }
-
-  const jqText = jqRead.resultText ?? '';
-  if (!/query/.test(jqText) || !/totalSeries|validationError|series/.test(jqText)) {
-    return 'jq read result did not contain projected artifact fields';
-  }
-
-  return undefined;
-}
-
-function findForbiddenToolCall(toolCalls: ToolCallSummary[]) {
-  for (const call of toolCalls) {
-    if (FORBIDDEN_WRITE_TOOLS.has(call.name)) {
-      return call.name;
-    }
-    for (const nested of call.nestedToolCalls ?? []) {
-      if (FORBIDDEN_WRITE_TOOLS.has(nested.name)) {
-        return `${call.name} -> ${nested.name}`;
-      }
-    }
-  }
-  return undefined;
-}
-
-function hasArtifactizedPrometheusQuery(call: ToolCallSummary) {
-  return call.nestedToolCalls?.some((nested) => {
-    const details = getRecord(getRecord(nested.result)?.details);
-    return nested.name === 'query_prometheus' && nested.status === 'completed' && Boolean(details?.artifactRef);
-  });
-}
-
-function isJqArtifactReadArgs(args: unknown) {
-  const record = getRecord(args);
-  return record?.mode === 'jq' || typeof record?.jq === 'string';
+  return findBudgetError(events, BUDGET);
 }
 
 async function writeBenchmarkArtifacts(events: BenchmarkEvent[], report: string, finalAnswer: string) {
@@ -458,118 +282,6 @@ async function writeBenchmarkArtifacts(events: BenchmarkEvent[], report: string,
   ]);
 }
 
-function findFinalAssistantError(events: BenchmarkEvent[]) {
-  const finalAssistantMessage = [...events]
-    .reverse()
-    .find((event) => event.type === 'message_end' && event.message?.role === 'assistant')?.message;
-  return typeof finalAssistantMessage?.errorMessage === 'string' ? finalAssistantMessage.errorMessage : undefined;
-}
-
-function findFinalAssistantText(events: BenchmarkEvent[]) {
-  const finalAssistantMessage = [...events]
-    .reverse()
-    .find((event) => event.type === 'message_end' && event.message?.role === 'assistant')?.message;
-  return extractContentText(finalAssistantMessage?.content);
-}
-
-function extractNestedToolCalls(result: unknown): NestedToolCallSummary[] | undefined {
-  const details = getRecord(getRecord(result)?.details);
-  const toolCalls = details?.toolCalls;
-  if (!Array.isArray(toolCalls)) {
-    return undefined;
-  }
-
-  return toolCalls.map((call) => {
-    const record = getRecord(call);
-    return {
-      name: stringField(record, 'name') ?? 'unknown',
-      status: stringField(record, 'status'),
-      isError: booleanField(record, 'isError'),
-      args: record?.args,
-      result: record?.result,
-    };
-  });
-}
-
-function extractResultText(result: unknown) {
-  const content = getRecord(result)?.content;
-  if (!Array.isArray(content)) {
-    return undefined;
-  }
-
-  return content
-    .map((block) => getRecord(block))
-    .filter((block): block is Record<string, unknown> => Boolean(block) && block.type === 'text')
-    .map((block) => block.text)
-    .filter((value): value is string => typeof value === 'string')
-    .join(' ');
-}
-
-function extractContentText(content: unknown) {
-  if (typeof content === 'string') {
-    return content;
-  }
-  if (!Array.isArray(content)) {
-    return '';
-  }
-
-  return content
-    .map((block) => {
-      const record = getRecord(block);
-      return record?.type === 'text' && typeof record.text === 'string' ? record.text : '';
-    })
-    .filter(Boolean)
-    .join('\n')
-    .trim();
-}
-
-function readPositiveInteger(value: string | undefined, fallback: number) {
-  const parsed = value ? Number(value) : NaN;
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function stringField(record: Record<string, unknown> | undefined, field: string) {
-  const value = record?.[field];
-  return typeof value === 'string' ? value : undefined;
-}
-
-function booleanField(record: Record<string, unknown> | undefined, field: string) {
-  const value = record?.[field];
-  return typeof value === 'boolean' ? value : undefined;
-}
-
-function formatDuration(ms: number) {
-  if (ms < 1000) {
-    return `${ms}ms`;
-  }
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-function truncateOneLine(value: string, maxLength: number) {
-  const oneLine = value.replace(/\s+/g, ' ').trim();
-  return oneLine.length > maxLength ? `${oneLine.slice(0, maxLength)}...` : oneLine;
-}
-
-function formatNestedToolCall(call: NestedToolCallSummary) {
-  return `${call.name}${call.status ? `:${call.status}` : ''}${call.isError ? ':error' : ''}`;
-}
-
-function summarizeJson(value: unknown) {
-  if (value === undefined) {
-    return 'undefined';
-  }
-
-  const json = JSON.stringify(value);
-  if (!json) {
-    return String(value);
-  }
-  return json.length > 500 ? `${json.slice(0, 500)}...` : json;
-}
-
 function truncateReportText(value: string, maxLength: number) {
   return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
-}
-
-function getRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === 'object' ? (value as Record<string, unknown>) : undefined;
 }

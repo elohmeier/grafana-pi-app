@@ -2,19 +2,25 @@
 
 Observability Analyst is a Grafana app plugin that embeds an LLM analyst for observability work. The analyst runs in a Grafana-native React UI, uses the current Grafana user's datasource and dashboard permissions, and calls an OpenAI-compatible LLM through the plugin backend so API keys stay server-side.
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for how the current implementation works, and the [architecture review and roadmap](ROADMAP.md) for the `read`/`write`/`edit`/`bash` redesign status and the remaining work: deliberate evidence presentation, a durable server host, restricted datasource access, and future chat integrations.
+
+The [conversational alerting analysis](docs/alerting-chat-openclaw.md) covers Mattermost/Webex incident conversations, screenshots, silencing, proactive follow-up, and OpenClaw integration or runtime replacement.
+
 ## What it does
 
-- Discovers Prometheus datasources visible to the current user.
-- Lists metric names and label values through Grafana datasource resource APIs.
-- Runs PromQL through Grafana datasource query APIs, returning compact min/max/last/sample summaries for range queries by default.
+- Runs one agent with a fixed tool set: `read`, `write`, `edit`, and `bash` over a per-chat session filesystem, plus a few typed tools for things the shell does not cover.
+- Discovers Prometheus datasources, metric names, labels, and series, and runs PromQL through Grafana datasource APIs as the current user (`grafana-prom`), returning compact min/max/last/sample summaries.
+- Searches dashboards and loads them lazily into the session filesystem as local working copies (`/grafana/dashboards/<uid>/dashboard.json`), so `rg`, `jq`, `yq`, `python3`, and `edit` work on real dashboard JSON.
 - Extracts Prometheus metric usage from existing dashboards, including panel co-usage, labels, grouping labels, functions, and related metric neighborhoods.
-- Creates dashboards from model-authored Jsonnet source. The source lives in session-scoped virtual files saved with the chat session, so follow-up prompts can edit the Jsonnet, re-render, and save again through the app.
-- Lists, fetches, and screenshots dashboards through Grafana APIs.
+- Creates new dashboards from model-authored Jsonnet evaluated by the backend with the vendored Grafana libraries, and edits existing dashboards as JSON.
+- Writes dashboard changes only through `workspace plan` and `workspace apply`: the user approves the exact diff, and the browser writes as the current user with revision preconditions.
+- Troubleshoots Grafana-managed alert rules linked to dashboard panels, read-only.
+- Screenshots dashboards and navigates within Grafana.
 - Adds dashboard panel menu actions for contextual Assistant prompts.
 - Optionally runs as the `grafana-assistant-app` variant with Grafana's extension sidebar integration enabled.
 - In the `grafana-assistant-app` variant, can use Grafana's restricted dashboard mutation API for typed live edits to the currently open unsaved dashboard, including panel rename/query/add/move, dashboard settings, and custom/query variables.
-- Keeps broad metric reconnaissance available through a restricted metrics subagent.
-- Stores chat sessions per Grafana user with plugin user storage.
+- Compacts long conversations to fit each model's configured context window.
+- Stores chat sessions, including the session filesystem, per Grafana user with plugin user storage.
 
 ## Plugin variants
 
@@ -42,58 +48,81 @@ Configure the app plugin from Grafana's plugin settings page:
   - `protocol`: Upstream API protocol, one of `auto`, `chat-completions`, or `responses`. `auto` starts with Chat Completions and switches to Responses only when the provider returns the specific `reasoning_effort` compatibility error that directs the caller to `/v1/responses`. Defaults to `auto`.
   - `thinkingLevel`: Optional model reasoning effort, one of `off`, `low`, `medium`, or `high`. Defaults to `off`.
   - `thinkingFormat`: Chat Completions thinking parameter format, one of `openai`, `qwen`, or `qwen-chat-template`. Responses always uses `reasoning.effort`. Defaults to `openai`.
+  - `contextWindow`: The endpoint's input-plus-output token capacity. Defaults to `131072`. The assistant compacts conversation history to fit it.
+  - `maxOutputTokens`: Output tokens requested per model call. Defaults to `16384` and is capped at half the context window. The backend clamps every request's output budget to this value.
 
   When no entry is flagged `default`, the first model is the default. All models share the configured base URL and API key.
 
 - `systemPromptAddendum`: Optional central instructions appended to the built-in system prompt. Do not include secrets because this is stored in `jsonData`.
-- `allowedPrometheusDatasourceUids`: Optional list of Prometheus datasource UIDs the assistant may discover, query, and reference in uploaded dashboards. Leave empty to allow all Prometheus datasources visible to the current Grafana user.
+- `allowedPrometheusDatasourceUids`: Optional list of Prometheus datasource UIDs the assistant may discover, query, and reference in dashboards it validates and plans. Leave empty to allow all Prometheus datasources visible to the current Grafana user.
 - `customSkills`: Optional non-secret skill definitions stored in `jsonData`. Users activate explicit custom skills with `$skill-name`; admins can also configure keyword or regex activation.
 - `openAIAPIKey`: Secret API key stored in `secureJsonData`.
 
 Chat users pick a model from the selector in the chat composer; the selection is stored per chat session, and new chats start with the configured default model. The backend validates every requested model against the configured list and rejects unknown model IDs, so users cannot reach arbitrary models. Users cannot override the system prompt addendum or datasource allow-list from the assistant page: the backend appends the configured system prompt addendum when proxying LLM requests, and Grafana datasource tools enforce the central allow-list before querying.
 
 For local Docker provisioning, `provisioning/plugins/app.yaml` reads `OPENAI_API_KEY`.
-The local demo config points Grafana at `http://host.docker.internal:8080/v1` and configures a single default model entry for the Qwen llama-server model with the `auto` protocol and medium `qwen-chat-template` thinking, and limits assistant datasource access to the provisioned `prometheus` datasource.
+The local demo config points Grafana at `http://host.docker.internal:8080/v1` and configures a single default model entry for the local llama-server model (Ornith-1.5-35B-A3B by default) with the `auto` protocol and medium `qwen-chat-template` thinking, and limits assistant datasource access to the provisioned `prometheus` datasource.
+Compose sets the model limits from `PI_CONTEXT_WINDOW` and `PI_MAX_OUTPUT_TOKENS` (defaults `131072` and `16384`).
 When `OPENAI_API_KEY` is unset, Compose provides a local dummy key because llama-server only needs a bearer token-shaped value.
 
-Managed dashboard writes use the plugin service account declared in `plugin.json`. In local Docker, `docker-compose.yaml` enables Grafana's external service account support for this and starts Grafana image rendering so screenshot verification can run.
+Dashboard reads and writes run in the browser as the current Grafana user, so they follow that user's dashboard and folder permissions. `plugin.json` still declares dashboard and folder permissions for the plugin service account, but the backend no longer uses them. In local Docker, `docker-compose.yaml` starts Grafana image rendering so screenshots can run.
 
-## Managed dashboards
+## Session filesystem and agent
 
-The backend vendors Jsonnet libraries under `pkg/plugin/jsonnet/vendor` using the same `jsonnet-bundler` layout as `agentic-observability`. For new dashboards the assistant writes self-contained plain Jsonnet source to a session-scoped virtual `dashboard.jsonnet` file, applies compact edits to that file, and the backend compiles it with the embedded vendored libraries before saving the dashboard. If a model invents unsupported Grafonnet constructors, `render_dashboard` automatically attempts one transactional structural repair for common bad `g.dashboard.new(...)`, `g.dashboard.with_panels(...)`, panel constructor, and target constructor shapes. `fix_jsonnet` remains available for explicit repair after other render errors.
+The assistant is a single agent; there are no specialist subagents or per-skill tool sets. Its tool list is the same on every turn:
 
-The assistant can plan, write, render, and save Jsonnet-backed dashboards with:
+- `read`, `write`, `edit`, `bash` over the session filesystem.
+- `inspect_dashboard_context` for typed panel, query, layout, and variable context.
+- `inspect_dashboard_metric_usage`, `search_dashboard_metric_usage`, and `get_metric_neighborhood` for dashboard-derived metric context.
+- `find_panel_alert_rules` and `get_alert_rule` for read-only alert troubleshooting.
+- The live dashboard tools, in the `grafana-assistant-app` variant when the dashboard mutation API is available.
+- `update_report`, `navigate`, `screenshot_dashboard`, and `read_artifact`.
 
-- `write_dashboard_plan`
-- `write_jsonnet`
-- `edit_jsonnet`
-- `fix_jsonnet`
-- `read_jsonnet`
-- `render_dashboard`
-- `save_dashboard`
+Each chat has its own filesystem:
 
-Rendered dashboards are saved through the Grafana dashboards API (`/api/dashboards/db`) using the plugin service account. Before saving, the backend requires a title, normalizes the UID and panel layout, forces the `genai` tag, and rejects dashboards that reference datasource UIDs outside the configured allow-list. The Jsonnet source and its checksum stay with the chat session's virtual files, which are persisted in plugin user storage.
+| Path                                       | Contents                                                                                                                                                                 |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/grafana/dashboards/<uid>/dashboard.json` | Local working copy of a dashboard resource. Fetched on first read through Grafana's dashboard App Platform API as the current user. `meta.json` next to it is read-only. |
+| `/grafana/catalog/dashboards.ndjson`       | Metadata-only catalog of visible dashboards, loaded on first read. `coverage.json` reports whether it is complete.                                                       |
+| `/live/dashboard/*.json`                   | Read-only unsaved state of the dashboard open in the browser (variant with the mutation API only).                                                                       |
+| `/workspace`, `/session`                   | Scratch files persisted with the chat. `/workspace` is the default working directory; `/session/plan.md` and `/session/findings.md` hold durable notes.                  |
+| `/tmp`                                     | Scratch files that are not persisted.                                                                                                                                    |
+| `/artifacts`, `/.agents/skills`            | Read-only earlier tool results and skill files.                                                                                                                          |
 
-The default chat toolset does not expose raw dashboard JSON upload/delete tools, raw Prometheus data-frame output, or direct vendored Jsonnet file browsing. Durable dashboard writes go through the Jsonnet-backed render-and-save path.
+Each tool call or bash invocation is one transaction with quotas and path checks. Links are not supported. Its file changes are committed together, or discarded on timeout, cancellation, or a quota or policy error. `workspace` commands first commit the writes made earlier in the same call.
 
-## Subagents
+`bash` runs just-bash (its browser bundle) on the main thread, with coreutils, `rg`, `grep`, `find`, `sed`, `awk`, `jq`, `yq`, and `diff`, plus these commands (run `<command> --help`):
 
-The top-level assistant is a supervisor that delegates to specialist subagents, each a nested agent with a narrow system prompt, a narrow tool allow-list, and a per-specialist tool-call budget:
+- `grafana search|fetch|refresh`: dashboard discovery and working-copy hydration.
+- `grafana-prom datasources|metrics|labels|series|query`: Prometheus discovery and bounded query summaries. `query` accepts several `-e EXPR` in one call.
+- `grafana-dashboard inspect|fix|validate`: dashboard summaries, explicit layout repair, and validation (structure, PromQL syntax, datasource allow-list).
+- `jsonnet [eval] FILE [-o OUT] [--resource UID]`, `jsonnet fix FILE`, `jsonnet lib ls|cat|search`: Jsonnet evaluation and repair in the backend, and browsing of the vendored libraries.
+- `workspace status|diff|discard|plan|apply|plans`: staged changes, plans, and approved writes.
+- `python3` / `python`: CPython compiled to WebAssembly, run in a Web Worker per invocation with no network access. It works on a copy of the filesystem; its file changes go through the same transaction.
 
-- `run_query_agent`: Prometheus metric discovery and PromQL validation.
-- `run_dashboard_agent`: dashboard design, Jsonnet, render, save, and live-edit work.
-- `run_investigation_agent`: incident and root-cause analysis with a structured report.
-- `run_alert_agent`: read-only troubleshooting of Grafana-managed alert rules, especially panel-linked rules.
-- `run_support_agent`: Grafana and observability explanations.
-- `run_navigation_agent`: safe Grafana navigation and link building.
+## Dashboard changes
 
-Persistent writes from any specialist still require the parent assistant's existing approval flow.
+Existing dashboards are edited in their working copy. For new dashboards, the assistant writes Jsonnet under `/workspace` and renders it into a working copy with `jsonnet FILE --resource <uid> -o /grafana/dashboards/<uid>/dashboard.json`. The backend evaluates Jsonnet statelessly with the libraries vendored under `pkg/plugin/jsonnet/vendor` (same `jsonnet-bundler` layout as `agentic-observability`). `jsonnet fix` rewrites common invalid Grafonnet constructor shapes in place.
+
+Nothing reaches Grafana until the assistant runs:
+
+1. `grafana-dashboard validate` on the changed files.
+2. `workspace plan`, which validates the staged changes and freezes them into a plan identified by a SHA-256 digest.
+3. `workspace apply <plan-id>`, which opens the confirmation modal with the plan's diff. Waiting for approval does not count against the bash timeout. After approval, the plan is checked again for staleness. Then the browser writes each dashboard through `/apis/dashboard.grafana.app/<version>` as the current user, with `resourceVersion` preconditions. A concurrent change returns `conflicted`.
+
+Every apply is journaled per operation as `applied`, `conflicted`, `failed`, `unknown`, or `not attempted`. Imported chat sessions drop plans and the journal, so approvals do not carry over. Jsonnet files from sessions created with the retired virtual-file tools migrate into `/workspace`.
+
+Live dashboard tools change only the unsaved dashboard open in the browser and do not ask for approval. Saving that state still goes through Grafana's own save flow.
+
+## Context window and compaction
+
+Before each model request, the assistant estimates tokens for the system prompt, tool schemas, and history. The budget is `contextWindow − maxOutputTokens − margin`. Above 80% of it, older bulky tool outputs are elided first. If that is not enough, older turns are summarized by the model into a rolling summary that keeps identifiers, paths, and plan IDs verbatim. Cuts never separate a tool call from its result, the summary is persisted with the session, and truncation is the fallback. The visible transcript stays complete. For long tasks, the assistant keeps notes in `/session/plan.md` and `/session/findings.md`.
 
 ## Skills
 
-Dashboard instructions are split into repo-local skills under `.agents/skills/<skill-name>/SKILL.md`, using the same default `SKILL.md` directory shape as local agent skill installs. `npm run generate:skills` validates those files and bundles them into `src/pages/Chat/skills/bundledSkills.generated.ts` for the frontend.
+Instructions are split into repo-local skills under `.agents/skills/<skill-name>/SKILL.md`, using the same default `SKILL.md` directory shape as local agent skill installs. `npm run generate:skills` validates those files and bundles them into `src/pages/Chat/skills/bundledSkills.generated.ts` for the frontend.
 
-The bundled skills are `grafana-dashboard`, `grafana-alerting`, and `investigation`. The chat agent always has metric discovery tools, dashboard-derived metric context tools, and the specialist subagent tools available. Dashboard guidance activates when the prompt asks for dashboard, panel, Jsonnet, render, or save work, which also enables the dashboard read, live-edit, and Jsonnet tool groups for that turn; alert wording (or panel context plus a firing/warning mention) activates the alerting skill and its read-only alert tools. New bundled skills can be added by creating another `.agents/skills/<name>/SKILL.md`; add optional text resources under `references/`, `templates/`, or `assets/`.
+The bundled skills are `grafana-dashboard`, `grafana-alerting`, and `investigation`. Skills add instructions only; they do not change the tool list. The system prompt lists the available skills and inlines active ones. Dashboard, alert, and investigation wording activates the matching bundled skill, and so does `$skill-name`. Skill files and resources are mounted read-only under `/.agents/skills/<name>/`, and the agent reads them with `read`. New bundled skills can be added by creating another `.agents/skills/<name>/SKILL.md`; add optional text resources under `references/`, `templates/`, or `assets/`.
 
 Admins can also add small instance-specific custom skills through plugin configuration:
 
@@ -106,7 +135,6 @@ Admins can also add small instance-specific custom skills through plugin configu
     "activation": {
       "explicitOnly": true
     },
-    "toolGroups": ["metrics", "skillResources"],
     "resources": [
       {
         "path": "references/team-runbook.md",
@@ -117,8 +145,7 @@ Admins can also add small instance-specific custom skills through plugin configu
 ]
 ```
 
-Custom skills are non-secret frontend configuration and are sent to the configured LLM when active. Supported custom skill tool groups are `metrics`, `alerts`, `dashboardMetricContext`, `dashboardRead`, `jsonnetFiles`, `jsonnetDashboards`, `investigation`, `subagents`, and `skillResources`.
-The bundled investigation skill uses the `investigation` tool group to maintain the structured report shown in the chat workspace.
+Custom skills are non-secret frontend configuration and are sent to the configured LLM when active. Their resources appear under `/.agents/skills/<name>/` like bundled ones. The optional `toolGroups` field no longer selects tools. It is kept as descriptive metadata, and configurations that name `metrics`, `alerts`, `dashboardMetricContext`, `dashboardRead`, `investigation`, or `skillResources` still validate. So do configurations that name the retired groups `jsonnetFiles`, `jsonnetDashboards`, and `subagents`.
 
 ## Development
 
@@ -260,22 +287,23 @@ mise run dev:reload:variant:fresh
 
 This task deletes Compose volumes with `docker compose down -v --remove-orphans`, rebuilds/reloads the assistant variant, regenerates the Prometheus history, and then seeds the Grafana dashboard and alert samples.
 
-For the default local LLM config, run an OpenAI-compatible llama-server on the host:
+For the default local LLM config, run an OpenAI-compatible llama-server on the host with [Ornith-1.5-35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B), a Qwen3.5-MoE derivative tuned for agentic tool use. Use the model's adjusted chat template and the card's recommended sampling for general tasks:
 
 ```bash
-llama-server -hf unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL \
+curl -sLo ornith-chat-template.jinja \
+  https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B/raw/main/chat_template.jinja
+llama-server -hf ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M \
+  --jinja \
+  --chat-template-file ornith-chat-template.jinja \
   --host 0.0.0.0 \
   --port 8080 \
-  --temp 1.0 \
+  --temp 0.6 \
   --top-p 0.95 \
   --top-k 20 \
-  --presence-penalty 1.5 \
-  --min-p 0.00 \
-  --spec-type draft-mtp \
-  --spec-draft-n-max 2
+  --min-p 0.00
 ```
 
-Use a recent llama.cpp build with `draft-mtp` support; older `llama-server` builds reject that `--spec-type` value or fail to load the MTP GGUF.
+The template supports `enable_thinking`, so the existing `qwen-chat-template` thinking format applies. The previous default, `unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL` with `--spec-type draft-mtp`, still works; set `PI_DEFAULT_MODEL` to its ID when using it.
 
 To generate a benchmark profile from a model already configured in Pi, reuse the provider/model IDs from `dev:model -- --list`:
 
@@ -287,7 +315,7 @@ npm run benchmark:run -- --config benchmarks/qwen38-azure.json --dry-run
 npm run benchmark:run -- --config benchmarks/qwen38-azure.json
 ```
 
-Generate and run each model's profile manually in turn. The generator imports the endpoint, protocol, and supported thinking settings, and references Pi credentials for resolution at run time. `--thinking`, `--repetitions`, and hosting metadata flags customize the profile; `--api-key-env NAME` selects separate credentials. Profile creation and dry runs never resolve keys or call the model. Applying `dev:model` beforehand is unnecessary: the benchmark runner configures Grafana during preparation.
+Generate and run each model's profile manually in turn. The generator imports the endpoint, protocol, supported thinking settings, and Pi's `contextWindow`/`maxTokens` model limits, and references Pi credentials for resolution at run time. `--thinking`, `--context-window`, `--max-output-tokens`, `--repetitions`, and hosting metadata flags customize the profile; `--api-key-env NAME` selects separate credentials. Profile creation and dry runs never resolve keys or call the model. Applying `dev:model` beforehand is unnecessary: the benchmark runner configures Grafana during preparation.
 
 To run all benchmark cases for one model/hosting/thinking configuration and save a versioned JSON result with token usage and latency, you can also use the local example:
 
@@ -322,7 +350,7 @@ To benchmark the typed dashboard context repair path, run:
 npm run benchmark:dashboard-context
 ```
 
-This benchmark seeds a stale dashboard, then runs a rich-context repair that must use `inspect_dashboard_context`, render, and save a managed dashboard copy. It writes the report to `test-results/dashboard-context-benchmark/latest-report.txt` with separate event and answer files for the run.
+This benchmark seeds a stale dashboard, then runs a rich-context repair that must inspect the source dashboard (`inspect_dashboard_context` or its working copy), recognize the stale queries, and apply a repaired copy through `workspace plan` and an approved `workspace apply`. It writes the report to `test-results/dashboard-context-benchmark/latest-report.txt` with separate event and answer files for the run.
 
 To benchmark live dashboard editing in the sidebar-capable variant, run:
 
@@ -330,7 +358,7 @@ To benchmark live dashboard editing in the sidebar-capable variant, run:
 npm run benchmark:dashboard-editing
 ```
 
-This benchmark starts the `grafana-assistant-app` variant on http://localhost:3001 and validates three flows: typed multi-step live edits from a dashboard sidebar, recovery after an intentionally failed typed live edit, and graceful fallback when Assistant is open without an active dashboard mutation client. It writes reports to `test-results/dashboard-editing-benchmark/latest-report.txt`, `latest-answer.md`, and `latest-events.json`.
+This benchmark starts the `grafana-assistant-app` variant on http://localhost:3001 and validates four flows: adding a variable and filtering every panel on a large dashboard, typed multi-step live edits from a dashboard sidebar, recovery after an intentionally failed typed live edit, and graceful fallback when Assistant is open without an active dashboard mutation client. It also checks that live edits do not change the saved dashboard version. It writes reports to `test-results/dashboard-editing-benchmark/latest-report.txt`, `latest-answer.md`, and `latest-events.json`.
 If you already have a compatible OpenAI-compatible model server running, set `BENCH_MANAGE_LLAMA=0` so the benchmark reuses it instead of starting `llama-server`.
 
 To benchmark read-only panel-linked alert troubleshooting in the sidebar-capable variant, run:
@@ -339,7 +367,7 @@ To benchmark read-only panel-linked alert troubleshooting in the sidebar-capable
 npm run benchmark:alert-troubleshooting
 ```
 
-This benchmark seeds a dashboard panel and a Grafana-managed AlertRule linked through the App Platform AlertRule API, then validates that Assistant uses the alert specialist to find the linked rule, inspect the panel, run PromQL evidence, and explain an alert-vs-panel threshold mismatch without editing alerts or dashboards. It writes reports to `test-results/alert-troubleshooting-benchmark/latest-report.txt`, `latest-answer.md`, and `latest-events.json`.
+This benchmark seeds a dashboard panel and a Grafana-managed AlertRule linked through the App Platform AlertRule API, then validates that Assistant looks up the linked rule with `find_panel_alert_rules` or `get_alert_rule`, runs `grafana-prom query` evidence, and explain an alert-vs-panel threshold mismatch without editing alerts or dashboards. It writes reports to `test-results/alert-troubleshooting-benchmark/latest-report.txt`, `latest-answer.md`, and `latest-events.json`.
 
 To benchmark dashboard-derived metric discovery, run:
 
@@ -347,14 +375,14 @@ To benchmark dashboard-derived metric discovery, run:
 npm run benchmark:dashboard-metric-discovery
 ```
 
-This benchmark seeds dashboards with overlapping HTTP, latency, node load, and CPU panels. It requires exactly one top-level `run_query_agent` call, checks that the query specialist uses `search_dashboard_metric_usage` or `get_metric_neighborhood` before validating PromQL, and writes reports to `test-results/dashboard-metric-discovery-benchmark/latest-report.txt`, `latest-answer.md`, and `latest-events.json`.
+This benchmark seeds dashboards with overlapping HTTP, latency, node load, and CPU panels. It checks that the assistant consults dashboard-derived context (the metric-usage tools, or `grafana search|fetch`, `grafana-dashboard inspect`, or searches under `/grafana/`) before its first `grafana-prom query`, stays read-only and within the tool-call budget, and names the related metrics. It writes reports to `test-results/dashboard-metric-discovery-benchmark/latest-report.txt`, `latest-answer.md`, and `latest-events.json`.
 
-To benchmark only the `run_query_agent` discovery path, run:
+To benchmark read-only Prometheus metric discovery, run:
 
 ```bash
 npm run benchmark:explore-metrics
 ```
 
-This benchmark requires exactly one top-level `run_query_agent` call, checks the returned metric coverage and nested tool count, and writes reports to `test-results/explore-metrics-benchmark/latest-report.txt`, `latest-answer.md`, and `latest-events.json`.
+This benchmark requires successful `grafana-prom metrics|labels|series` discovery and `grafana-prom query` evidence, no staged or applied dashboard changes, a bounded tool-call count, and an answer that names the expected metrics and labels. It writes reports to `test-results/explore-metrics-benchmark/latest-report.txt`, `latest-answer.md`, and `latest-events.json`.
 
 Open Grafana at http://localhost:3000 and navigate to the Observability Analyst app page.

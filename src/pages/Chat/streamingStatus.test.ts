@@ -79,13 +79,13 @@ describe('streaming status', () => {
           content: [
             { type: 'thinking', thinking: 'checking' },
             { type: 'text', text: 'answer' },
-            { type: 'toolCall', name: 'list_datasources', arguments: {} },
+            { type: 'toolCall', name: 'inspect_dashboard_context', arguments: {} },
           ],
         },
       } as any,
       1800
     );
-    expect(status).toMatchObject({ phase: 'preparing_tool', detail: 'list_datasources', startedAt: 1000 });
+    expect(status).toMatchObject({ phase: 'preparing_tool', detail: 'inspect_dashboard_context', startedAt: 1000 });
   });
 
   it('resolves display status from the live streaming assistant message', () => {
@@ -112,37 +112,37 @@ describe('streaming status', () => {
         type: 'message_update',
         message: {
           role: 'assistant',
-          content: [{ type: 'toolCall', name: 'list_datasources', arguments: {} }],
+          content: [{ type: 'toolCall', name: 'inspect_dashboard_context', arguments: {} }],
         },
         assistantMessageEvent: { type: 'toolcall_start' },
       } as any,
       1500
     );
-    expect(runStatusText(status)).toBe('Preparing list datasources');
+    expect(runStatusText(status)).toBe('Preparing inspect dashboard context');
     expect(runStatusBadgeText(status)).toBe('Tool call');
 
     status = reduceChatRunStatus(
       status,
-      { type: 'tool_execution_start', toolName: 'list_datasources', toolCallId: 'call-1', args: {} } as any,
+      { type: 'tool_execution_start', toolName: 'inspect_dashboard_context', toolCallId: 'call-1', args: {} } as any,
       1800
     );
-    expect(runStatusText(status)).toBe('Running list datasources');
+    expect(runStatusText(status)).toBe('Running inspect dashboard context');
     expect(runStatusBadgeText(status)).toBe('Running tool');
-    expect(runStatusText(status, 'save_dashboard')).toBe('Waiting for approval: save dashboard');
-    expect(runStatusBadgeText(status, 'save_dashboard')).toBe('Approval');
+    expect(runStatusText(status, 'workspace_apply')).toBe('Waiting for approval: workspace apply');
+    expect(runStatusBadgeText(status, 'workspace_apply')).toBe('Approval');
   });
 
-  it('treats terminal subagent partial updates as tool result processing', () => {
+  it('treats terminal partial updates as tool result processing', () => {
     let status = reduceChatRunStatus(
       createInitialRunStatus(1000),
       {
         type: 'tool_execution_update',
-        toolName: 'run_query_agent',
+        toolName: 'bash',
         toolCallId: 'call-1',
         args: {},
         partialResult: {
           content: [{ type: 'text', text: 'done' }],
-          details: { type: 'subagent', status: 'completed' },
+          details: { status: 'completed' },
         },
       } as any,
       1500

@@ -1,195 +1,61 @@
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { createAlertTools } from './alerts';
 import { createArtifactTools } from './artifacts';
-import { createDashboardTools } from './dashboards';
+import { createDashboardContextTools } from './dashboardContext';
 import { createDashboardMetricContextTools } from './dashboardMetricContext';
-import { createDashboardPlanTools } from './dashboardPlans';
 import { createLiveDashboardMutationTools } from './dashboardMutation';
-import { createJsonnetDashboardTools } from './jsonnetDashboards';
-import { createJsonnetFileTools } from './jsonnetFiles';
-import { createJsonnetLibTools } from './jsonnetLibs';
+import { createDashboardScreenshotTools } from './dashboards';
 import { createInvestigationTools } from './investigation';
-import { createMetricTools, filterAllowedPrometheusDatasourceSettings } from './metrics';
+import { filterAllowedPrometheusDatasourceSettings } from './metrics';
 import { createNavigationTools } from './navigation';
-import { createSubagentTools } from './subagents';
-import type { CreateGrafanaToolsOptions, GrafanaToolRegistry, SkillToolGroup } from './types';
+import type { CreateGrafanaToolsOptions } from './types';
 
 export { artifactByteSize, artifactizeToolResult, createArtifactTools, readArtifact } from './artifacts';
 export type { Artifact, ArtifactPreview, ArtifactRef, ArtifactRuntime } from './artifacts';
 export { createAlertTools } from './alerts';
 export { createDashboardMetricContextTools, extractDashboardMetricUsage } from './dashboardMetricContext';
-export { createDashboardPlanTools } from './dashboardPlans';
 export { getUnavailableDashboardDatasourceUids } from './dashboardPolicy';
 export { createLiveDashboardMutationTools, LIVE_DASHBOARD_WRITE_TOOLS } from './dashboardMutation';
-export { DEFAULT_JSONNET_FILE_PATH, normalizeJsonnetPath } from './jsonnetFiles';
 export { filterAllowedPrometheusDatasourceSettings };
-export { createSkillTools } from './skills';
 export { buildNavigationPath } from './navigation';
 export type {
   CreateGrafanaToolsOptions,
-  DashboardPlanToolSet,
-  DashboardSaveFolderRuntime,
-  DashboardSaveFolderSelection,
   GrafanaToolConfig,
-  GrafanaToolRegistry,
   GrafanaToolRuntime,
   InvestigationReport,
   InvestigationReportRuntime,
   SkillToolGroup,
-  VirtualJsonnetFileRuntime,
-  VirtualJsonnetFileSnapshot,
 } from './types';
-export type { SubagentRunDetails, SubagentToolCall, SubagentUsage } from './subagentRunner';
 
-export function createGrafanaToolRegistry(options: CreateGrafanaToolsOptions = {}): GrafanaToolRegistry {
-  const metrics = createMetricTools(options);
-  const alerts = createAlertTools(options);
-  const dashboardMetricContext = createDashboardMetricContextTools(options);
-  const dashboards = createDashboardTools(options, options.includeAdHocDashboardTools);
-  const dashboardReadTools = createDashboardTools(options, false);
-  const liveDashboardEditing = createLiveDashboardMutationTools(options.dashboardMutation);
-  const dashboardPlans = createDashboardPlanTools(options);
-  const jsonnetFiles = createJsonnetFileTools(options);
-  const jsonnetDashboards = createJsonnetDashboardTools(options);
-  const investigation = createInvestigationTools(options.investigationReport);
-  const jsonnet = createJsonnetLibTools();
-  const navigation = createNavigationTools();
-  const artifacts = createArtifactTools(options.artifacts);
-  const parentJsonnetDashboardTools = jsonnetDashboards.all;
-  const skills = options.skillTools ?? [];
-  const subagents = options.runtime
-    ? createSubagentTools({
-        runtime: options.runtime,
-        metricsTools: metrics,
-        alertTools: alerts,
-        dashboardMetricContextTools: dashboardMetricContext,
-        dashboardReadTools,
-        liveDashboardTools: liveDashboardEditing,
-        dashboardPlanTools: dashboardPlans.all,
-        jsonnetFileTools: jsonnetFiles.all,
-        jsonnetDashboardTools: jsonnetDashboards.all,
-        investigationTools: investigation,
-        navigationTools: navigation,
-        artifactTools: artifacts,
-        skillTools: skills,
-      })
-    : [];
-
-  return {
-    metrics,
-    alerts,
-    dashboardMetricContext,
-    dashboards,
-    liveDashboardEditing,
-    dashboardPlans,
-    jsonnetFiles,
-    jsonnetDashboards,
-    investigation,
-    jsonnet,
-    artifacts,
-    subagents,
-    skills,
-    all: [
-      ...metrics,
-      ...alerts,
-      ...dashboardMetricContext,
-      ...liveDashboardEditing,
-      ...dashboardPlans.all,
-      ...jsonnetFiles.all,
-      ...parentJsonnetDashboardTools,
-      ...investigation,
-      ...artifacts,
-      ...subagents,
-      ...skills,
-      ...(options.includeJsonnetLibraryTools ? jsonnet.all : []),
-      ...dashboards,
-    ],
-  };
-}
-
+/**
+ * The single assistant's fixed tool surface. The session filesystem tools
+ * (read/write/edit/bash, including the grafana, grafana-prom,
+ * grafana-dashboard, jsonnet, and workspace commands) cover discovery,
+ * querying, and resource changes. The remaining typed tools cover
+ * capabilities the shell does not provide yet. The list does not change
+ * between turns.
+ */
 export function createGrafanaTools(options: CreateGrafanaToolsOptions = {}): AgentTool[] {
-  return createGrafanaToolRegistry(options).all;
-}
-
-export function createGrafanaSupervisorTools(options: CreateGrafanaToolsOptions = {}): AgentTool[] {
-  const registry = createGrafanaToolRegistry(options);
-  return dedupeTools([...registry.subagents, ...registry.artifacts]);
-}
-
-export function createGrafanaToolsForSkillGroups(
-  options: CreateGrafanaToolsOptions = {},
-  groups: Iterable<SkillToolGroup>
-): AgentTool[] {
-  const groupSet = new Set(groups);
-  const registry = createGrafanaToolRegistry({
-    ...options,
-    includeAdHocDashboardTools: groupSet.has('adHocDashboards'),
-    includeJsonnetLibraryTools: groupSet.has('jsonnetLibraries'),
-  });
-  const selected: AgentTool[] = [];
-
-  if (groupSet.has('metrics')) {
-    selected.push(...registry.metrics);
-  }
-
-  if (groupSet.has('alerts')) {
-    selected.push(...registry.alerts);
-  }
-
-  if (groupSet.has('dashboardMetricContext')) {
-    selected.push(...registry.dashboardMetricContext);
-  }
-
-  if (groupSet.has('jsonnetFiles')) {
-    selected.push(...registry.dashboardPlans.all);
-    selected.push(...registry.jsonnetFiles.all);
-  }
-
-  if (groupSet.has('liveDashboardEditing')) {
-    selected.push(...registry.liveDashboardEditing);
-  }
-
-  if (groupSet.has('jsonnetDashboards')) {
-    selected.push(...registry.jsonnetDashboards.all);
-  }
-
-  if (groupSet.has('investigation')) {
-    selected.push(...registry.investigation);
-  }
-
-  if (groupSet.has('subagents')) {
-    selected.push(...registry.subagents);
-  }
-
-  if (groupSet.has('skillResources')) {
-    selected.push(...registry.skills);
-  }
-
-  selected.push(...registry.artifacts);
-
-  if (groupSet.has('jsonnetLibraries')) {
-    selected.push(...registry.jsonnet.all);
-  }
-
-  if (groupSet.has('dashboardRead') || groupSet.has('adHocDashboards')) {
-    selected.push(...registry.dashboards);
-  }
-
-  return dedupeTools(selected);
+  return dedupeTools([
+    ...(options.workspaceTools ?? []),
+    ...createDashboardContextTools(options),
+    ...createDashboardMetricContextTools(options),
+    ...createAlertTools(options),
+    ...createLiveDashboardMutationTools(options.dashboardMutation),
+    ...createInvestigationTools(options.investigationReport),
+    ...createNavigationTools(),
+    ...createDashboardScreenshotTools(),
+    ...createArtifactTools(options.artifacts),
+  ]);
 }
 
 function dedupeTools(tools: readonly AgentTool[]) {
   const seen = new Set<string>();
-  const deduped: AgentTool[] = [];
-
-  for (const tool of tools) {
+  return tools.filter((tool) => {
     if (seen.has(tool.name)) {
-      continue;
+      return false;
     }
-
     seen.add(tool.name);
-    deduped.push(tool);
-  }
-
-  return deduped;
+    return true;
+  });
 }

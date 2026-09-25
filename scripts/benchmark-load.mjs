@@ -66,6 +66,8 @@ Object.assign(env, {
   PI_OPENAI_PROTOCOL: config.model.protocol,
   PI_THINKING_LEVEL: config.model.thinkingLevel,
   PI_THINKING_FORMAT: config.model.thinkingFormat,
+  PI_CONTEXT_WINDOW: String(config.model.contextWindow ?? ''),
+  PI_MAX_OUTPUT_TOKENS: String(config.model.maxOutputTokens ?? ''),
   BENCH_EXPECTED_MODEL: JSON.stringify(config.model),
 });
 const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;

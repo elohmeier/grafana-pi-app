@@ -5,7 +5,6 @@ jest.mock('typebox', () => ({
   },
 }));
 
-import { createSkillTools } from '../tools/skills';
 import { getGrafanaSkills } from './catalog';
 import { parseCustomSkillsJson, validateCustomSkillsJson } from './configured';
 
@@ -123,36 +122,31 @@ describe('configured Grafana skills', () => {
     ).toContain('name must be kebab-case');
   });
 
-  it('reads resources from a configured skill', async () => {
-    const skills = getGrafanaSkills(
-      {
-        customSkills: [
-          {
-            name: 'team-runbook',
-            description: 'Team incident workflow.',
-            content: '# Team Runbook',
-            resources: [{ path: 'references/runbook.md', content: '# Runbook' }],
-          },
-        ],
-      },
-      []
-    );
-    const tool = createSkillTools(skills)[0] as {
-      execute: (toolCallId: string, params: unknown, signal?: AbortSignal) => Promise<ToolResult>;
-    };
+  it('accepts legacy Jsonnet tool groups without selecting them', () => {
+    expect(
+      validateCustomSkillsJson(`[
+        {
+          "name": "legacy-runbook",
+          "description": "Legacy groups.",
+          "content": "# Legacy",
+          "toolGroups": ["metrics", "jsonnetFiles", "jsonnetDashboards"]
+        }
+      ]`)
+    ).toBeUndefined();
 
-    const result = await tool.execute('call-1', { skill: 'team-runbook', path: 'references/runbook.md' }, undefined);
+    const [skill] = getGrafanaSkills({
+      customSkills: [
+        {
+          name: 'legacy-runbook',
+          description: 'Legacy groups.',
+          content: '# Legacy',
+          toolGroups: ['metrics', 'jsonnetFiles', 'jsonnetDashboards'] as any,
+        },
+      ],
+    }).filter((candidate) => candidate.name === 'legacy-runbook');
 
-    expect(result.content[0].text).toContain('# Runbook');
-    expect(result.details).toMatchObject({
-      skill: 'team-runbook',
-      path: 'references/runbook.md',
-      truncated: false,
-    });
+    expect(skill.toolGroups).toContain('metrics');
+    expect(skill.toolGroups).not.toContain('jsonnetFiles');
+    expect(skill.toolGroups).not.toContain('jsonnetDashboards');
   });
 });
-
-type ToolResult = {
-  content: Array<{ text: string }>;
-  details: Record<string, unknown>;
-};

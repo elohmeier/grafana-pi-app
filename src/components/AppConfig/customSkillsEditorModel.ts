@@ -2,6 +2,7 @@ import type { PiAppCustomSkill, PiAppCustomSkillResource } from '../../types';
 import {
   CONFIGURABLE_SKILL_TOOL_GROUPS,
   CUSTOM_SKILL_CONFIG_LIMITS,
+  LEGACY_SKILL_TOOL_GROUPS,
   CUSTOM_SKILL_NAME_PATTERN,
   isValidCustomSkillRegex,
   isValidCustomSkillResourcePath,
@@ -19,7 +20,8 @@ export type CustomSkillValidationIssue = {
 };
 
 const DEFAULT_TOOL_GROUP = 'skillResources';
-const CONFIGURABLE_TOOL_GROUP_SET = new Set<string>(CONFIGURABLE_SKILL_TOOL_GROUPS);
+// Tool groups no longer select tools; the field is kept so existing configs round-trip unchanged.
+const KNOWN_TOOL_GROUP_SET = new Set<string>([...CONFIGURABLE_SKILL_TOOL_GROUPS, ...LEGACY_SKILL_TOOL_GROUPS]);
 
 export function createEmptyCustomSkill(existingSkills: readonly PiAppCustomSkill[]): PiAppCustomSkill {
   return {
@@ -187,7 +189,7 @@ function validateSkillToolGroups(skill: PiAppCustomSkill, skillIndex: number, is
   const label = skillLabel(skillIndex);
 
   for (const group of skill.toolGroups ?? []) {
-    if (typeof group !== 'string' || !CONFIGURABLE_TOOL_GROUP_SET.has(group)) {
+    if (typeof group !== 'string' || !KNOWN_TOOL_GROUP_SET.has(group)) {
       issues.push({
         skillIndex,
         field: 'toolGroups',
@@ -262,7 +264,7 @@ function serializeActivation(skill: PiAppCustomSkill) {
 
 function serializeToolGroups(value: PiAppCustomSkill['toolGroups']) {
   const groups = uniqueStrings([DEFAULT_TOOL_GROUP, ...(value ?? [])]).filter((group) =>
-    CONFIGURABLE_TOOL_GROUP_SET.has(group)
+    KNOWN_TOOL_GROUP_SET.has(group)
   );
 
   return groups.length > 0 ? groups : [DEFAULT_TOOL_GROUP];

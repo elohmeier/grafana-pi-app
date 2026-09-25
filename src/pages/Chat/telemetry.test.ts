@@ -55,23 +55,18 @@ describe('assistant telemetry reporter', () => {
     reporter.recordAgentEvent({
       type: 'tool_execution_start',
       toolCallId: 'call-1',
-      toolName: 'run_query_agent',
-      args: { task: 'inspect latency' },
+      toolName: 'bash',
+      args: { command: 'grafana-prom query "inspect latency"' },
     } as any);
     now = 11_250;
     reporter.recordAgentEvent({
       type: 'tool_execution_end',
       toolCallId: 'call-1',
-      toolName: 'run_query_agent',
+      toolName: 'bash',
       isError: false,
       result: {
         content: [{ type: 'text', text: 'done' }],
-        details: {
-          toolCalls: [
-            { name: 'list_metrics', status: 'completed' },
-            { name: 'query_prometheus', status: 'completed' },
-          ],
-        },
+        details: { command: 'grafana-prom query "inspect latency"', exitCode: 0 },
       },
     } as any);
     now = 11_300;
@@ -128,15 +123,11 @@ describe('assistant telemetry reporter', () => {
     );
 
     expect(sent.find((event) => event.type === 'tool_execution_end')).toMatchObject({
-      toolName: 'run_query_agent',
+      toolName: 'bash',
       status: 'completed',
       durationMs: 650,
-      nestedToolCallCount: 2,
-      nestedToolCalls: [
-        { name: 'list_metrics', status: 'completed' },
-        { name: 'query_prometheus', status: 'completed' },
-      ],
     });
+    expect(sent.find((event) => event.type === 'tool_execution_end')).not.toHaveProperty('nestedToolCalls');
     expect(sent.find((event) => event.type === 'message_end')).toMatchObject({
       usage: { input: 100, output: 25, cacheRead: 3, cacheWrite: 2, totalTokens: 130 },
     });
@@ -164,17 +155,15 @@ describe('assistant telemetry reporter', () => {
       { role: 'user', content: 'inspect metrics' },
       {
         role: 'assistant',
-        content: [{ type: 'toolCall', id: 'call-1', name: 'run_query_agent', arguments: { task: 'inspect' } }],
+        content: [{ type: 'toolCall', id: 'call-1', name: 'bash', arguments: { command: 'grafana-prom query up' } }],
       },
       {
         role: 'toolResult',
         toolCallId: 'call-1',
-        toolName: 'run_query_agent',
+        toolName: 'bash',
         isError: false,
         content: [{ type: 'text', text: 'done' }],
-        details: {
-          toolCalls: [{ name: 'query_prometheus', status: 'completed' }],
-        },
+        details: { command: 'grafana-prom query up', exitCode: 0 },
       },
       {
         role: 'assistant',
@@ -190,10 +179,8 @@ describe('assistant telemetry reporter', () => {
       expect.arrayContaining([
         expect.objectContaining({
           type: 'tool_execution_end',
-          toolName: 'run_query_agent',
+          toolName: 'bash',
           status: 'completed',
-          nestedToolCallCount: 1,
-          nestedToolCalls: [{ name: 'query_prometheus', status: 'completed' }],
         }),
         expect.objectContaining({ type: 'turn_end', toolResultCount: 1 }),
         expect.objectContaining({

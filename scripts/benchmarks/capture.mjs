@@ -145,6 +145,11 @@ export function checkModelSettings(settings, expected) {
       mismatches.push(field);
     }
   }
+  for (const field of ['contextWindow', 'maxOutputTokens']) {
+    if (expected[field] !== undefined && Number(model?.[field]) !== expected[field]) {
+      mismatches.push(field);
+    }
+  }
   if (mismatches.length) {
     throw new Error(
       `Benchmark model configuration mismatch: ${mismatches.join(', ')}. Run with --prepare or configure the plugin to match the profile.`

@@ -1,7 +1,6 @@
 import { GRAFANA_SKILLS } from './catalog';
 import type { GrafanaSkill, GrafanaSkillContext, GrafanaSkillSelection, SkillToolGroup } from './types';
 
-const BASE_TOOL_GROUPS: readonly SkillToolGroup[] = ['metrics', 'dashboardMetricContext', 'subagents'];
 const DASHBOARD_INTENT =
   /\b(dashboard|dashboards|panel|panels|row|rows|variable|variables|jsonnet|render|save|sync|grafana view)\b/i;
 const DASHBOARD_WRITE_INTENT =
@@ -12,8 +11,6 @@ const INVESTIGATION_INTENT =
   /\b(investigat(?:e|ion)|analy[sz](?:e|ing|is)|diagnos(?:e|is|tic)|root cause|why (?:is|are|did)|incident|outage|failure|failing|error spike|latency spike|degradation|regression|what'?s (?:wrong|causing))\b/i;
 const ALERT_INTENT =
   /\b(alert(?:ing|s)?|alert rule|grafana-managed rule|firing|pending|normal state|warning state|no data|nodata|evaluation|silence|contact point|notification policy)\b/i;
-const EXACT_SPECIALIST_SEQUENCE =
-  /\bexactly\b[\s\S]{0,240}\brun_[a-z_]+_agent\b|\brun_[a-z_]+_agent\b[\s\S]{0,180}\btop-level tool call\b/i;
 const SKILL_REFERENCE = /\$([a-z0-9][a-z0-9-]{0,62}[a-z0-9])/gi;
 
 export function selectGrafanaSkills(
@@ -51,15 +48,14 @@ export function selectGrafanaSkills(
   }
 
   const activeSkills = [...activeNames].map((name) => skillByName.get(name)).filter(isSkill);
-  const supervisorOnly = hasExactSpecialistSequence(prompt);
-  const toolGroups = supervisorOnly ? ['subagents' as SkillToolGroup] : unionToolGroups(activeSkills, BASE_TOOL_GROUPS);
+  // Tools are a fixed set; tool groups remain only as descriptive skill metadata.
+  const toolGroups = unionToolGroups(activeSkills);
 
   return {
     activeSkills,
     activeSkillNames: activeSkills.map((skill) => skill.name),
     toolGroups,
     explicitSkillNames,
-    supervisorOnly,
   };
 }
 
@@ -88,10 +84,6 @@ function shouldActivateDashboardSkillFromContext(prompt: string, context: Grafan
 
 function shouldActivateAlertingSkill(prompt: string, context: GrafanaSkillContext | undefined) {
   return ALERT_INTENT.test(prompt) || Boolean(context?.hasPanelContext && /\b(firing|warning|alert)\b/i.test(prompt));
-}
-
-function hasExactSpecialistSequence(prompt: string) {
-  return EXACT_SPECIALIST_SEQUENCE.test(prompt);
 }
 
 function shouldActivateConfiguredSkill(prompt: string, skill: GrafanaSkill) {

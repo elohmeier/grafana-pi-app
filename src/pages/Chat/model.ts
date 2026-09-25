@@ -6,6 +6,12 @@ export type { PiAppJsonData, PiAppThinkingLevel } from '../../types';
 export const DEFAULT_THINKING_LEVEL: PiAppThinkingLevel = 'off';
 export const DEFAULT_THINKING_FORMAT: PiAppThinkingFormat = 'openai';
 export const DEFAULT_OPENAI_PROTOCOL: PiAppOpenAIProtocol = 'auto';
+// Mirror the backend normalizeModelLimits defaults and bounds.
+export const DEFAULT_CONTEXT_WINDOW = 131072;
+export const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
+const MIN_CONTEXT_WINDOW = 4096;
+const MAX_CONTEXT_WINDOW = 10_000_000;
+const MIN_MAX_OUTPUT_TOKENS = 256;
 
 export type ConfiguredModel = {
   id: string;
@@ -14,6 +20,8 @@ export type ConfiguredModel = {
   protocol: PiAppOpenAIProtocol;
   thinkingLevel: PiAppThinkingLevel;
   thinkingFormat: PiAppThinkingFormat;
+  contextWindow: number;
+  maxOutputTokens: number;
 };
 
 // Mirrors the backend normalizeModels rules: trim and dedupe by ID, normalize
@@ -38,6 +46,7 @@ export function getConfiguredModels(jsonData?: Pick<PiAppJsonData, 'models'>): C
       protocol: normalizeOpenAIProtocol(model?.protocol),
       thinkingLevel: normalizeThinkingLevel(model?.thinkingLevel),
       thinkingFormat: normalizeThinkingFormat(model?.thinkingFormat),
+      ...normalizeModelLimits(model?.contextWindow, model?.maxOutputTokens),
     });
   }
   if (models.length > 0) {
@@ -76,6 +85,8 @@ const UNCONFIGURED_MODEL: ConfiguredModel = Object.freeze({
   protocol: DEFAULT_OPENAI_PROTOCOL,
   thinkingLevel: DEFAULT_THINKING_LEVEL,
   thinkingFormat: DEFAULT_THINKING_FORMAT,
+  contextWindow: DEFAULT_CONTEXT_WINDOW,
+  maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
 });
 
 export function getActiveModel(jsonData: Pick<PiAppJsonData, 'models'> | undefined, modelId?: string): ConfiguredModel {
@@ -107,8 +118,8 @@ export function createOpenAICompatibleModel(
       cacheRead: 0,
       cacheWrite: 0,
     },
-    contextWindow: 128000,
-    maxTokens: 4096,
+    contextWindow: configured.contextWindow,
+    maxTokens: configured.maxOutputTokens,
   };
 
   if (configured.protocol === 'responses') {
@@ -146,4 +157,26 @@ export function normalizeThinkingLevel(value?: string): PiAppThinkingLevel {
 
 export function normalizeThinkingFormat(value?: string): PiAppThinkingFormat {
   return value === 'qwen' || value === 'qwen-chat-template' ? value : DEFAULT_THINKING_FORMAT;
+}
+
+export function normalizeModelLimits(
+  contextWindow?: number | string,
+  maxOutputTokens?: number | string
+): { contextWindow: number; maxOutputTokens: number } {
+  const window = clampInt(positiveInt(contextWindow) ?? DEFAULT_CONTEXT_WINDOW, MIN_CONTEXT_WINDOW, MAX_CONTEXT_WINDOW);
+  const output = clampInt(
+    positiveInt(maxOutputTokens) ?? DEFAULT_MAX_OUTPUT_TOKENS,
+    MIN_MAX_OUTPUT_TOKENS,
+    Math.floor(window / 2)
+  );
+  return { contextWindow: window, maxOutputTokens: output };
+}
+
+function positiveInt(value: number | string | undefined) {
+  const parsed = typeof value === 'string' ? Number(value.trim()) : value;
+  return typeof parsed === 'number' && Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
+}
+
+function clampInt(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
 }

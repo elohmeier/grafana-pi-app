@@ -36,48 +36,24 @@ jest.mock('typebox', () => ({
   },
 }));
 
-jest.mock('./tools/subagentRunner', () => ({
-  runSpecialistAgent: jest.fn(async (options) => ({
-    content: [{ type: 'text', text: 'mock subagent' }],
-    details: {
-      type: 'subagent',
-      agent: options.kind,
-      status: 'completed',
-      task: options.task,
-      toolNames: options.tools.map((tool: AgentTool) => tool.name),
-      toolCalls: [],
-      usage: {
-        turns: 0,
-        input: 0,
-        output: 0,
-        cacheRead: 0,
-        cacheWrite: 0,
-        totalTokens: 0,
-        cost: 0,
-      },
-      finalOutput: 'mock subagent',
-    },
-  })),
-}));
-
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { DataFrame, DataSourceInstanceSettings } from '@grafana/data';
 import { getBackendSrv } from '@grafana/runtime';
 import { of, throwError } from 'rxjs';
 import {
-  createGrafanaToolRegistry,
-  createGrafanaSupervisorTools,
   createGrafanaTools,
-  createGrafanaToolsForSkillGroups,
-  createSkillTools,
   buildNavigationPath,
   extractDashboardMetricUsage,
   filterAllowedPrometheusDatasourceSettings,
   getUnavailableDashboardDatasourceUids,
-  type VirtualJsonnetFileSnapshot,
 } from './grafanaTools';
-import { GRAFANA_SKILLS } from './skills';
-import { runSpecialistAgent } from './tools/subagentRunner';
+import { createLiveDashboardMutationTools } from './tools';
+import {
+  getDatasourceResource,
+  getPrometheusDatasource,
+  getPrometheusDatasourceSettings,
+  runPrometheusQuerySummaryOrValidationError,
+} from './tools/metrics';
 
 const datasourceSettings = [
   { name: 'Prometheus A', uid: 'prom-a', type: 'prometheus', isDefault: true },
@@ -98,66 +74,18 @@ describe('grafana datasource tool policy', () => {
     ]);
   });
 
-  it('filters datasource discovery to configured UIDs', async () => {
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'list_datasources');
-
-    const result = await tool.execute('call-1', {}, undefined);
-
-    expect(JSON.parse(result.content[0].text)).toEqual([
-      {
-        name: 'Prometheus B',
-        uid: 'prom-b',
-        type: 'prometheus',
-        isDefault: false,
-      },
+  it('filters datasource discovery to configured UIDs', () => {
+    expect(getPrometheusDatasourceSettings({ allowedPrometheusDatasourceUids: ['prom-b'] })).toEqual([
+      datasourceSettings[1],
     ]);
   });
 
-  it('uses the first allowed datasource when the tool call omits a UID', async () => {
-    const dataSource = {
-      uid: 'prom-b',
-      type: 'prometheus',
-      getResource: jest.fn().mockResolvedValue({ data: ['up'] }),
-    };
+  it('uses the first allowed datasource when no UID is requested', async () => {
+    const dataSource = { uid: 'prom-b', type: 'prometheus' };
     mockDataSourceSrv.get.mockResolvedValue(dataSource);
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'list_metrics');
 
-    const result = await tool.execute('call-1', {}, undefined);
-
+    await expect(getPrometheusDatasource({ allowedPrometheusDatasourceUids: ['prom-b'] })).resolves.toBe(dataSource);
     expect(mockDataSourceSrv.get).toHaveBeenCalledWith({ uid: 'prom-b', type: 'prometheus' });
-    expect(result.details.datasourceUid).toBe('prom-b');
-  });
-
-  it('lists multiple metric prefixes with one Prometheus metadata request', async () => {
-    const dataSource = {
-      uid: 'prom-b',
-      type: 'prometheus',
-      getResource: jest.fn().mockResolvedValue({
-        data: ['http_requests_total', 'node_cpu_seconds_total', 'node_load1', 'process_cpu_seconds_total'],
-      }),
-    };
-    mockDataSourceSrv.get.mockResolvedValue(dataSource);
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'list_metrics');
-
-    const result = await tool.execute('call-1', { prefixes: ['http', 'node_'] }, undefined);
-    const body = JSON.parse(result.content[0].text);
-
-    expect(dataSource.getResource).toHaveBeenCalledTimes(1);
-    expect(body.results).toEqual([
-      {
-        prefix: 'http',
-        count: 1,
-        truncated: false,
-        metrics: ['http_requests_total'],
-      },
-      {
-        prefix: 'node_',
-        count: 2,
-        truncated: false,
-        metrics: ['node_cpu_seconds_total', 'node_load1'],
-      },
-    ]);
-    expect(result.details).toMatchObject({ datasourceUid: 'prom-b', batch: true, prefixes: ['http', 'node_'] });
   });
 
   it('retries transient datasource resource failures transparently', async () => {
@@ -173,23 +101,18 @@ describe('grafana datasource tool policy', () => {
           )
           .mockResolvedValueOnce({ data: ['up'] }),
       };
-      mockDataSourceSrv.get.mockResolvedValue(dataSource);
-      const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'list_metrics');
 
-      const pending = tool.execute('call-1', {}, undefined);
+      const pending = getDatasourceResource(dataSource as any, 'api/v1/label/__name__/values');
       await runPendingRetryTimers();
-      const result = await pending;
 
+      await expect(pending).resolves.toEqual({ data: ['up'] });
       expect(dataSource.getResource).toHaveBeenCalledTimes(2);
-      expect(result.content[0].text).toBe('up');
-      expect(result.content[0].text).not.toContain('failed after');
-      expect(result.details).toMatchObject({ datasourceUid: 'prom-b', count: 1, truncated: false });
     } finally {
       jest.useRealTimers();
     }
   });
 
-  it('normalizes datasource resource failures into readable tool errors', async () => {
+  it('normalizes datasource resource failures into readable errors', async () => {
     jest.useFakeTimers();
     const dataSource = {
       uid: 'prom-b',
@@ -200,11 +123,9 @@ describe('grafana datasource tool policy', () => {
           grafanaFetchError(502, 'Bad Gateway', 'dial tcp 10.0.0.1:9090: connect: connection refused')
         ),
     };
-    mockDataSourceSrv.get.mockResolvedValue(dataSource);
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'list_metrics');
 
     try {
-      const pending = tool.execute('call-1', {}, undefined);
+      const pending = getDatasourceResource(dataSource as any, 'api/v1/label/__name__/values');
       const expectation = expect(pending).rejects.toThrow(
         'Prometheus resource api/v1/label/__name__/values failed for datasource prom-b: resource request for datasource prom-b failed after 3 attempts: Grafana request failed (502 Bad Gateway) while calling GET api/v1/label/__name__/values: dial tcp 10.0.0.1:9090: connect: connection refused'
       );
@@ -217,94 +138,25 @@ describe('grafana datasource tool policy', () => {
     }
   });
 
-  it('inspects metric series labels through the selected datasource', async () => {
-    const dataSource = {
-      uid: 'prom-b',
-      type: 'prometheus',
-      getResource: jest.fn().mockResolvedValue({
-        data: [
-          { __name__: 'http_requests_total', job: 'web', route: '/', status: '200' },
-          { __name__: 'http_requests_total', job: 'web', route: '/', status: '500' },
-        ],
-      }),
-    };
-    mockDataSourceSrv.get.mockResolvedValue(dataSource);
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'inspect_metric_series');
-
-    const result = await tool.execute('call-1', { match: 'http_requests_total', limit: 1 }, undefined);
-    const body = JSON.parse(result.content[0].text);
-
-    expect(dataSource.getResource).toHaveBeenCalledWith('api/v1/series', { 'match[]': 'http_requests_total' });
-    expect(body.labelNames).toEqual(['job', 'route', 'status']);
-    expect(body.examples).toHaveLength(1);
-    expect(body.truncated).toBe(true);
-    expect(result.details.datasourceUid).toBe('prom-b');
-  });
-
-  it('inspects multiple metric series selectors in one tool call', async () => {
-    const dataSource = {
-      uid: 'prom-b',
-      type: 'prometheus',
-      getResource: jest
-        .fn()
-        .mockResolvedValueOnce({
-          data: [
-            { __name__: 'http_requests_total', route: '/', status: '200', vm: 'vm-web-01' },
-            { __name__: 'http_requests_total', route: '/', status: '500', vm: 'vm-web-01' },
-          ],
-        })
-        .mockResolvedValueOnce({
-          data: [{ __name__: 'node_load1', instance: 'vm-web-01:9100', vm: 'vm-web-01' }],
-        }),
-    };
-    mockDataSourceSrv.get.mockResolvedValue(dataSource);
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'inspect_metric_series');
-
-    const result = await tool.execute(
-      'call-1',
-      { matches: ['http_requests_total', 'node_load1'], limit: 1 },
-      undefined
-    );
-    const body = JSON.parse(result.content[0].text);
-
-    expect(dataSource.getResource).toHaveBeenCalledWith('api/v1/series', { 'match[]': 'http_requests_total' });
-    expect(dataSource.getResource).toHaveBeenCalledWith('api/v1/series', { 'match[]': 'node_load1' });
-    expect(body.results).toHaveLength(2);
-    expect(body.results[0]).toMatchObject({
-      match: 'http_requests_total',
-      labelNames: ['route', 'status', 'vm'],
-      totalSeries: 2,
-      truncated: true,
-    });
-    expect(body.results[1]).toMatchObject({
-      match: 'node_load1',
-      labelNames: ['instance', 'vm'],
-      totalSeries: 1,
-      truncated: false,
-    });
-    expect(result.details).toMatchObject({ datasourceUid: 'prom-b', batch: true, matches: 2, totalSeries: 3 });
-  });
-
-  it('derives range query interval instead of accepting a caller-selected coarse step', async () => {
+  it('derives the range query interval from the time range', async () => {
     const dataSource = {
       uid: 'prom-b',
       type: 'prometheus',
       query: jest.fn().mockResolvedValue({ state: 'Done', data: [] }),
     };
     mockDataSourceSrv.get.mockResolvedValue(dataSource);
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'query_prometheus');
-
-    const result = await tool.execute(
-      'call-1',
-      { query: 'up', type: 'range', start: 'now-6h', end: 'now', step: '30m' },
-      undefined
-    );
+    const summary = await runPrometheusQuerySummaryOrValidationError(dataSource as any, {
+      query: 'up',
+      type: 'range',
+      start: 'now-6h',
+      end: 'now',
+    });
     const request = dataSource.query.mock.calls[0][0];
 
     expect(request.interval).toBe('30s');
     expect(request.intervalMs).toBe(30000);
     expect(request.maxDataPoints).toBe(1200);
-    expect(result.details.interval).toBe('30s');
+    expect(summary.interval).toBe('30s');
   });
 
   it('summarizes range query frames instead of returning raw point arrays', async () => {
@@ -320,17 +172,14 @@ describe('grafana datasource tool policy', () => {
       query: jest.fn().mockResolvedValue({ state: 'Done', data: [frame] }),
     };
     mockDataSourceSrv.get.mockResolvedValue(dataSource);
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'query_prometheus');
+    const body = await runPrometheusQuerySummaryOrValidationError(dataSource as any, {
+      query: 'http_requests_total',
+      type: 'range',
+      start: 'now-6h',
+      end: 'now',
+    });
 
-    const result = await tool.execute(
-      'call-1',
-      { query: 'http_requests_total', type: 'range', start: 'now-6h', end: 'now' },
-      undefined
-    );
-    const body = JSON.parse(result.content[0].text);
-
-    expect(result.details).toMatchObject({ summarized: true, frames: 1, series: 1 });
-    expect(result.content[0].text).not.toContain('"values"');
+    expect(JSON.stringify(body)).not.toContain('"values"');
     expect(body).toMatchObject({
       datasourceUid: 'prom-b',
       query: 'http_requests_total',
@@ -358,76 +207,6 @@ describe('grafana datasource tool policy', () => {
     expect(body.series[0]).not.toHaveProperty('samples');
   });
 
-  it('validates multiple PromQL expressions in one query_prometheus call', async () => {
-    const frame = makePrometheusFrame({
-      displayName: 'value',
-      labels: {},
-      times: [Date.UTC(2026, 0, 1, 0, 0, 0)],
-      values: [1],
-    });
-    const dataSource = {
-      uid: 'prom-b',
-      type: 'prometheus',
-      query: jest.fn().mockResolvedValue({ state: 'Done', data: [frame] }),
-    };
-    mockDataSourceSrv.get.mockResolvedValue(dataSource);
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'query_prometheus');
-
-    const result = await tool.execute(
-      'call-1',
-      {
-        queries: [
-          { query: 'sum(rate(http_requests_total[5m]))' },
-          { query: 'sum(rate(http_requests_total{status=~"5.."}[5m]))' },
-        ],
-      },
-      undefined
-    );
-    const body = JSON.parse(result.content[0].text);
-
-    expect(dataSource.query).toHaveBeenCalledTimes(2);
-    expect(result.details).toMatchObject({ batch: true, queries: 2, summarized: true });
-    expect(body).toMatchObject({
-      datasourceUid: 'prom-b',
-      queryCount: 2,
-      truncatedQueries: false,
-      results: [
-        { query: 'sum(rate(http_requests_total[5m]))', totalSeries: 1 },
-        { query: 'sum(rate(http_requests_total{status=~"5.."}[5m]))', totalSeries: 1 },
-      ],
-    });
-  });
-
-  it('treats batched query_prometheus items with start or end as range queries', async () => {
-    const frame = makePrometheusFrame({
-      displayName: 'value',
-      labels: {},
-      times: [Date.UTC(2026, 0, 1, 0, 0, 0)],
-      values: [1],
-    });
-    const dataSource = {
-      uid: 'prom-b',
-      type: 'prometheus',
-      query: jest.fn().mockResolvedValue({ state: 'Done', data: [frame] }),
-    };
-    mockDataSourceSrv.get.mockResolvedValue(dataSource);
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'query_prometheus');
-
-    await tool.execute(
-      'call-1',
-      {
-        queries: [{ query: 'sum(rate(http_requests_total[5m]))', start: 'now-6h', end: 'now' }],
-      },
-      undefined
-    );
-
-    expect(dataSource.query).toHaveBeenCalledTimes(1);
-    expect(dataSource.query.mock.calls[0][0].targets[0]).toMatchObject({
-      range: true,
-      instant: false,
-    });
-  });
-
   it('falls back to Prometheus resource queries when datasource range query fails generically', async () => {
     const dataSource = {
       uid: 'prom-b',
@@ -450,19 +229,12 @@ describe('grafana datasource tool policy', () => {
       }),
     };
     mockDataSourceSrv.get.mockResolvedValue(dataSource);
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'query_prometheus');
-
-    const result = await tool.execute(
-      'call-1',
-      {
-        query: 'sum by (route) (rate(http_requests_total{status=~"5.."}[5m]))',
-        type: 'range',
-        start: 'now-6h',
-        end: 'now',
-      },
-      undefined
-    );
-    const body = JSON.parse(result.content[0].text);
+    const body = await runPrometheusQuerySummaryOrValidationError(dataSource as any, {
+      query: 'sum by (route) (rate(http_requests_total{status=~"5.."}[5m]))',
+      type: 'range',
+      start: 'now-6h',
+      end: 'now',
+    });
 
     expect(dataSource.getResource).toHaveBeenCalledWith(
       'api/v1/query_range',
@@ -505,23 +277,20 @@ describe('grafana datasource tool policy', () => {
           .mockResolvedValueOnce({ state: 'Done', data: [frame] }),
       };
       mockDataSourceSrv.get.mockResolvedValue(dataSource);
-      const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'query_prometheus');
-
-      const pending = tool.execute('call-1', { query: 'up{job="api"}' }, undefined);
+      const pending = runPrometheusQuerySummaryOrValidationError(dataSource as any, { query: 'up{job="api"}' });
       await runPendingRetryTimers();
-      const result = await pending;
-      const body = JSON.parse(result.content[0].text);
+      const body = await pending;
 
       expect(dataSource.query).toHaveBeenCalledTimes(2);
       expect(body.validationError).toBeUndefined();
-      expect(result.content[0].text).not.toContain('failed after');
-      expect(result.details).toMatchObject({ datasourceUid: 'prom-b', summarized: true, totalSeries: 1 });
+      expect(JSON.stringify(body)).not.toContain('failed after');
+      expect(body).toMatchObject({ datasourceUid: 'prom-b', totalSeries: 1 });
     } finally {
       jest.useRealTimers();
     }
   });
 
-  it('returns PromQL validation errors as query summaries instead of failed tool calls', async () => {
+  it('returns PromQL validation errors as query summaries instead of throwing', async () => {
     const dataSource = {
       uid: 'prom-b',
       type: 'prometheus',
@@ -531,10 +300,7 @@ describe('grafana datasource tool policy', () => {
       }),
     };
     mockDataSourceSrv.get.mockResolvedValue(dataSource);
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'query_prometheus');
-
-    const result = await tool.execute('call-1', { query: 'rate(node_load1[5m])' }, undefined);
-    const body = JSON.parse(result.content[0].text);
+    const body = await runPrometheusQuerySummaryOrValidationError(dataSource as any, { query: 'rate(node_load1[5m])' });
 
     expect(dataSource.query).toHaveBeenCalledTimes(1);
     expect(body).toMatchObject({
@@ -545,13 +311,6 @@ describe('grafana datasource tool policy', () => {
       validationError: 'bad_data: invalid parameter "query": parse error',
       notices: [{ severity: 'error', text: 'bad_data: invalid parameter "query": parse error' }],
       series: [],
-    });
-    expect(result.details).toMatchObject({
-      datasourceUid: 'prom-b',
-      query: 'rate(node_load1[5m])',
-      series: 0,
-      validationError: 'bad_data: invalid parameter "query": parse error',
-      summarized: true,
     });
   });
 
@@ -924,12 +683,9 @@ describe('grafana datasource tool policy', () => {
         }),
       };
       mockDataSourceSrv.get.mockResolvedValue(dataSource);
-      const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'query_prometheus');
-
-      const pending = tool.execute('call-1', { query: 'up' }, undefined);
+      const pending = runPrometheusQuerySummaryOrValidationError(dataSource as any, { query: 'up' });
       await runPendingRetryTimers();
-      const result = await pending;
-      const body = JSON.parse(result.content[0].text);
+      const body = await pending;
 
       expect(dataSource.query).toHaveBeenCalledTimes(3);
       expect(body).toMatchObject({
@@ -946,111 +702,19 @@ describe('grafana datasource tool policy', () => {
         ],
         series: [],
       });
-      expect(result.details).toMatchObject({
-        datasourceUid: 'prom-b',
-        validationError: 'Prometheus query for datasource prom-b failed after 3 attempts: 503 Service Unavailable',
-        summarized: true,
-      });
     } finally {
       jest.useRealTimers();
     }
   });
 
-  it('keeps anomalous Prometheus series when compacting batch summaries', async () => {
-    const times = [Date.UTC(2026, 0, 1, 0, 0, 0), Date.UTC(2026, 0, 1, 0, 5, 0)];
-    const firstFrame = makePrometheusFrame({
-      displayName: 'value',
-      labels: {},
-      times,
-      values: [1, 1],
-    });
-    const latencyFrames = [
-      makePrometheusFrame({
-        displayName: 'latency{route="/",vm="vm-web-01"}',
-        labels: { route: '/', vm: 'vm-web-01' },
-        times,
-        values: [0.2, 0.7],
-      }),
-      makePrometheusFrame({
-        displayName: 'latency{route="/",vm="vm-web-02"}',
-        labels: { route: '/', vm: 'vm-web-02' },
-        times,
-        values: [0.2, 0.22],
-      }),
-      makePrometheusFrame({
-        displayName: 'latency{route="/api/orders",vm="vm-web-01"}',
-        labels: { route: '/api/orders', vm: 'vm-web-01' },
-        times,
-        values: [0.35, 1.66],
-      }),
-      makePrometheusFrame({
-        displayName: 'latency{route="/api/orders",vm="vm-web-02"}',
-        labels: { route: '/api/orders', vm: 'vm-web-02' },
-        times,
-        values: [0.35, 0.4],
-      }),
-      makePrometheusFrame({
-        displayName: 'latency{route="/health",vm="vm-web-01"}',
-        labels: { route: '/health', vm: 'vm-web-01' },
-        times,
-        values: [0.05, 0.05],
-      }),
-      makePrometheusFrame({
-        displayName: 'latency{route="/render/report",vm="vm-web-01"}',
-        labels: { route: '/render/report', vm: 'vm-web-01' },
-        times,
-        values: [0.1, 4],
-      }),
-    ];
-    const dataSource = {
-      uid: 'prom-b',
-      type: 'prometheus',
-      query: jest
-        .fn()
-        .mockResolvedValueOnce({ state: 'Done', data: [firstFrame] })
-        .mockResolvedValueOnce({ state: 'Done', data: latencyFrames }),
-    };
-    mockDataSourceSrv.get.mockResolvedValue(dataSource);
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'query_prometheus');
-
-    const result = await tool.execute(
-      'call-1',
-      {
-        queries: [
-          { query: 'node_load1', type: 'range', start: 'now-6h', end: 'now' },
-          { query: 'histogram_quantile(...)', type: 'range', start: 'now-6h', end: 'now' },
-        ],
-      },
-      undefined
-    );
-    const body = JSON.parse(result.content[0].text);
-    const latencySummary = body.results[1];
-
-    expect(latencySummary.totalSeries).toBe(6);
-    expect(latencySummary.truncatedSeries).toBe(true);
-    expect(latencySummary.series).toHaveLength(3);
-    expect(latencySummary.series.map((series: { labels: { route: string } }) => series.labels.route)).toContain(
-      '/render/report'
-    );
-    expect(latencySummary.seriesSelection).toMatch(/ranked by max/);
-    expect(latencySummary.omittedSeries).toMatchObject({
-      count: 3,
-      labelValues: {
-        route: expect.arrayContaining(['/api/orders', '/', '/health']),
-      },
-    });
-  });
-
   it('rejects an explicit datasource UID outside the allow-list', async () => {
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-b'] }), 'list_metrics');
-
-    await expect(tool.execute('call-1', { datasourceUid: 'prom-a' }, undefined)).rejects.toThrow(
+    await expect(getPrometheusDatasource({ allowedPrometheusDatasourceUids: ['prom-b'] }, 'prom-a')).rejects.toThrow(
       'Datasource is not available to the assistant: prom-a'
     );
     expect(mockDataSourceSrv.get).not.toHaveBeenCalled();
   });
 
-  it('rejects uploaded dashboards that reference disallowed datasource UIDs', async () => {
+  it('reports dashboard datasource UIDs outside the allow-list', () => {
     const dashboard = {
       title: 'Bad dashboard',
       panels: [
@@ -1066,1259 +730,61 @@ describe('grafana datasource tool policy', () => {
         },
       ],
     };
-    const uploadTool = getTool(
-      createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-a'], includeAdHocDashboardTools: true }),
-      'upload_dashboard'
-    );
 
     expect(getUnavailableDashboardDatasourceUids(dashboard, { allowedPrometheusDatasourceUids: ['prom-a'] })).toEqual([
       '$datasource',
       'prom-b',
     ]);
-    await expect(
-      uploadTool.execute('call-1', { dashboard_json: JSON.stringify(dashboard) }, undefined)
-    ).rejects.toThrow('Dashboard references datasource UIDs not available to the assistant: $datasource, prom-b');
   });
 
-  it('sends Jsonnet source to the dashboard save endpoint', async () => {
-    const fetch = jest.fn().mockReturnValue(
-      of({
-        data: {
-          uid: 'direct-jsonnet',
-          url: '/d/direct-jsonnet',
-          status: 'created',
-          sourceChecksum: 'sha256:test',
-          validation: {
-            warnings: [{ code: 'layout_missing', message: 'Panel was missing a complete gridPos.' }],
-            layoutFixes: [{ message: 'Assigned missing gridPos.' }],
-          },
-        },
-      })
+  it('returns one fixed tool list with session filesystem tools and without removed Grafana tools', () => {
+    const workspaceTools = ['read', 'write', 'edit', 'bash'].map(
+      (name) => ({ name, label: name, description: name, parameters: {}, execute: jest.fn() }) as unknown as AgentTool
     );
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-a'] }), 'save_dashboard');
-    const source = "{ title: 'Direct Jsonnet', uid: 'direct-jsonnet', panels: [] }";
-
-    const result = await tool.execute('call-1', { dashboard_jsonnet: source }, undefined);
-
-    expect(fetch).toHaveBeenCalledWith(
-      expect.objectContaining({
-        url: '/api/plugins/g42-pi-app/resources/jsonnet-dashboards/save',
-        method: 'POST',
-        data: { dashboard_jsonnet: source },
-        showErrorAlert: false,
-      })
-    );
-    expect(result.content[0].text).toContain('Dashboard created');
-    expect(result.details).toMatchObject({
-      validation: {
-        warnings: [{ code: 'layout_missing' }],
-        layoutFixes: [{ message: 'Assigned missing gridPos.' }],
-      },
-    });
-  });
-
-  it('applies the approved folder override to one dashboard save call', async () => {
-    const fetch = jest.fn().mockReturnValue(
-      of({
-        data: {
-          uid: 'direct-jsonnet',
-          url: '/d/direct-jsonnet',
-          status: 'created',
-          sourceChecksum: 'sha256:test',
-        },
-      })
-    );
-    const clearFolderOverride = jest.fn();
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(
-      createGrafanaTools({
-        allowedPrometheusDatasourceUids: ['prom-a'],
-        dashboardSaveFolders: {
-          getFolderOverride: jest.fn(() => ({ uid: 'team-folder', title: 'Team folder' })),
-          clearFolderOverride,
-        },
-      }),
-      'save_dashboard'
-    );
-    const source = "{ title: 'Direct Jsonnet', uid: 'direct-jsonnet', panels: [] }";
-
-    const result = await tool.execute('call-folder', { dashboard_jsonnet: source }, undefined);
-
-    expect(fetch).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: { dashboard_jsonnet: source, folderUid: 'team-folder' },
-      })
-    );
-    expect(result.details).toMatchObject({ folderUid: 'team-folder', folderTitle: 'Team folder' });
-    expect(clearFolderOverride).toHaveBeenCalledWith('call-folder');
-  });
-
-  it('writes and edits a session virtual Jsonnet file without returning full source to the model', async () => {
-    const runtime = createVirtualJsonnetRuntime('session-tools');
-    const source = "{ title: 'Virtual Jsonnet', uid: 'virtual-jsonnet', panels: [] }";
-    const edited = "{ title: 'Edited Virtual Jsonnet', uid: 'virtual-jsonnet', panels: [] }";
-    const fetch = jest
-      .fn()
-      .mockReturnValueOnce(
-        of({
-          data: {
-            path: 'dashboard.jsonnet',
-            version: 1,
-            checksum: 'sha256:one',
-            lineCount: 1,
-            dashboardJsonnetSize: source.length,
-            dashboard_jsonnet: source,
-            updatedAt: '2026-01-01T00:00:00Z',
-          },
-        })
-      )
-      .mockReturnValueOnce(
-        of({
-          data: {
-            path: 'dashboard.jsonnet',
-            version: 2,
-            checksum: 'sha256:two',
-            lineCount: 1,
-            dashboardJsonnetSize: edited.length,
-            dashboard_jsonnet: edited,
-            changedRanges: [{ startLine: 1, endLine: 1, newLines: 1 }],
-            diff: "@@ lines 1-1 @@\n-{ title: 'Virtual Jsonnet', uid: 'virtual-jsonnet', panels: [] }\n+{ title: 'Edited Virtual Jsonnet', uid: 'virtual-jsonnet', panels: [] }",
-            firstChangedLine: 1,
-            updatedAt: '2026-01-01T00:01:00Z',
-          },
-        })
-      );
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tools = createGrafanaTools({ virtualJsonnetFiles: runtime });
-
-    const writeResult = await getTool(tools, 'write_jsonnet').execute('call-1', { content: source }, undefined);
-    const editResult = await getTool(tools, 'edit_jsonnet').execute(
-      'call-2',
-      {
-        baseVersion: 1,
-        edits: [{ startLine: 1, endLine: 1, replacement: edited }],
-      },
-      undefined
-    );
-
-    expect(fetch).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({
-        url: '/api/plugins/g42-pi-app/resources/jsonnet-dashboards/jsonnet-files/write',
-        data: { sessionId: 'session-tools', path: 'dashboard.jsonnet', content: source },
-      })
-    );
-    expect(fetch).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        url: '/api/plugins/g42-pi-app/resources/jsonnet-dashboards/jsonnet-files/edit',
-        data: {
-          sessionId: 'session-tools',
-          path: 'dashboard.jsonnet',
-          baseVersion: 1,
-          edits: [{ startLine: 1, endLine: 1, replacement: edited }],
-        },
-      })
-    );
-    expect(runtime.getFile('dashboard.jsonnet')?.content).toBe(edited);
-    expect(writeResult.content[0].text).not.toContain('dashboard_jsonnet');
-    expect(editResult.content[0].text).not.toContain('dashboard_jsonnet');
-  });
-
-  it('writes a typed dashboard plan as helper-compatible virtual Jsonnet', async () => {
-    const runtime = createVirtualJsonnetRuntime('session-plan');
-    const fetch = jest.fn().mockImplementation(({ data }) =>
-      of({
-        data: {
-          path: 'dashboard.jsonnet',
-          version: 1,
-          checksum: 'sha256:plan',
-          lineCount: data.content.split('\n').length,
-          dashboardJsonnetSize: data.content.length,
-          dashboard_jsonnet: data.content,
-        },
-      })
-    );
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'write_dashboard_plan');
-
-    const result = await tool.execute(
-      'call-plan',
-      {
-        dashboard: {
-          title: 'Plan Dashboard',
-          uid: 'plan-dashboard',
-          datasourceUid: 'prom-a',
-          timeRange: { from: 'now-6h', to: 'now' },
-          tags: ['plan'],
-        },
-        queryEvidence: [
-          {
-            id: 'storage',
-            datasourceUid: 'prom-a',
-            expr: 'sum by (tenant) (prometheus_tsdb_storage_blocks_bytes{namespace="thanos-prod"})',
-            queryType: 'range',
-            totalSeries: 3,
-            validationError: 'null',
-            labels: ['tenant'],
-          },
-          {
-            id: 'wal',
-            datasourceUid: 'prom-a',
-            expr: 'sum by (tenant) (prometheus_tsdb_wal_storage_size_bytes{namespace="thanos-prod"})',
-            queryType: 'instant',
-            totalSeries: 3,
-            validationError: null,
-            labels: ['tenant'],
-          },
-          {
-            id: 'cluster-scoped',
-            datasourceUid: 'prom-a',
-            expr: 'sum by (tenant) (prometheus_tsdb_storage_blocks_bytes{cluster="missing", namespace="thanos-prod"})',
-            queryType: 'range',
-            totalSeries: 0,
-            validationError: null,
-            labels: ['tenant'],
-          },
-        ],
-        panels: [
-          {
-            title: 'Storage by tenant',
-            type: 'timeseries',
-            queryEvidenceId: 'storage',
-            unit: 'bytes',
-            decimals: 2,
-            layout: 'full',
-            row: 'Tenant storage',
-            legend: '{{tenant}}',
-          },
-          {
-            title: 'WAL by tenant',
-            type: 'table',
-            targets: [
-              { queryEvidenceId: 'wal', legend: '{{tenant}} WAL' },
-              { queryEvidenceId: 'storage', legend: '{{tenant}} storage' },
-            ],
-            unit: 'bytes',
-            decimals: 1,
-            layout: 'twoUp',
-            row: 'Tenant storage',
-            columns: ['tenant', 'Value'],
-            rename: { Value: 'WAL bytes' },
-          },
-          {
-            title: 'Total WAL',
-            type: 'stat',
-            queryEvidenceId: 'wal',
-            unit: 'bytes',
-            layout: 'full',
-            row: 'Tenant totals',
-          },
-        ],
-      },
-      undefined
-    );
-
-    const sent = fetch.mock.calls[0][0].data.content;
-    expect(fetch).toHaveBeenCalledWith(
-      expect.objectContaining({
-        url: '/api/plugins/g42-pi-app/resources/jsonnet-dashboards/jsonnet-files/write',
-        data: {
-          sessionId: 'session-plan',
-          path: 'dashboard.jsonnet',
-          content: sent,
-        },
-      })
-    );
-    expect(sent).toContain("local d = import 'github.com/g42/pi-dashboard/main.libsonnet';");
-    expect(sent).toContain('uid="plan-dashboard"');
-    expect(sent).toContain('d.row("Tenant storage", [');
-    expect(sent).toContain('d.row("Tenant totals", [');
-    expect(sent).toContain('d.panel.timeseries(');
-    expect(sent).toContain('d.panel.table(');
-    expect(sent).toContain('d.panel.stat(');
-    expect(sent).toContain('legend="{{tenant}}"');
-    expect(sent).toContain('legend="{{tenant}} storage"');
-    expect(sent).toContain('decimals=2');
-    expect(sent).toContain('columns=["tenant", "Value"]');
-    expect(sent).toContain('rename={ "Value": "WAL bytes" }');
-    expect(sent).toContain('fieldConfig={ defaults: { unit: "bytes", decimals: 1 } }');
-    expect(sent).toContain('format="table"');
-    expect(sent).not.toContain('cluster="missing"');
-    expect(runtime.getFile('dashboard.jsonnet')?.content).toBe(sent);
-    expect(result.content[0].text).toContain('DASHBOARD_PLAN_JSON:');
-    expect(result.content[0].text).not.toContain('dashboard_jsonnet');
-    expect(result.details).toMatchObject({
-      action: 'planned_written',
-      panelCount: 3,
-      rowCount: 2,
-      targetCount: 4,
-      queryEvidenceCount: 3,
-      dashboardPlan: {
-        dashboard: { uid: 'plan-dashboard', datasourceUid: 'prom-a' },
-      },
-    });
-    expect((result.details.dashboardPlan as any).queryEvidence[0]).toMatchObject({
-      id: 'storage',
-      validationError: null,
-    });
-    expect((result.details.dashboardPlan as any).panels[1]).toMatchObject({
-      queryEvidenceId: 'wal',
-      targets: [
-        { queryEvidenceId: 'wal', legend: '{{tenant}} WAL' },
-        { queryEvidenceId: 'storage', legend: '{{tenant}} storage' },
-      ],
-    });
-  });
-
-  it('infers omitted dashboard plan panel evidence IDs only when the match is unambiguous', async () => {
-    const runtime = createVirtualJsonnetRuntime('session-plan-infer');
-    const fetch = jest.fn().mockImplementation(({ data }) =>
-      of({
-        data: {
-          path: 'dashboard.jsonnet',
-          version: 1,
-          checksum: 'sha256:plan-infer',
-          lineCount: data.content.split('\n').length,
-          dashboardJsonnetSize: data.content.length,
-          dashboard_jsonnet: data.content,
-        },
-      })
-    );
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'write_dashboard_plan');
-
-    const result = await tool.execute(
-      'call-plan-infer',
-      {
-        dashboard: {
-          title: 'Inferred Plan Dashboard',
-          uid: 'inferred-plan-dashboard',
-          datasourceUid: 'prom-a',
-          timeRange: { from: 'now-6h', to: 'now' },
-        },
-        queryEvidence: [
-          {
-            id: 'e_storage_tsdb',
-            datasourceUid: 'prom-a',
-            expr: 'sum by (tenant) (prometheus_tsdb_storage_blocks_bytes{namespace="thanos-prod"})',
-            queryType: 'instant',
-            totalSeries: 5,
-            labels: ['tenant'],
-          },
-          {
-            id: 'e_storage_tsdb_trend',
-            datasourceUid: 'prom-a',
-            expr: 'sum by (tenant) (prometheus_tsdb_storage_blocks_bytes{namespace="thanos-prod"})',
-            queryType: 'range',
-            totalSeries: 5,
-            labels: ['tenant'],
-          },
-          {
-            id: 'e_samples_rate',
-            datasourceUid: 'prom-a',
-            expr: 'sum by (tenant) (rate(thanos_receive_write_samples_sum{namespace="thanos-prod"}[5m]))',
-            queryType: 'range',
-            totalSeries: 5,
-            labels: ['tenant'],
-          },
-          {
-            id: 'e_ts_rate',
-            datasourceUid: 'prom-a',
-            expr: 'sum by (tenant) (rate(thanos_receive_write_timeseries_sum{namespace="thanos-prod"}[5m]))',
-            queryType: 'range',
-            totalSeries: 5,
-            labels: ['tenant'],
-          },
-          {
-            id: 'e_total_samples',
-            datasourceUid: 'prom-a',
-            expr: 'sum(sum by (tenant) (rate(thanos_receive_write_samples_sum{namespace="thanos-prod"}[5m])))',
-            queryType: 'instant',
-            totalSeries: 1,
-            labels: [],
-          },
-        ],
-        panels: [
-          {
-            title: 'TSDB Storage per Tenant',
-            type: 'table',
-            row: 'Tenant Storage Overview',
-            columns: ['Time', 'tenant', 'Value'],
-          },
-          {
-            title: 'TSDB Storage Trend over 6h',
-            type: 'timeseries',
-            row: 'Storage Trend',
-          },
-          {
-            title: 'Series/sec',
-            type: 'timeseries',
-            row: 'Ingest Rates',
-          },
-          {
-            title: 'Total Samples/sec',
-            type: 'stat',
-            row: 'Resource Consumers',
-          },
-        ],
-      },
-      undefined
-    );
-
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect((result.details.dashboardPlan as any).panels.map((panel: any) => panel.queryEvidenceId)).toEqual([
-      'e_storage_tsdb',
-      'e_storage_tsdb_trend',
-      'e_ts_rate',
-      'e_total_samples',
-    ]);
-    expect(result.details).toMatchObject({
-      panelCount: 4,
-      targetCount: 4,
-    });
-  });
-
-  it('rejects omitted dashboard plan panel evidence IDs when inference is ambiguous', async () => {
-    const runtime = createVirtualJsonnetRuntime('session-plan-infer-ambiguous');
-    const fetch = jest.fn();
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'write_dashboard_plan');
-
-    await expect(
-      tool.execute(
-        'call-plan-infer-ambiguous',
-        {
-          dashboard: {
-            title: 'Ambiguous Plan Dashboard',
-            uid: 'ambiguous-plan-dashboard',
-            datasourceUid: 'prom-a',
-            timeRange: { from: 'now-6h', to: 'now' },
-          },
-          queryEvidence: [
-            {
-              id: 'storage-east',
-              datasourceUid: 'prom-a',
-              expr: 'sum by (tenant) (storage_bytes{region="east"})',
-              queryType: 'range',
-              totalSeries: 3,
-              validationError: null,
-              labels: ['tenant'],
-            },
-            {
-              id: 'storage-west',
-              datasourceUid: 'prom-a',
-              expr: 'sum by (tenant) (storage_bytes{region="west"})',
-              queryType: 'range',
-              totalSeries: 3,
-              validationError: null,
-              labels: ['tenant'],
-            },
-          ],
-          panels: [{ title: 'Storage', type: 'timeseries' }],
-        },
-        undefined
-      )
-    ).rejects.toThrow('panel title must unambiguously match one validated queryEvidence entry');
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it('rejects dashboard plans whose panels reference unusable evidence', async () => {
-    const runtime = createVirtualJsonnetRuntime('session-plan-reject');
-    const fetch = jest.fn();
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'write_dashboard_plan');
-
-    await expect(
-      tool.execute(
-        'call-plan',
-        {
-          dashboard: {
-            title: 'Bad Plan',
-            uid: 'bad-plan',
-            datasourceUid: 'prom-a',
-            timeRange: { from: 'now-6h', to: 'now' },
-          },
-          queryEvidence: [
-            {
-              id: 'bad',
-              datasourceUid: 'prom-a',
-              expr: 'up{cluster="missing"}',
-              queryType: 'range',
-              totalSeries: 0,
-              validationError: null,
-              labels: ['job'],
-            },
-          ],
-          panels: [{ title: 'Bad panel', type: 'timeseries', queryEvidenceId: 'bad', unit: null, layout: 'full' }],
-        },
-        undefined
-      )
-    ).rejects.toThrow('references unusable queryEvidence bad');
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it('rejects rewriting an existing virtual Jsonnet file through the write tool', async () => {
-    const source = "{ title: 'Saved Jsonnet', uid: 'saved-jsonnet', panels: [] }";
-    const runtime = createVirtualJsonnetRuntime('session-tools', {
-      path: 'dashboard.jsonnet',
-      content: source,
-      version: 3,
-      checksum: 'sha256:saved',
-      lineCount: 1,
-      dashboardJsonnetSize: source.length,
-    });
-    const fetch = jest.fn();
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'write_jsonnet');
-
-    await expect(tool.execute('call-1', { content: "{ title: 'Replacement' }" }, undefined)).rejects.toThrow(
-      'dashboard.jsonnet already exists at version 3; use edit_jsonnet for follow-up changes.'
-    );
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it('rejects unsupported dashboard helper time arguments before writing Jsonnet', async () => {
-    const runtime = createVirtualJsonnetRuntime('session-guard');
-    const source = `local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
-
-d.dashboard.new(
-  title='Bad Time Range',
-  uid='bad-time-range',
-  timeframe='now-6h',
-  rows=[],
-)`;
-    const fetch = jest.fn();
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'write_jsonnet');
-
-    await expect(tool.execute('call-1', { content: source }, undefined)).rejects.toThrow(
-      "d.dashboard.new does not support timeframe=. Use time={ from: 'now-6h', to: 'now' } or omit time instead."
-    );
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it('rejects unavailable dashboard helper layouts before writing Jsonnet', async () => {
-    const runtime = createVirtualJsonnetRuntime('session-layout-guard');
-    const source = `local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
-
-d.dashboard.new(
-  title='Bad Layout',
-  uid='bad-layout',
-  rows=[
-    d.row('Overview', [
-      d.layout.oneByThree([]),
-    ]),
-  ],
-)`;
-    const fetch = jest.fn();
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'write_jsonnet');
-
-    await expect(tool.execute('call-1', { content: source }, undefined)).rejects.toThrow(
-      'd.layout.oneByThree is not available'
-    );
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it('rejects d.layout.full array arguments before writing Jsonnet', async () => {
-    const runtime = createVirtualJsonnetRuntime('session-full-layout-guard');
-    const source = `local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
-
-d.dashboard.new(
-  title='Bad Full Layout',
-  uid='bad-full-layout',
-  rows=[
-    d.row('Overview', [
-      d.layout.full([
-        d.panel.timeseries(title='Requests', datasourceUid='prometheus'),
-      ]),
-    ]),
-  ],
-)`;
-    const fetch = jest.fn();
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'write_jsonnet');
-
-    await expect(tool.execute('call-1', { content: source }, undefined)).rejects.toThrow(
-      'd.layout.full takes one panel object, not an array'
-    );
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it('rejects unsupported dashboard helper panel arguments before writing Jsonnet', async () => {
-    const runtime = createVirtualJsonnetRuntime('session-panel-arg-guard');
-    const source = `local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
-
-d.dashboard.new(
-  title='Bad Panel Argument',
-  uid='bad-panel-argument',
-  rows=[
-    d.row('Overview', [
-      d.layout.twoUp([
-        d.panel.timeseries(
-          title='Requests',
-          datasourceUid='prometheus',
-          targets=[d.prom.query('sum(rate(http_requests_total[$__rate_interval]))', 'prometheus')],
-          span=12,
-        ),
-      ]),
-    ]),
-  ],
-)`;
-    const fetch = jest.fn();
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'write_jsonnet');
-
-    await expect(tool.execute('call-1', { content: source }, undefined)).rejects.toThrow(
-      'd.panel.timeseries does not support span='
-    );
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it('normalizes table-only helper presentation args before writing Jsonnet', async () => {
-    const runtime = createVirtualJsonnetRuntime('session-table-arg-guard');
-    const source = `local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
-
-d.dashboard.new(
-  title='Bad Table Argument',
-  uid='bad-table-argument',
-  rows=[
-    d.row('Overview', [
-      d.layout.full(
-        d.panel.table(
-          title='Targets',
-          datasourceUid='prometheus',
-          targets=[d.prom.query('up', 'prometheus', instant=true, format='table')],
-          columns=['job', 'instance', 'Value'],
-          unit='short',
-          decimals=2,
-        ),
-      ),
-    ]),
-  ],
-)`;
-    const fetch = jest.fn().mockImplementation(({ data }) =>
-      of({
-        data: {
-          path: 'dashboard.jsonnet',
-          version: 1,
-          checksum: 'sha256:normalized-table',
-          lineCount: data.content.split('\n').length,
-          dashboardJsonnetSize: data.content.length,
-          dashboard_jsonnet: data.content,
-        },
-      })
-    );
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'write_jsonnet');
-
-    await tool.execute('call-1', { content: source }, undefined);
-
-    const sentContent = fetch.mock.calls[0][0].data.content;
-    expect(sentContent).not.toContain("unit='short'");
-    expect(sentContent).not.toContain('decimals=2');
-    expect(sentContent).toContain("fieldConfig={ defaults: { unit: 'short', decimals: 2 } }");
-  });
-
-  it('rejects unavailable dashboard helper panel constructors before writing Jsonnet', async () => {
-    const runtime = createVirtualJsonnetRuntime('session-panel-constructor-guard');
-    const source = `local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
-
-d.dashboard.new(
-  title='Bad Panel Constructor',
-  uid='bad-panel-constructor',
-  rows=[
-    d.row('Overview', [
-      d.layout.full(d.panel.heatmap(title='Latency', datasourceUid='prometheus')),
-    ]),
-  ],
-)`;
-    const fetch = jest.fn();
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'write_jsonnet');
-
-    await expect(tool.execute('call-1', { content: source }, undefined)).rejects.toThrow(
-      'd.panel.heatmap is not available'
-    );
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it('rejects unsupported dashboard helper edits before sending them to the backend', async () => {
-    const source = `local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
-
-d.dashboard.new(
-  title='Good Time Range',
-  uid='good-time-range',
-  time={ from: 'now-6h', to: 'now' },
-  rows=[],
-)`;
-    const runtime = createVirtualJsonnetRuntime('session-edit-guard', {
-      path: 'dashboard.jsonnet',
-      content: source,
-      version: 1,
-      checksum: 'sha256:guard',
-      lineCount: 8,
-      dashboardJsonnetSize: source.length,
-    });
-    runtime.markHydrated('dashboard.jsonnet', 1);
-    const fetch = jest.fn();
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'edit_jsonnet');
-
-    await expect(
-      tool.execute(
-        'call-1',
-        {
-          baseVersion: 1,
-          edits: [{ startLine: 6, endLine: 6, replacement: "  timeframe='now-6h'," }],
-        },
-        undefined
-      )
-    ).rejects.toThrow(
-      "d.dashboard.new does not support timeframe=. Use time={ from: 'now-6h', to: 'now' } or omit time instead."
-    );
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it('anchors structural Jsonnet edits to the matching block start before sending them to the backend', async () => {
-    const source = `local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
-
-d.dashboard.new(
-  title='Thanos Tenant Cost Benchmark',
-  uid='thanos-cost',
-  time={ from: 'now-6h', to: 'now' },
-  rows=[
-    d.row('Storage Overview', [
-      d.layout.full(d.panel.table(
-        title='TSDB Storage Blocks per Tenant',
-        datasourceUid='thanos-prod-db',
-        targets=[d.prom.query(
-          'sum by (tenant) (prometheus_tsdb_storage_blocks_bytes{namespace="thanos-prod"})',
-          'thanos-prod-db',
-          legend='storage'
-        )],
-        columns=['Time', 'tenant', 'value'],
-      )),
-    ]),
-  ],
-)`;
-    const replacement = `    d.row('Storage Overview', [
-      d.layout.twoUp([
-        d.panel.table(
-          title='TSDB Storage Blocks per Tenant',
-          datasourceUid='thanos-prod-db',
-          targets=[d.prom.query(
-            'sum by (tenant) (prometheus_tsdb_storage_blocks_bytes{namespace="thanos-prod"})',
-            'thanos-prod-db',
-            legend='storage'
-          )],
-          columns=['Time', 'tenant', 'value'],
-        ),
-        d.panel.table(
-          title='WAL Storage per Tenant',
-          datasourceUid='thanos-prod-db',
-          targets=[d.prom.query(
-            'sum by (tenant) (prometheus_tsdb_wal_storage_size_bytes{namespace="thanos-prod"})',
-            'thanos-prod-db',
-            legend='wal'
-          )],
-          columns=['Time', 'tenant', 'value'],
-        ),
-      ]),
-    ]),`;
-    const edited = source.replace(
-      `    d.row('Storage Overview', [
-      d.layout.full(d.panel.table(
-        title='TSDB Storage Blocks per Tenant',
-        datasourceUid='thanos-prod-db',
-        targets=[d.prom.query(
-          'sum by (tenant) (prometheus_tsdb_storage_blocks_bytes{namespace="thanos-prod"})',
-          'thanos-prod-db',
-          legend='storage'
-        )],
-        columns=['Time', 'tenant', 'value'],
-      )),
-    ]),`,
-      replacement
-    );
-    const runtime = createVirtualJsonnetRuntime('session-edit-anchor', {
-      path: 'dashboard.jsonnet',
-      content: source,
-      version: 1,
-      checksum: 'sha256:anchor',
-      lineCount: source.split('\n').length,
-      dashboardJsonnetSize: source.length,
-    });
-    runtime.markHydrated('dashboard.jsonnet', 1);
-    const fetch = jest.fn().mockReturnValue(
-      of({
-        data: {
-          path: 'dashboard.jsonnet',
-          version: 2,
-          checksum: 'sha256:anchored',
-          lineCount: edited.split('\n').length,
-          dashboardJsonnetSize: edited.length,
-          dashboard_jsonnet: edited,
-          changedRanges: [{ startLine: 8, endLine: 19, newLines: 24 }],
-          firstChangedLine: 8,
-        },
-      })
-    );
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'edit_jsonnet');
-
-    await tool.execute(
-      'call-1',
-      {
-        baseVersion: 1,
-        edits: [{ startLine: 11, endLine: 19, replacement }],
-      },
-      undefined
-    );
-
-    expect(fetch).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: {
-          sessionId: 'session-edit-anchor',
-          path: 'dashboard.jsonnet',
-          baseVersion: 1,
-          edits: [{ startLine: 8, endLine: 19, replacement }],
-        },
-      })
-    );
-    expect(runtime.getFile('dashboard.jsonnet')?.content).toBe(edited);
-  });
-
-  it('normalizes table presentation args introduced by Jsonnet edits', async () => {
-    const source = `local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
-
-d.dashboard.new(
-  title='Table Edit',
-  uid='table-edit',
-  rows=[
-    d.row('Overview', [
-      d.layout.full(
-        d.panel.table(
-          title='Targets',
-          datasourceUid='prometheus',
-          targets=[d.prom.query('up', 'prometheus')],
-          columns=['job', 'instance', 'Value'],
-        ),
-      ),
-    ]),
-  ],
-)`;
-    const replacement = `        d.panel.table(
-          title='Targets',
-          datasourceUid='prometheus',
-          targets=[d.prom.query('up', 'prometheus')],
-          columns=['job', 'instance', 'Value'],
-          unit='short',
-        ),`;
-    const runtime = createVirtualJsonnetRuntime('session-edit-table-args', {
-      path: 'dashboard.jsonnet',
-      content: source,
-      version: 1,
-      checksum: 'sha256:table-args',
-      lineCount: source.split('\n').length,
-      dashboardJsonnetSize: source.length,
-    });
-    runtime.markHydrated('dashboard.jsonnet', 1);
-    const fetch = jest.fn().mockImplementation(({ data }) =>
-      of({
-        data: {
-          path: 'dashboard.jsonnet',
-          version: 2,
-          checksum: 'sha256:normalized-table-edit',
-          lineCount: data.edits[0].replacement.split('\n').length,
-          dashboardJsonnetSize: data.edits[0].replacement.length,
-          dashboard_jsonnet: data.edits[0].replacement,
-        },
-      })
-    );
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'edit_jsonnet');
-
-    await tool.execute(
-      'call-1',
-      {
-        baseVersion: 1,
-        edits: [{ startLine: 9, endLine: 14, replacement }],
-      },
-      undefined
-    );
-
-    const sentEdit = fetch.mock.calls[0][0].data.edits[0];
-    expect(sentEdit.startLine).toBe(1);
-    expect(sentEdit.endLine).toBe(source.split('\n').length);
-    expect(sentEdit.replacement).not.toContain("unit='short'");
-    expect(sentEdit.replacement).toContain("fieldConfig={ defaults: { unit: 'short' } }");
-  });
-
-  it('normalizes local dashboard wrapper drafts before writing Jsonnet', async () => {
-    const runtime = createVirtualJsonnetRuntime('session-normalize');
-    const source = `local dashboard = {
-  title: 'HTTP Request Rate & Errors',
-  uid: 'http-request-rate-errors',
-  panels: [
-    {
-      title: 'Request rate',
-      type: 'timeseries',
-      targets: [{ expr: 'sum(rate(http_requests_total[5m]))' }],
-    },
-  ],
-}
-
-{ dashboard: dashboard }`;
-    const normalized = `{
-  title: 'HTTP Request Rate & Errors',
-  uid: 'http-request-rate-errors',
-  panels: [
-    {
-      title: 'Request rate',
-      type: 'timeseries',
-      targets: [{ expr: 'sum(rate(http_requests_total[5m]))' }],
-    },
-  ],
-}
-`;
-    const fetch = jest.fn().mockReturnValue(
-      of({
-        data: {
-          path: 'dashboard.jsonnet',
-          version: 1,
-          checksum: 'sha256:normalized',
-          lineCount: 10,
-          dashboardJsonnetSize: normalized.length,
-          dashboard_jsonnet: normalized,
-        },
-      })
-    );
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'write_jsonnet');
-
-    await tool.execute('call-1', { content: source }, undefined);
-
-    expect(fetch).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: {
-          sessionId: 'session-normalize',
-          path: 'dashboard.jsonnet',
-          content: normalized,
-        },
-      })
-    );
-    expect(runtime.getFile('dashboard.jsonnet')?.content).toBe(normalized);
-  });
-
-  it('repairs a session virtual Jsonnet file without returning full source to the model', async () => {
-    const runtime = createVirtualJsonnetRuntime('session-fix');
-    const source = "g.dashboard.new(title='Bad', uid='bad', panels=[])";
-    const fixed = "{ title: 'Bad', uid: 'bad', panels: [] }";
-    const fetch = jest
-      .fn()
-      .mockReturnValueOnce(
-        of({
-          data: {
-            path: 'dashboard.jsonnet',
-            version: 1,
-            checksum: 'sha256:bad',
-            lineCount: 1,
-            dashboardJsonnetSize: source.length,
-            dashboard_jsonnet: source,
-          },
-        })
-      )
-      .mockReturnValueOnce(
-        of({
-          data: {
-            path: 'dashboard.jsonnet',
-            version: 2,
-            checksum: 'sha256:fixed',
-            lineCount: 1,
-            dashboardJsonnetSize: fixed.length,
-            dashboard_jsonnet: fixed,
-            changedRanges: [{ startLine: 1, endLine: 1, newLines: 1 }],
-            diff: '@@ structural repair @@',
-            repairs: ['rewrote g.dashboard.new(...) named arguments into a plain dashboard object'],
-          },
-        })
-      );
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tools = createGrafanaTools({ virtualJsonnetFiles: runtime });
-
-    await getTool(tools, 'write_jsonnet').execute('call-1', { content: source }, undefined);
-    const result = await getTool(tools, 'fix_jsonnet').execute('call-2', { baseVersion: 1 }, undefined);
-
-    expect(fetch).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        url: '/api/plugins/g42-pi-app/resources/jsonnet-dashboards/jsonnet-files/repair',
-        data: {
-          sessionId: 'session-fix',
-          path: 'dashboard.jsonnet',
-          baseVersion: 1,
-        },
-      })
-    );
-    expect(runtime.getFile('dashboard.jsonnet')?.content).toBe(fixed);
-    expect(result.content[0].text).not.toContain('dashboard_jsonnet');
-    expect(result.content[0].text).toContain('structural repair');
-  });
-
-  it('hydrates a saved virtual Jsonnet file before rendering from a file reference', async () => {
-    const source = "{ title: 'Hydrated Jsonnet', uid: 'hydrated-jsonnet', panels: [] }";
-    const runtime = createVirtualJsonnetRuntime('session-render', {
-      path: 'dashboard.jsonnet',
-      content: source,
-      version: 4,
-      checksum: 'sha256:saved',
-      lineCount: 1,
-      dashboardJsonnetSize: source.length,
-    });
-    const fetch = jest
-      .fn()
-      .mockReturnValueOnce(
-        of({
-          data: {
-            path: 'dashboard.jsonnet',
-            version: 4,
-            checksum: 'sha256:saved',
-            lineCount: 1,
-            dashboardJsonnetSize: source.length,
-            dashboard_jsonnet: source,
-          },
-        })
-      )
-      .mockReturnValueOnce(
-        of({
-          data: {
-            dashboard: {
-              title: 'Hydrated Jsonnet',
-              uid: 'hydrated-jsonnet',
-              tags: ['genai'],
-              panels: [
-                {
-                  id: 1,
-                  title: 'Requests',
-                  type: 'timeseries',
-                  datasource: { uid: 'prom-a' },
-                  targets: [{ refId: 'A', expr: 'up', datasource: { uid: 'prom-a' } }],
-                },
-              ],
-            },
-            resource: { metadata: { name: 'hydrated-jsonnet' } },
-            sourceChecksum: 'sha256:saved',
-            validation: {
-              warnings: [
-                {
-                  code: 'table_columns_uncontrolled',
-                  message: 'Table panel does not explicitly filter or organize visible columns.',
-                  panelId: 1,
-                  panelTitle: 'Requests',
-                },
-              ],
-              layoutFixes: [],
-            },
-            jsonnetFile: {
-              path: 'dashboard.jsonnet',
-              version: 4,
-              checksum: 'sha256:saved',
-              lineCount: 1,
-              dashboardJsonnetSize: source.length,
-            },
-          },
-        })
-      );
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'render_dashboard');
-
-    const result = await tool.execute('call-1', {}, undefined);
-
-    expect(fetch).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({
-        url: '/api/plugins/g42-pi-app/resources/jsonnet-dashboards/jsonnet-files/write',
-        data: { sessionId: 'session-render', path: 'dashboard.jsonnet', content: source, version: 4 },
-      })
-    );
-    expect(fetch).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        url: '/api/plugins/g42-pi-app/resources/jsonnet-dashboards/render',
-        data: { path: 'dashboard.jsonnet', sessionId: 'session-render' },
-      })
-    );
-    expect(result.details).toMatchObject({
-      dashboard: {
-        title: 'Hydrated Jsonnet',
-        uid: 'hydrated-jsonnet',
-        panelCount: 1,
-        panels: [{ title: 'Requests', type: 'timeseries', datasourceUid: 'prom-a' }],
-      },
-      path: 'dashboard.jsonnet',
-      sourceBytes: source.length,
-      sourceChecksum: 'sha256:saved',
-      validation: {
-        warnings: [{ code: 'table_columns_uncontrolled', panelTitle: 'Requests' }],
-      },
-    });
-    expect(result.content[0].text).not.toContain('resource');
-  });
-
-  it('hydrates an auto-repaired virtual Jsonnet file after rendering without exposing full source', async () => {
-    const source = "g.dashboard.new(title='Bad', uid='bad', panels=[g.panel.new(title='Broken')])";
-    const fixed = "{ title: 'Bad', uid: 'bad', panels: [{ title: 'Broken', type: 'timeseries' }] }";
-    const runtime = createVirtualJsonnetRuntime('session-auto-render', {
-      path: 'dashboard.jsonnet',
-      content: source,
-      version: 1,
-      checksum: 'sha256:bad',
-      lineCount: 1,
-      dashboardJsonnetSize: source.length,
-    });
-    const fetch = jest
-      .fn()
-      .mockReturnValueOnce(
-        of({
-          data: {
-            path: 'dashboard.jsonnet',
-            version: 1,
-            checksum: 'sha256:bad',
-            lineCount: 1,
-            dashboardJsonnetSize: source.length,
-            dashboard_jsonnet: source,
-          },
-        })
-      )
-      .mockReturnValueOnce(
-        of({
-          data: {
-            dashboard: { title: 'Bad', uid: 'bad', tags: [], panels: [{ title: 'Broken', type: 'timeseries' }] },
-            sourceChecksum: 'sha256:fixed',
-            autoRepaired: true,
-            repairs: ['rewrote the unsupported Grafonnet dashboard constructor chain into a plain dashboard object'],
-            jsonnetFile: {
-              path: 'dashboard.jsonnet',
-              version: 2,
-              checksum: 'sha256:fixed',
-              lineCount: 1,
-              dashboardJsonnetSize: fixed.length,
-            },
-            dashboard_jsonnet: fixed,
-          },
-        })
-      );
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ virtualJsonnetFiles: runtime }), 'render_dashboard');
-
-    const result = await tool.execute('call-1', {}, undefined);
-
-    expect(runtime.getFile('dashboard.jsonnet')).toMatchObject({
-      content: fixed,
-      version: 2,
-      checksum: 'sha256:fixed',
-    });
-    expect(result.details).toMatchObject({
-      autoRepaired: true,
-      repairs: ['rewrote the unsupported Grafonnet dashboard constructor chain into a plain dashboard object'],
-      jsonnetFile: { version: 2 },
-    });
-    expect(result.content[0].text).not.toContain('dashboard_jsonnet');
-    expect(result.content[0].text).not.toContain('g.panel.new');
-  });
-
-  it('surfaces dashboard save backend errors as readable messages', async () => {
-    const fetch = jest.fn().mockReturnValue(
-      throwError(() => ({
-        status: 400,
-        statusText: 'Bad Request',
-        data: {
-          error: 'jsonnet compilation failed: dashboard.jsonnet:3:5-14 Did not expect: (IDENTIFIER, "textPanel")',
-        },
-        config: {
-          method: 'POST',
-          url: '/api/plugins/g42-pi-app/resources/jsonnet-dashboards/save',
-        },
-      }))
-    );
-    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
-    const tool = getTool(createGrafanaTools({ allowedPrometheusDatasourceUids: ['prom-a'] }), 'save_dashboard');
-
-    await expect(tool.execute('call-1', { dashboard_jsonnet: 'let textPanel() = {}' }, undefined)).rejects.toThrow(
-      'Grafana request failed (400 Bad Request) while calling POST /api/plugins/g42-pi-app/resources/jsonnet-dashboards/save: jsonnet compilation failed: dashboard.jsonnet:3:5-14 Did not expect: (IDENTIFIER, "textPanel")'
-    );
-  });
-
-  it('keeps specialist delegation tools available and does not expose Jsonnet exploration', () => {
-    expect(createGrafanaToolRegistry().subagents).toEqual([]);
-
-    const defaultRegistry = createGrafanaToolRegistry({
-      runtime: {
-        model: {} as any,
-        streamFn: jest.fn() as any,
-        thinkingLevel: 'off',
-      },
-    });
-    expect(defaultRegistry.subagents.map((tool) => tool.name)).toEqual([
-      'run_query_agent',
-      'run_dashboard_agent',
-      'run_investigation_agent',
-      'run_alert_agent',
-      'run_support_agent',
-      'run_navigation_agent',
-    ]);
-    expect(defaultRegistry.all.map((tool) => tool.name)).toEqual(
-      expect.arrayContaining(['run_query_agent', 'run_dashboard_agent', 'run_investigation_agent'])
-    );
-    expect(defaultRegistry.all.map((tool) => tool.name)).not.toContain('explore_jsonnet');
-  });
-
-  it('exposes only specialist delegation tools through the supervisor helper', () => {
-    const names = createGrafanaSupervisorTools({
-      runtime: {
-        model: {} as any,
-        streamFn: jest.fn() as any,
-        thinkingLevel: 'off',
-      },
-    }).map((tool) => tool.name);
-
-    expect(names).toEqual([
-      'run_query_agent',
-      'run_dashboard_agent',
-      'run_investigation_agent',
-      'run_alert_agent',
-      'run_support_agent',
-      'run_navigation_agent',
-    ]);
-  });
-
-  it('exposes artifact reads to the supervisor and specialist agents when a registry is available', async () => {
     const artifacts = {
       register: jest.fn(),
       get: jest.fn(),
       list: jest.fn(() => []),
     };
-    const registry = createGrafanaToolRegistry({
-      artifacts,
-      runtime: {
-        model: {} as any,
-        streamFn: jest.fn() as any,
-        thinkingLevel: 'off',
-      },
-    });
 
-    expect(registry.artifacts.map((tool) => tool.name)).toEqual(['read_artifact']);
-    expect(createGrafanaSupervisorTools({ artifacts, runtime: registryRuntime() }).map((tool) => tool.name)).toContain(
-      'read_artifact'
+    const names = createGrafanaTools({ workspaceTools, artifacts }).map((tool) => tool.name);
+
+    expect(names.slice(0, 4)).toEqual(['read', 'write', 'edit', 'bash']);
+    expect(names).toEqual(
+      expect.arrayContaining([
+        'inspect_dashboard_context',
+        'search_dashboard_metric_usage',
+        'get_metric_neighborhood',
+        'find_panel_alert_rules',
+        'get_alert_rule',
+        'update_report',
+        'navigate',
+        'screenshot_dashboard',
+        'read_artifact',
+      ])
     );
-
-    const tool = getTool(registry.subagents, 'run_query_agent');
-    await tool.execute('call-1', { task: 'Inspect the stored result.' }, undefined);
-    const call = jest.mocked(runSpecialistAgent).mock.calls.at(-1)?.[0];
-    expect(call?.tools.map((childTool) => childTool.name)).toContain('read_artifact');
+    expect(new Set(names).size).toBe(names.length);
+    for (const removed of [
+      'list_datasources',
+      'list_metrics',
+      'list_label_values',
+      'inspect_metric_series',
+      'query_prometheus',
+      'query_prometheus_raw',
+      'list_dashboards',
+      'get_dashboard',
+      'upload_dashboard',
+      'delete_dashboard',
+      'run_query_agent',
+      'run_dashboard_agent',
+      'run_investigation_agent',
+      'run_alert_agent',
+      'run_support_agent',
+      'run_navigation_agent',
+    ]) {
+      expect(names).not.toContain(removed);
+    }
+    expect(createGrafanaTools({ workspaceTools, artifacts }).map((tool) => tool.name)).toEqual(names);
   });
 
   it('builds safe Grafana navigation paths', () => {
@@ -2352,49 +818,40 @@ d.dashboard.new(
     );
   });
 
-  it('keeps raw dashboard upload/delete and direct Jsonnet library browsing out of the compatibility toolset', () => {
-    const registry = createGrafanaToolRegistry({
-      runtime: {
-        model: {} as any,
-        streamFn: jest.fn() as any,
-        thinkingLevel: 'off',
-      },
-    });
+  it('keeps raw dashboard upload/delete and Jsonnet tools out of the tool list', () => {
+    const names = createGrafanaTools().map((tool) => tool.name);
 
-    const names = registry.all.map((tool) => tool.name);
-    expect(names).toContain('query_prometheus');
     expect(names).toContain('find_panel_alert_rules');
     expect(names).toContain('get_alert_rule');
-    expect(names).toContain('write_dashboard_plan');
-    expect(names).toContain('write_jsonnet');
-    expect(names).toContain('edit_jsonnet');
-    expect(names).toContain('fix_jsonnet');
-    expect(names).toContain('read_jsonnet');
-    expect(names).toContain('save_dashboard');
     expect(names).toContain('inspect_dashboard_context');
     expect(names).toContain('screenshot_dashboard');
-    expect(names).toContain('run_query_agent');
-    expect(names).toContain('run_dashboard_agent');
-    expect(names).toContain('run_investigation_agent');
-    expect(names).toContain('run_alert_agent');
-    expect(names).toContain('run_support_agent');
-    expect(names).toContain('run_navigation_agent');
-    expect(names).not.toContain('explore_metrics');
-    expect(names).not.toContain('design_dashboard');
-    expect(names).not.toContain('query_prometheus_raw');
-    expect(names).not.toContain('upload_dashboard');
-    expect(names).not.toContain('delete_dashboard');
     expect(names).not.toContain('apply_live_dashboard_mutation');
-    expect(names).not.toContain('explore_jsonnet');
-    expect(names).not.toContain('grafana_list_managed_dashboard_templates');
-    expect(names).not.toContain('read_managed_dashboard_template');
-    expect(names).not.toContain('search_grafonnet');
-    expect(names).not.toContain('read_grafonnet');
-    expect(names).not.toContain('list_grafonnet');
+    for (const removed of [
+      'explore_metrics',
+      'design_dashboard',
+      'explore_jsonnet',
+      'write_dashboard_plan',
+      'write_jsonnet',
+      'edit_jsonnet',
+      'fix_jsonnet',
+      'read_jsonnet',
+      'render_dashboard',
+      'save_dashboard',
+      'list_jsonnet_libs',
+      'search_jsonnet_libs',
+      'read_jsonnet_lib',
+      'grafana_list_managed_dashboard_templates',
+      'read_managed_dashboard_template',
+      'search_grafonnet',
+      'read_grafonnet',
+      'list_grafonnet',
+    ]) {
+      expect(names).not.toContain(removed);
+    }
   });
 
   it('exposes live dashboard mutation tools only when Grafana provides the restricted API', async () => {
-    const withoutApi = createGrafanaToolsForSkillGroups({}, ['liveDashboardEditing']).map((tool) => tool.name);
+    const withoutApi = createGrafanaTools().map((tool) => tool.name);
     expect(withoutApi).not.toContain('apply_live_dashboard_mutation');
 
     const dashboardMutation = {
@@ -2417,7 +874,7 @@ d.dashboard.new(
         'UPDATE_VARIABLE',
       ]),
     };
-    const tools = createGrafanaToolsForSkillGroups({ dashboardMutation }, ['liveDashboardEditing']);
+    const tools = createLiveDashboardMutationTools(dashboardMutation);
     const names = tools.map((tool) => tool.name);
 
     expect(names).toEqual([
@@ -2649,10 +1106,7 @@ d.dashboard.new(
       getPayloadSchema: jest.fn(() => ({}) as any),
       getAvailableCommands: jest.fn(() => ['LIST_PANELS', 'UPDATE_PANEL']),
     };
-    const queryTool = getTool(
-      createGrafanaToolsForSkillGroups({ dashboardMutation }, ['liveDashboardEditing']),
-      'update_live_dashboard_panel_query'
-    );
+    const queryTool = getTool(createLiveDashboardMutationTools(dashboardMutation), 'update_live_dashboard_panel_query');
 
     await queryTool.execute(
       'call-1',
@@ -2703,9 +1157,7 @@ d.dashboard.new(
       getPayloadSchema: jest.fn(() => ({}) as any),
       getAvailableCommands: jest.fn(() => []),
     };
-    const names = createGrafanaToolsForSkillGroups({ dashboardMutation }, ['liveDashboardEditing']).map(
-      (tool) => tool.name
-    );
+    const names = createLiveDashboardMutationTools(dashboardMutation).map((tool) => tool.name);
 
     expect(names).not.toContain('rename_live_dashboard_panel');
     expect(names).not.toContain('apply_live_dashboard_mutation');
@@ -2718,37 +1170,12 @@ d.dashboard.new(
       getPayloadSchema: jest.fn(() => ({}) as any),
       getAvailableCommands: jest.fn(() => ['LIST_PANELS']),
     };
-    const applyTool = getTool(
-      createGrafanaToolsForSkillGroups({ dashboardMutation }, ['liveDashboardEditing']),
-      'apply_live_dashboard_mutation'
-    );
+    const applyTool = getTool(createLiveDashboardMutationTools(dashboardMutation), 'apply_live_dashboard_mutation');
 
     await expect(applyTool.execute('call-1', { type: 'LIST_PANELS', payload: {} }, undefined)).rejects.toThrow(
       'LIST_PANELS is read-only'
     );
     expect(dashboardMutation.execute).not.toHaveBeenCalled();
-  });
-
-  it('can explicitly expose advanced dashboard and Jsonnet tools for tests or developer workflows', () => {
-    const names = createGrafanaTools({
-      includeAdHocDashboardTools: true,
-      includeJsonnetLibraryTools: true,
-      includeRawPrometheusQueryTool: true,
-      runtime: {
-        model: {} as any,
-        streamFn: jest.fn() as any,
-        thinkingLevel: 'off',
-      },
-    }).map((tool) => tool.name);
-
-    expect(names).toContain('query_prometheus_raw');
-    expect(names).toContain('upload_dashboard');
-    expect(names).toContain('delete_dashboard');
-    expect(names).toContain('inspect_dashboard_context');
-    expect(names).toContain('search_grafonnet');
-    expect(names).toContain('run_query_agent');
-    expect(names).toContain('run_dashboard_agent');
-    expect(names).not.toContain('explore_jsonnet');
   });
 
   it('inspects typed dashboard context and validates interpolated Prometheus panel queries', async () => {
@@ -3489,279 +1916,6 @@ d.dashboard.new(
       dashboardUid: 'metric-context',
     });
   });
-
-  it('exposes narrow read-only subagent tools for skill-selected turns', () => {
-    const names = createGrafanaToolsForSkillGroups(
-      {
-        runtime: {
-          model: {} as any,
-          streamFn: jest.fn() as any,
-          thinkingLevel: 'off',
-        },
-      },
-      ['metrics', 'dashboardMetricContext', 'subagents']
-    ).map((tool) => tool.name);
-
-    expect(names).toContain('list_datasources');
-    expect(names).toContain('query_prometheus');
-    expect(names).toContain('search_dashboard_metric_usage');
-    expect(names).toContain('get_metric_neighborhood');
-    expect(names).toContain('run_query_agent');
-    expect(names).toContain('run_dashboard_agent');
-    expect(names).toContain('run_investigation_agent');
-    expect(names).toContain('run_support_agent');
-    expect(names).toContain('run_navigation_agent');
-    expect(names).not.toContain('write_jsonnet');
-    expect(names).not.toContain('write_dashboard_plan');
-    expect(names).not.toContain('render_dashboard');
-    expect(names).not.toContain('save_dashboard');
-    expect(names).not.toContain('get_dashboard');
-    expect(names).not.toContain('screenshot_dashboard');
-  });
-
-  it('adds Jsonnet dashboard tools when the dashboard skill group is selected', () => {
-    const names = createGrafanaToolsForSkillGroups(
-      {
-        runtime: {
-          model: {} as any,
-          streamFn: jest.fn() as any,
-          thinkingLevel: 'off',
-        },
-      },
-      ['metrics', 'dashboardRead', 'jsonnetFiles', 'jsonnetDashboards', 'subagents']
-    ).map((tool) => tool.name);
-
-    expect(names).toContain('query_prometheus');
-    expect(names).toContain('write_dashboard_plan');
-    expect(names).toContain('write_jsonnet');
-    expect(names).toContain('render_dashboard');
-    expect(names).toContain('save_dashboard');
-    expect(names).toContain('get_dashboard');
-    expect(names).toContain('inspect_dashboard_context');
-    expect(names).toContain('screenshot_dashboard');
-    expect(names).toContain('run_dashboard_agent');
-    expect(names).not.toContain('design_dashboard');
-    expect(names).not.toContain('upload_dashboard');
-    expect(names).not.toContain('delete_dashboard');
-  });
-
-  it('runs the dashboard agent with Jsonnet dashboard child tools', async () => {
-    const registry = createGrafanaToolRegistry({
-      skillTools: createSkillTools(GRAFANA_SKILLS),
-      runtime: {
-        model: {} as any,
-        streamFn: jest.fn() as any,
-        thinkingLevel: 'off',
-      },
-    });
-    const tool = getTool(registry.subagents, 'run_dashboard_agent');
-
-    const result = await tool.execute(
-      'call-1',
-      {
-        task: 'Design an HTTP request dashboard',
-        datasourceUid: 'prom-b',
-        existingDashboardUid: 'http-current',
-        intent: 'update',
-      },
-      undefined
-    );
-    const call = jest.mocked(runSpecialistAgent).mock.calls.at(-1)?.[0];
-    const childToolNames = call?.tools.map((childTool) => childTool.name) ?? [];
-
-    expect(call).toMatchObject({
-      kind: 'dashboard',
-      task: expect.stringContaining('Design an HTTP request dashboard'),
-    });
-    expect(call?.task).toContain('Prefer datasource UID: prom-b.');
-    expect(call?.task).toContain('Inspect existing dashboard UID: http-current.');
-    expect(call?.systemPrompt).toContain('validate candidate PromQL with query_prometheus type="range"');
-    expect(call?.systemPrompt).toContain('Treat dashboard-derived metric usage as advisory');
-    expect(call?.systemPrompt).toContain('replace Grafana dashboard macros such as $__rate_interval');
-    expect(call?.systemPrompt).toContain('run every listed candidate exactly as requested before filtering');
-    expect(call?.systemPrompt).toContain('validationError or totalSeries=0 as unusable panel evidence');
-    expect(call?.systemPrompt).toContain('treat that as a validated handoff');
-    expect(call?.systemPrompt).toContain('write_dashboard_plan is the default writer');
-    expect(call?.systemPrompt).toContain('prefer write_dashboard_plan over raw write_jsonnet');
-    expect(call?.systemPrompt).toContain('one or more query targets');
-    expect(call?.systemPrompt).toContain('per-target legends');
-    expect(call?.systemPrompt).toContain('render_dashboard immediately and only edit Jsonnet');
-    expect(call?.systemPrompt).toContain("Use time={ from: 'now-6h', to: 'now' }");
-    expect(call?.systemPrompt).toContain('do not use timeframe, timeFrom, or timeTo');
-    expect(result.details).toMatchObject({ agent: 'dashboard', status: 'completed' });
-    expect(childToolNames).toEqual(
-      expect.arrayContaining([
-        'list_datasources',
-        'list_metrics',
-        'inspect_metric_series',
-        'query_prometheus',
-        'search_dashboard_metric_usage',
-        'get_metric_neighborhood',
-        'write_dashboard_plan',
-        'write_jsonnet',
-        'edit_jsonnet',
-        'fix_jsonnet',
-        'read_jsonnet',
-        'render_dashboard',
-        'save_dashboard',
-        'get_dashboard',
-        'list_dashboards',
-        'inspect_dashboard_context',
-        'screenshot_dashboard',
-        'read_skill_resource',
-      ])
-    );
-    expect(childToolNames).not.toContain('upload_dashboard');
-    expect(childToolNames).not.toContain('delete_dashboard');
-    expect(childToolNames).not.toContain('run_dashboard_agent');
-  });
-
-  it('runs the investigation agent with bounded selector-recovery guidance', async () => {
-    const registry = createGrafanaToolRegistry({
-      skillTools: createSkillTools(GRAFANA_SKILLS),
-      runtime: {
-        model: {} as any,
-        streamFn: jest.fn() as any,
-        thinkingLevel: 'off',
-      },
-    });
-    const tool = getTool(registry.subagents, 'run_investigation_agent');
-
-    const result = await tool.execute(
-      'call-1',
-      {
-        task: 'Recover PromQL selectors after an over-scoped label returns zero series.',
-        datasourceUid: 'prom-b',
-      },
-      undefined
-    );
-    const call = jest.mocked(runSpecialistAgent).mock.calls.at(-1)?.[0];
-    const childToolNames = call?.tools.map((childTool) => childTool.name) ?? [];
-
-    expect(call).toMatchObject({
-      kind: 'investigation',
-      task: expect.stringContaining('Recover PromQL selectors after an over-scoped label returns zero series.'),
-    });
-    expect(call?.task).toContain('Prefer datasource UID: prom-b.');
-    expect(call?.systemPrompt).toContain('For selector-recovery tasks, use a bounded sequence');
-    expect(call?.systemPrompt).toContain('retry only failed recovered queries once individually');
-    expect(call?.systemPrompt).toContain('PromQL expressions plus datasource UID, totalSeries');
-    expect(result.details).toMatchObject({ agent: 'investigation', status: 'completed' });
-    expect(childToolNames).toEqual(
-      expect.arrayContaining(['list_metrics', 'inspect_metric_series', 'query_prometheus', 'update_report'])
-    );
-    expect(childToolNames).not.toContain('save_dashboard');
-  });
-
-  it('runs the alert agent with read-only alert, dashboard, and Prometheus child tools', async () => {
-    const registry = createGrafanaToolRegistry({
-      skillTools: createSkillTools(GRAFANA_SKILLS),
-      runtime: {
-        model: {} as any,
-        streamFn: jest.fn() as any,
-        thinkingLevel: 'off',
-      },
-    });
-    const tool = getTool(registry.subagents, 'run_alert_agent');
-
-    const result = await tool.execute(
-      'call-1',
-      {
-        task: 'Troubleshoot why the linked alert is firing.',
-        datasourceUid: 'prom-b',
-        dashboardUid: 'service-dashboard',
-        panelId: '2',
-      },
-      undefined
-    );
-    const call = jest.mocked(runSpecialistAgent).mock.calls.at(-1)?.[0];
-    const childToolNames = call?.tools.map((childTool) => childTool.name) ?? [];
-
-    expect(call).toMatchObject({
-      kind: 'alerts',
-      task: expect.stringContaining('Troubleshoot why the linked alert is firing.'),
-    });
-    expect(call?.task).toContain('Prefer datasource UID: prom-b.');
-    expect(call?.task).toContain('Dashboard UID: service-dashboard.');
-    expect(call?.task).toContain('Panel ID: 2.');
-    expect(call?.systemPrompt).toContain('panel ID or panelRef');
-    expect(call?.systemPrompt).toContain('panel threshold');
-    expect(call?.systemPrompt).toContain('alert threshold');
-    expect(call?.systemPrompt).toContain('linked panel');
-    expect(result.details).toMatchObject({ agent: 'alerts', status: 'completed' });
-    expect(childToolNames).toEqual(
-      expect.arrayContaining([
-        'find_panel_alert_rules',
-        'get_alert_rule',
-        'inspect_dashboard_context',
-        'search_dashboard_metric_usage',
-        'query_prometheus',
-        'read_skill_resource',
-      ])
-    );
-    expect(childToolNames).not.toContain('upload_dashboard');
-    expect(childToolNames).not.toContain('delete_dashboard');
-    expect(childToolNames).not.toContain('save_dashboard');
-  });
-
-  it('runs the navigation agent with only the safe navigation tool', async () => {
-    const registry = createGrafanaToolRegistry({
-      runtime: {
-        model: {} as any,
-        streamFn: jest.fn() as any,
-        thinkingLevel: 'off',
-      },
-    });
-    const tool = getTool(registry.subagents, 'run_navigation_agent');
-
-    const result = await tool.execute(
-      'call-1',
-      {
-        task: 'Open the Service RED dashboard.',
-        destinationHint: 'service-red',
-      },
-      undefined
-    );
-    const call = jest.mocked(runSpecialistAgent).mock.calls.at(-1)?.[0];
-
-    expect(call).toMatchObject({
-      kind: 'navigation',
-      task: expect.stringContaining('Open the Service RED dashboard.'),
-    });
-    expect(call?.task).toContain('Destination hint: service-red.');
-    expect(call?.tools.map((childTool) => childTool.name)).toEqual(['navigate']);
-    expect(result.details).toMatchObject({ agent: 'navigation', status: 'completed' });
-  });
-
-  it('reads bundled skill resources through an explicit tool', async () => {
-    const tool = getTool(createSkillTools(GRAFANA_SKILLS), 'read_skill_resource');
-
-    const result = await tool.execute(
-      'call-1',
-      { skill: 'grafana-dashboard', path: 'references/dashboard-jsonnet-workflow.md' },
-      undefined
-    );
-
-    expect(result.content[0].text).toContain('# Dashboard Jsonnet Workflow');
-    expect(result.details).toMatchObject({
-      skill: 'grafana-dashboard',
-      path: 'references/dashboard-jsonnet-workflow.md',
-      truncated: false,
-    });
-    await expect(
-      tool.execute('call-example', { skill: 'grafana-dashboard', path: 'references/example.md' }, undefined)
-    ).resolves.toMatchObject({
-      details: { skill: 'grafana-dashboard', path: 'references/example.md', truncated: false },
-    });
-    await expect(
-      tool.execute('call-template', { skill: 'grafana-dashboard', path: 'templates/prometheus.md' }, undefined)
-    ).resolves.toMatchObject({
-      details: { skill: 'grafana-dashboard', path: 'templates/prometheus.md', truncated: false },
-    });
-    await expect(tool.execute('call-2', { skill: 'grafana-dashboard', path: 'missing.md' }, undefined)).rejects.toThrow(
-      'Unknown resource for grafana-dashboard: missing.md'
-    );
-  });
 });
 
 function getTool(tools: AgentTool[], name: string) {
@@ -3786,34 +1940,6 @@ function grafanaFetchError(status: number, statusText: string, message: string) 
     statusText,
     data: { message },
     config: { method: 'GET', url: 'api/v1/label/__name__/values' },
-  };
-}
-
-function registryRuntime() {
-  return {
-    model: {} as any,
-    streamFn: jest.fn() as any,
-    thinkingLevel: 'off' as const,
-  };
-}
-
-function createVirtualJsonnetRuntime(sessionId: string, initialFile?: VirtualJsonnetFileSnapshot) {
-  const files: Record<string, VirtualJsonnetFileSnapshot> = initialFile ? { [initialFile.path]: initialFile } : {};
-  const hydrated: Record<string, number> = {};
-
-  return {
-    getSessionId: () => sessionId,
-    getFile: (path: string) => files[path],
-    setFile: (file: VirtualJsonnetFileSnapshot, options?: { hydrated?: boolean }) => {
-      files[file.path] = file;
-      if (options?.hydrated) {
-        hydrated[file.path] = file.version;
-      }
-    },
-    isHydrated: (path: string, version: number) => hydrated[path] === version,
-    markHydrated: (path: string, version: number) => {
-      hydrated[path] = version;
-    },
   };
 }
 

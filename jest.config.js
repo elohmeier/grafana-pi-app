@@ -12,6 +12,8 @@ module.exports = {
     ...baseConfig.moduleNameMapper,
     '^@earendil-works/pi-agent-core$': '<rootDir>/src/test/piAgentCoreJestShim.ts',
     '^@earendil-works/pi-ai$': '<rootDir>/src/test/piAiJestShim.ts',
+    // Run the browser bundle under test: it is what the plugin ships.
+    '^just-bash/browser$': '<rootDir>/node_modules/just-bash/dist/bundle/browser.js',
   },
   transformIgnorePatterns: [
     nodeModulesToTransform([
@@ -19,6 +21,7 @@ module.exports = {
       '@earendil-works/pi-agent-core',
       '@react-hookz/web',
       '@ver0/deep-equal',
+      'just-bash',
     ]),
   ],
 };

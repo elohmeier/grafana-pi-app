@@ -3,43 +3,27 @@ import { renderGrafanaSystemPrompt } from './prompt';
 import { selectGrafanaSkills } from './selection';
 
 describe('Grafana skill selection', () => {
-  it('keeps metrics and subagents available without a default skill', () => {
+  it('activates no skill for plain metric questions', () => {
     const selection = selectGrafanaSkills('show current CPU usage', GRAFANA_SKILLS);
 
     expect(selection.activeSkillNames).toEqual([]);
-    expect(selection.toolGroups).toEqual(expect.arrayContaining(['metrics', 'subagents']));
-    expect(selection.toolGroups).not.toContain('skillResources');
-    expect(selection.toolGroups).not.toContain('jsonnetDashboards');
-    expect(selection.toolGroups).not.toContain('jsonnetFiles');
+    expect(selection.activeSkills).toEqual([]);
+    expect(selection.toolGroups).toEqual([]);
+    expect(selection).not.toHaveProperty('supervisorOnly');
   });
 
   it('activates the investigation skill for diagnostic requests', () => {
     const selection = selectGrafanaSkills('why is CPU usage high on vm-web-01?', GRAFANA_SKILLS);
 
     expect(selection.activeSkillNames).toEqual(['investigation']);
-    expect(selection.toolGroups).toEqual(
-      expect.arrayContaining(['metrics', 'subagents', 'investigation', 'skillResources'])
-    );
+    expect(selection.activeSkills.map((skill) => skill.name)).toEqual(['investigation']);
   });
 
   it('activates the investigation skill for analysis requests', () => {
     const selection = selectGrafanaSkills('Analyze the last 6 hours and summarize what is wrong', GRAFANA_SKILLS);
 
     expect(selection.activeSkillNames).toEqual(['investigation']);
-    expect(selection.toolGroups).toEqual(
-      expect.arrayContaining(['metrics', 'subagents', 'investigation', 'skillResources'])
-    );
-  });
-
-  it('uses supervisor-only tools when the prompt mandates an exact specialist sequence', () => {
-    const selection = selectGrafanaSkills(
-      'Use exactly one run_investigation_agent top-level tool call first, then exactly one run_dashboard_agent top-level tool call.',
-      GRAFANA_SKILLS
-    );
-
-    expect(selection.supervisorOnly).toBe(true);
-    expect(selection.toolGroups).toEqual(['subagents']);
-    expect(selection.activeSkillNames).toEqual([]);
+    expect(selection.activeSkills.map((skill) => skill.name)).toEqual(['investigation']);
   });
 
   it('activates the alerting skill for panel-linked alert troubleshooting', () => {
@@ -50,25 +34,12 @@ describe('Grafana skill selection', () => {
     });
 
     expect(selection.activeSkillNames).toEqual(expect.arrayContaining(['grafana-alerting']));
-    expect(selection.toolGroups).toEqual(
-      expect.arrayContaining(['alerts', 'dashboardRead', 'dashboardMetricContext', 'metrics', 'subagents'])
-    );
   });
 
   it('activates the dashboard skill for dashboard artifact requests', () => {
     const selection = selectGrafanaSkills('build a dashboard for node health panels', GRAFANA_SKILLS);
 
     expect(selection.activeSkillNames).toEqual(['grafana-dashboard']);
-    expect(selection.toolGroups).toEqual(
-      expect.arrayContaining([
-        'metrics',
-        'subagents',
-        'dashboardRead',
-        'jsonnetFiles',
-        'jsonnetDashboards',
-        'skillResources',
-      ])
-    );
   });
 
   it('activates the dashboard skill for contextual sidebar dashboard prompts', () => {
@@ -96,8 +67,7 @@ describe('Grafana skill selection', () => {
     const selection = selectGrafanaSkills('show me SQL tables and query SELECT * FROM metrics', GRAFANA_SKILLS);
 
     expect(selection.activeSkillNames).toEqual([]);
-    expect(selection.toolGroups).toEqual(expect.arrayContaining(['metrics', 'subagents']));
-    expect(selection.toolGroups).not.toContain('skillResources');
+    expect(selection.toolGroups).toEqual([]);
   });
 
   it('renders only active skill instructions into the system prompt', () => {
@@ -108,7 +78,6 @@ describe('Grafana skill selection', () => {
 
     expect(prompt).toContain('## Available Skills');
     expect(prompt).toContain('### grafana-dashboard');
-    expect(prompt).toContain('run_dashboard_agent');
     expect(prompt).toContain('references/dashboard-jsonnet-workflow.md');
     expect(prompt).not.toContain('### grafana-alerting');
     expect(prompt).not.toContain('### grafana-metrics');
@@ -151,7 +120,7 @@ describe('Grafana skill selection', () => {
     });
 
     expect(selection.activeSkillNames).toEqual(['team-runbook']);
-    expect(selection.toolGroups).toEqual(expect.arrayContaining(['metrics', 'subagents', 'skillResources']));
+    expect(selection.explicitSkillNames).toEqual(['team-runbook']);
     expect(prompt).toContain('### team-runbook');
     expect(prompt).toContain('# Team Runbook');
   });

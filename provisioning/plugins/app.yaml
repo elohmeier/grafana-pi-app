@@ -13,12 +13,13 @@ apps:
           protocol: $__env{PI_OPENAI_PROTOCOL}
           thinkingLevel: $__env{PI_THINKING_LEVEL}
           thinkingFormat: $__env{PI_THINKING_FORMAT}
+          contextWindow: $__env{PI_CONTEXT_WINDOW}
+          maxOutputTokens: $__env{PI_MAX_OUTPUT_TOKENS}
       accessMode: all
       allowedUsers: []
       systemPromptAddendum: ''
       isOpenAIAPIKeySet: true
       allowedPrometheusDatasourceUids: ['prometheus', 'thanos-prod-db']
       customSkills: []
-      enableAgentContractSample: true
     secureJsonData:
       openAIAPIKey: $__env{OPENAI_API_KEY}

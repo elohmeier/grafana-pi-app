@@ -212,13 +212,14 @@ test('structured upstream errors classify rate limiting even with proxy HTTP 200
   assert.equal(classifyRequestFailure({ httpStatus: 200, error: 'unknown' }), 'stream');
 });
 
-test('workload gates reject empty and truncated answers, and require successful specialist evidence', () => {
+test('workload gates reject empty and truncated answers, and require successful PromQL evidence', () => {
   const events = [
-    { type: 'tool_execution_start', toolName: 'run_investigation_agent', toolCallId: 'a' },
+    { type: 'tool_execution_start', toolName: 'bash', toolCallId: 'a', args: { command: 'grafana-prom query up' } },
     {
       type: 'tool_execution_end',
+      toolName: 'bash',
       toolCallId: 'a',
-      result: { details: { toolCalls: [{ name: 'query_prometheus', status: 'completed' }] } },
+      result: { details: { command: "grafana-prom query 'up' --from now-6h", exitCode: 0, stdout: '{}', changes: [] } },
     },
     {
       type: 'message_end',
@@ -226,6 +227,14 @@ test('workload gates reject empty and truncated answers, and require successful 
     },
   ];
   assert.equal(workloadQualityError('analysis', events), undefined);
+  events[1].result.details.exitCode = 1;
+  assert.match(workloadQualityError('analysis', events), /PromQL evidence/);
+  events[1].result.details.exitCode = 0;
+  const apply = [
+    { type: 'tool_execution_start', toolName: 'bash', toolCallId: 'b', args: { command: 'workspace apply plan-1' } },
+    { type: 'tool_execution_end', toolName: 'bash', toolCallId: 'b', result: { details: { exitCode: 0 } } },
+  ];
+  assert.match(workloadQualityError('analysis', [...apply, ...events]), /dashboard write/);
   events[2].message.stopReason = 'length';
   assert.match(workloadQualityError('analysis', events), /length/);
   assert.match(workloadQualityError('analysis', []), /Empty/);

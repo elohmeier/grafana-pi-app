@@ -8,7 +8,7 @@ import { runLoadStage, validateLoadConfig } from '../scripts/benchmarks/load.mjs
 
 // Exercises real chat/agent/tool wiring, with every model call intercepted.
 // This is an ordinary regression test and never generates endpoint load.
-test('load driver isolates conversations, captures specialists, resets and cancels', async ({
+test('load driver isolates conversations, captures shell tool calls, resets and cancels', async ({
   browser,
   context,
   page,
@@ -25,6 +25,7 @@ test('load driver isolates conversations, captures specialists, resets and cance
   const contexts = [];
   const drivers = [];
   const promptLengths: number[] = [];
+  let missingShellTool = false;
   let mode: 'normal' | 'rate-limit' | 'hang' = 'normal';
   const usage = { reported: true, input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: {} };
   const sse = (events: unknown[]) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join('');
@@ -53,11 +54,10 @@ test('load driver isolates conversations, captures specialists, resets and cance
           return;
         }
         const { context: chat } = route.request().postDataJSON();
-        const parent = chat.tools.some((t: { name: string }) => t.name === 'run_query_agent');
+        if (!chat.tools.some((t: { name: string }) => t.name === 'bash')) missingShellTool = true;
         const hasResult = chat.messages.some((m: { role: string }) => m.role === 'toolResult');
-        if (parent && !hasResult) promptLengths.push(chat.messages.length);
+        if (!hasResult) promptLengths.push(chat.messages.length);
         await delay(50);
-        const tool = parent ? 'run_query_agent' : 'query_prometheus';
         await route.fulfill({
           contentType: 'text/event-stream',
           body: sse([
@@ -65,13 +65,11 @@ test('load driver isolates conversations, captures specialists, resets and cance
             ...(hasResult
               ? textEvents
               : [
-                  { type: 'toolcall_start', contentIndex: 0, id: randomUUID(), toolName: tool },
+                  { type: 'toolcall_start', contentIndex: 0, id: randomUUID(), toolName: 'bash' },
                   {
                     type: 'toolcall_delta',
                     contentIndex: 0,
-                    delta: JSON.stringify(
-                      parent ? { task: 'Find HTTP, load and CPU metrics' } : { query: 'vector(1)' }
-                    ),
+                    delta: JSON.stringify({ command: "grafana-prom query 'vector(1)' --from now-1h" }),
                   },
                   { type: 'toolcall_end', contentIndex: 0 },
                   { type: 'done', reason: 'toolUse', usage },
@@ -141,7 +139,8 @@ test('load driver isolates conversations, captures specialists, resets and cance
       stage.sessions.every((s: LoadSession) => s.status === 'passed'),
       JSON.stringify(stage.sessions.map((s: LoadSession) => s.error))
     ).toBe(true);
-    expect(stage.sessions.every((s: LoadSession) => s.requests.length === 5)).toBe(true);
+    // Tool call, answer after the tool result, and the follow-up answer.
+    expect(stage.sessions.every((s: LoadSession) => s.requests.length === 3)).toBe(true);
     expect(stage.summary.llmRequestsInFlight.peak).toBe(2);
     const newSession = (): LoadSession => ({
       id: randomUUID(),
@@ -165,6 +164,7 @@ test('load driver isolates conversations, captures specialists, resets and cance
     await drivers[0].run(recovered, AbortSignal.timeout(20_000));
     expect(recovered.status, recovered.error).toBe('passed');
     expect(promptLengths.every((n) => n === promptLengths[0])).toBe(true);
+    expect(missingShellTool).toBe(false);
   } finally {
     await Promise.all(contexts.map((c) => c.close()));
   }

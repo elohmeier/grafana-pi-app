@@ -366,7 +366,7 @@ function makeSearchDashboardMetricUsageTool(toolConfig: GrafanaToolConfig): Agen
     name: 'search_dashboard_metric_usage',
     label: 'Search dashboard metric usage',
     description:
-      'Search visible dashboards and extract a ranked Prometheus metric usage corpus from their panels. Prefer this before list_metrics when existing dashboards may already encode the important metrics, labels, and PromQL relations.',
+      'Search visible dashboards and extract a ranked Prometheus metric usage corpus from their panels. Prefer this before broad `grafana-prom metrics` scans when existing dashboards may already encode the important metrics, labels, and PromQL relations.',
     prepareArguments: prepareDashboardMetricSearchArguments,
     parameters: Type.Object(
       {

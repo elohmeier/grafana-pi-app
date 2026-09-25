@@ -1,8 +1,6 @@
-import type { AgentTool } from '@earendil-works/pi-agent-core';
 import {
   CoreApp,
   dateTime,
-  dataFrameToJSON,
   getDefaultTimeRange,
   LoadingState,
   type DataFrame,
@@ -14,39 +12,9 @@ import {
 } from '@grafana/data';
 import { config, getDataSourceSrv } from '@grafana/runtime';
 import { lastValueFrom, type Observable } from 'rxjs';
-import { Type } from 'typebox';
 import { backendFetch, formatBackendFetchError } from './client';
-import { textResult, throwIfAborted, truncateText } from './result';
-import type {
-  GrafanaToolConfig,
-  InspectMetricSeriesParams,
-  ListLabelValuesParams,
-  ListMetricsParams,
-  PrometheusMetadataResponse,
-  PrometheusQuerySpec,
-  QueryPrometheusParams,
-  ResourceCapableDataSource,
-} from './types';
-
-type MetricToolConfig = GrafanaToolConfig & {
-  includeRawPrometheusQueryTool?: boolean;
-};
-
-export function createMetricTools(toolConfig: MetricToolConfig): AgentTool[] {
-  const tools = [
-    makeGrafanaGetDatasourcesTool(toolConfig),
-    makeListMetricsTool(toolConfig),
-    makeListLabelValuesTool(toolConfig),
-    makeInspectMetricSeriesTool(toolConfig),
-    makeQueryPrometheusTool(toolConfig),
-  ];
-
-  if (toolConfig.includeRawPrometheusQueryTool) {
-    tools.push(makeQueryPrometheusRawTool(toolConfig));
-  }
-
-  return tools;
-}
+import { throwIfAborted } from './result';
+import type { GrafanaToolConfig, PrometheusQuerySpec, ResourceCapableDataSource } from './types';
 
 export function filterAllowedPrometheusDatasourceSettings(
   datasources: DataSourceInstanceSettings[],
@@ -59,417 +27,6 @@ export function filterAllowedPrometheusDatasourceSettings(
 
 export function getAllowedPrometheusDatasourceUids(toolConfig: GrafanaToolConfig) {
   return toolConfig.allowedPrometheusDatasourceUids;
-}
-
-function makeGrafanaGetDatasourcesTool(toolConfig: GrafanaToolConfig): AgentTool {
-  return {
-    name: 'list_datasources',
-    label: 'Get Grafana datasources',
-    description: 'List Prometheus-compatible datasources available to the assistant and current Grafana user.',
-    parameters: Type.Object({}),
-    async execute() {
-      const datasources = getPrometheusDatasourceSettings(toolConfig).map((ds) => ({
-        name: ds.name,
-        uid: ds.uid,
-        type: ds.type,
-        isDefault: ds.isDefault,
-      }));
-
-      return textResult(JSON.stringify(datasources, null, 2), { datasources });
-    },
-  };
-}
-
-function makeListMetricsTool(toolConfig: GrafanaToolConfig): AgentTool {
-  return {
-    name: 'list_metrics',
-    label: 'List metrics',
-    description: 'List Prometheus metric names, optionally filtered by prefix.',
-    parameters: Type.Object({
-      datasourceUid: Type.Optional(
-        Type.String({
-          description: 'Prometheus datasource UID. Defaults to the first available Prometheus datasource.',
-        })
-      ),
-      prefix: Type.Optional(Type.String({ description: 'Optional metric-name prefix filter.' })),
-      prefixes: Type.Optional(
-        Type.Array(Type.String(), {
-          description:
-            'Batch of metric-name prefixes to inspect in one call. Prefer this when checking multiple related prefixes.',
-        })
-      ),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const args = params as ListMetricsParams;
-      throwIfAborted(signal);
-      const ds = await getPrometheusDatasource(toolConfig, args.datasourceUid);
-      const response = await getDatasourceResource<PrometheusMetadataResponse<string[]>>(
-        ds,
-        'api/v1/label/__name__/values',
-        undefined,
-        signal
-      );
-      const metricNames = response.data ?? [];
-      const prefixes = listMetricPrefixes(args);
-
-      if (prefixes.length > 1) {
-        const results = prefixes.map((prefix) => compactMetricNameList(metricNames, prefix));
-        const batch = {
-          datasourceUid: ds.uid,
-          prefixCount: prefixes.length,
-          results,
-        };
-
-        return textResult(truncateText(JSON.stringify(batch, null, 2), 40000), {
-          datasourceUid: ds.uid,
-          batch: true,
-          prefixes,
-          count: results.reduce((sum, result) => sum + result.count, 0),
-          truncated: results.some((result) => result.truncated),
-        });
-      }
-
-      const result = compactMetricNameList(metricNames, prefixes[0]);
-      const suffix = result.truncated ? `\n... ${result.count - result.metrics.length} more metrics omitted` : '';
-
-      return textResult(`${result.metrics.join('\n')}${suffix}`, {
-        datasourceUid: ds.uid,
-        prefix: result.prefix,
-        count: result.count,
-        truncated: result.truncated,
-      });
-    },
-  };
-}
-
-function makeListLabelValuesTool(toolConfig: GrafanaToolConfig): AgentTool {
-  return {
-    name: 'list_label_values',
-    label: 'List label values',
-    description: 'List Prometheus label values, optionally scoped by a metric selector in match[].',
-    parameters: Type.Object({
-      datasourceUid: Type.Optional(
-        Type.String({
-          description: 'Prometheus datasource UID. Defaults to the first available Prometheus datasource.',
-        })
-      ),
-      label: Type.String({ description: 'Label name, such as job, instance, namespace, pod, or route.' }),
-      match: Type.Optional(
-        Type.String({
-          description: 'Optional Prometheus match[] selector, such as up or http_requests_total{job="api"}.',
-        })
-      ),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const args = params as ListLabelValuesParams;
-      throwIfAborted(signal);
-      const ds = await getPrometheusDatasource(toolConfig, args.datasourceUid);
-      const response = await getDatasourceResource<PrometheusMetadataResponse<string[]>>(
-        ds,
-        `api/v1/label/${encodeURIComponent(args.label)}/values`,
-        args.match ? { 'match[]': args.match } : undefined,
-        signal
-      );
-      const values = response.data ?? [];
-      const limited = values.slice(0, 1000);
-      const suffix =
-        values.length > limited.length ? `\n... ${values.length - limited.length} more values omitted` : '';
-
-      return textResult(`${limited.join('\n')}${suffix}`, {
-        datasourceUid: ds.uid,
-        label: args.label,
-        count: values.length,
-        truncated: values.length > limited.length,
-      });
-    },
-  };
-}
-
-function makeInspectMetricSeriesTool(toolConfig: GrafanaToolConfig): AgentTool {
-  return {
-    name: 'inspect_metric_series',
-    label: 'Inspect metric series',
-    description: 'Inspect Prometheus series label names and example label sets for a metric selector.',
-    parameters: Type.Object({
-      datasourceUid: Type.Optional(
-        Type.String({
-          description: 'Prometheus datasource UID. Defaults to the first available Prometheus datasource.',
-        })
-      ),
-      match: Type.Optional(
-        Type.String({
-          description: 'Prometheus match[] selector, such as http_requests_total or http_requests_total{job="web"}.',
-        })
-      ),
-      matches: Type.Optional(
-        Type.Array(Type.String(), {
-          description:
-            'Batch of Prometheus match[] selectors to inspect in one call. Prefer this when checking multiple metrics.',
-        })
-      ),
-      limit: Type.Optional(
-        Type.Number({ description: 'Maximum example series per selector. Defaults to 20, maximum 100.' })
-      ),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const args = params as InspectMetricSeriesParams;
-      throwIfAborted(signal);
-      const ds = await getPrometheusDatasource(toolConfig, args.datasourceUid);
-      const matches = metricSeriesMatches(args);
-      if (matches.length === 0) {
-        throw new Error('inspect_metric_series requires match or matches.');
-      }
-      const limit = clampInt(args.limit ?? 20, 1, 100);
-      const inspections = await Promise.all(
-        matches.slice(0, 10).map(async (match) => {
-          throwIfAborted(signal);
-          return inspectMetricSeries(ds, match, limit, signal);
-        })
-      );
-
-      if (inspections.length === 1) {
-        return textResult(JSON.stringify(inspections[0], null, 2), inspections[0]);
-      }
-
-      const batch = {
-        datasourceUid: ds.uid,
-        matchCount: matches.length,
-        truncatedMatches: matches.length > inspections.length,
-        results: inspections,
-      };
-
-      return textResult(truncateText(JSON.stringify(batch, null, 2), 40000), {
-        datasourceUid: ds.uid,
-        batch: true,
-        matches: matches.length,
-        truncatedMatches: batch.truncatedMatches,
-        totalSeries: inspections.reduce((sum, result) => sum + result.totalSeries, 0),
-        truncated: inspections.some((result) => result.truncated),
-      });
-    },
-  };
-}
-
-function listMetricPrefixes(args: ListMetricsParams) {
-  const prefixes = Array.isArray(args.prefixes)
-    ? args.prefixes.filter((prefix) => typeof prefix === 'string' && prefix.trim()).map((prefix) => prefix.trim())
-    : [];
-  if (typeof args.prefix === 'string' && args.prefix.trim()) {
-    prefixes.unshift(args.prefix.trim());
-  }
-
-  return Array.from(new Set(prefixes)).slice(0, 20);
-}
-
-function compactMetricNameList(metricNames: string[], prefix?: string) {
-  const metrics = metricNames.filter((name) => !prefix || name.startsWith(prefix));
-  const limited = metrics.slice(0, 1000);
-
-  return {
-    prefix,
-    count: metrics.length,
-    truncated: metrics.length > limited.length,
-    metrics: limited,
-  };
-}
-
-function metricSeriesMatches(args: InspectMetricSeriesParams) {
-  const matches = Array.isArray(args.matches)
-    ? args.matches.filter((match) => typeof match === 'string' && match.trim()).map((match) => match.trim())
-    : [];
-  if (typeof args.match === 'string' && args.match.trim()) {
-    matches.unshift(args.match.trim());
-  }
-
-  return Array.from(new Set(matches)).slice(0, 20);
-}
-
-async function inspectMetricSeries(ds: ResourceCapableDataSource, match: string, limit: number, signal?: AbortSignal) {
-  const response = await getDatasourceResource<PrometheusMetadataResponse<Array<Record<string, string>>>>(
-    ds,
-    'api/v1/series',
-    {
-      'match[]': match,
-    },
-    signal
-  );
-  const series = response.data ?? [];
-  const examples = series.slice(0, limit);
-  const labelNames = Array.from(
-    new Set(series.flatMap((item) => Object.keys(item)).filter((name) => name !== '__name__'))
-  ).sort();
-
-  return {
-    datasourceUid: ds.uid,
-    match,
-    labelNames,
-    totalSeries: series.length,
-    truncated: series.length > examples.length,
-    examples,
-  };
-}
-
-function makeQueryPrometheusTool(toolConfig: GrafanaToolConfig): AgentTool {
-  return {
-    name: 'query_prometheus',
-    label: 'Query Prometheus',
-    description:
-      'Run an instant or range PromQL query through Grafana as the current user. Results are compact validation summaries with min/max/last values, not raw data frames. For dashboard rate/trend panel validation, prefer a batched type="range" call with explicit start/end matching the dashboard time range and treat validationError or totalSeries=0 as unusable evidence.',
-    parameters: Type.Object({
-      datasourceUid: Type.Optional(
-        Type.String({
-          description: 'Prometheus datasource UID. Defaults to the first available Prometheus datasource.',
-        })
-      ),
-      query: Type.Optional(Type.String({ description: 'PromQL expression for a single validation.' })),
-      queries: Type.Optional(
-        Type.Array(
-          Type.Object({
-            query: Type.String({ description: 'PromQL expression.' }),
-            type: Type.Optional(
-              Type.Union([Type.Literal('instant'), Type.Literal('range')], {
-                description: 'Query type. Defaults to instant. Use range for dashboard time-series/rate validation.',
-              })
-            ),
-            start: Type.Optional(
-              Type.String({ description: 'Range start such as now-1h, now-6h, or an ISO timestamp.' })
-            ),
-            end: Type.Optional(Type.String({ description: 'Range end such as now or an ISO timestamp.' })),
-          }),
-          {
-            description:
-              'Batch of PromQL expressions to validate in one tool call. Prefer this when checking multiple related queries.',
-          }
-        )
-      ),
-      type: Type.Optional(
-        Type.Union([Type.Literal('instant'), Type.Literal('range')], {
-          description: 'Query type. Defaults to instant. Use range for dashboard time-series/rate validation.',
-        })
-      ),
-      start: Type.Optional(Type.String({ description: 'Range start such as now-1h, now-6h, or an ISO timestamp.' })),
-      end: Type.Optional(Type.String({ description: 'Range end such as now or an ISO timestamp.' })),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const args = params as QueryPrometheusParams;
-      throwIfAborted(signal);
-      const ds = await getPrometheusDatasource(toolConfig, args.datasourceUid);
-      const querySpecs = querySpecsFromParams(args);
-      if (querySpecs.length === 0) {
-        throw new Error('query_prometheus requires query or queries.');
-      }
-
-      if (querySpecs.length === 1) {
-        const summary = await runPrometheusQuerySummaryOrValidationError(ds, querySpecs[0], signal);
-        const result = truncateText(JSON.stringify(summary, null, 2), 40000);
-
-        return textResult(result, {
-          datasourceUid: ds.uid,
-          query: summary.query,
-          interval: summary.interval,
-          frames: summary.frameCount,
-          series: summary.series.length,
-          totalSeries: summary.totalSeries,
-          truncatedSeries: summary.truncatedSeries,
-          summarized: true,
-          validationError: summary.validationError,
-          ...prometheusVisualizationDetails(summary),
-        });
-      }
-
-      const limitedQuerySpecs = querySpecs.slice(0, 10);
-      const results = await Promise.all(
-        limitedQuerySpecs.map(async (querySpec) => {
-          throwIfAborted(signal);
-          return compactBatchPrometheusSummary(await runPrometheusQuerySummaryOrValidationError(ds, querySpec, signal));
-        })
-      );
-      throwIfAborted(signal);
-      const failedQueries = results.filter((summary) => summary.validationError).length;
-      const batch = {
-        datasourceUid: ds.uid,
-        queryCount: querySpecs.length,
-        truncatedQueries: querySpecs.length > results.length,
-        failedQueries,
-        results,
-      };
-
-      return textResult(truncateText(JSON.stringify(batch, null, 2), 40000), {
-        datasourceUid: ds.uid,
-        queries: querySpecs.length,
-        failedQueries,
-        summarized: true,
-        batch: true,
-      });
-    },
-  };
-}
-
-function makeQueryPrometheusRawTool(toolConfig: GrafanaToolConfig): AgentTool {
-  return {
-    name: 'query_prometheus_raw',
-    label: 'Query Prometheus raw',
-    description:
-      'Run a PromQL query and return raw Grafana data frames. This is intentionally verbose and should only be enabled for developer/debug workflows.',
-    parameters: Type.Object({
-      datasourceUid: Type.Optional(
-        Type.String({
-          description: 'Prometheus datasource UID. Defaults to the first available Prometheus datasource.',
-        })
-      ),
-      query: Type.String({ description: 'PromQL expression.' }),
-      type: Type.Optional(
-        Type.Union([Type.Literal('instant'), Type.Literal('range')], {
-          description: 'Query type. Defaults to instant.',
-        })
-      ),
-      start: Type.Optional(Type.String({ description: 'Range start such as now-1h, now-6h, or an ISO timestamp.' })),
-      end: Type.Optional(Type.String({ description: 'Range end such as now or an ISO timestamp.' })),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const args = params as QueryPrometheusParams;
-      if (!args.query) {
-        throw new Error('query_prometheus_raw requires query.');
-      }
-      throwIfAborted(signal);
-      const ds = await getPrometheusDatasource(toolConfig, args.datasourceUid);
-      const queryType = args.type ?? 'instant';
-      const timeRange =
-        queryType === 'range' ? makeTimeRange(args.start ?? 'now-1h', args.end ?? 'now') : getDefaultTimeRange();
-      const interval = queryType === 'range' ? chooseRangeInterval(timeRange) : '1m';
-      const response = await runPrometheusQuery(ds, args.query, queryType, timeRange, interval, signal);
-      const frames = response.data ?? [];
-      const result = truncateText(JSON.stringify(frames.map(frameToJson), null, 2), 120000);
-
-      return textResult(result, {
-        datasourceUid: ds.uid,
-        query: args.query,
-        interval,
-        frames: frames.length,
-        raw: true,
-      });
-    },
-  };
-}
-
-function querySpecsFromParams(args: QueryPrometheusParams): PrometheusQuerySpec[] {
-  if (Array.isArray(args.queries) && args.queries.length > 0) {
-    return args.queries
-      .filter((querySpec) => typeof querySpec.query === 'string' && querySpec.query.trim())
-      .map((querySpec) => {
-        const start = querySpec.start ?? args.start;
-        const end = querySpec.end ?? args.end;
-        return {
-          ...querySpec,
-          type: querySpec.type ?? args.type ?? (start || end ? 'range' : undefined),
-          start,
-          end,
-        };
-      });
-  }
-  return typeof args.query === 'string' && args.query.trim()
-    ? [{ query: args.query, type: args.type, start: args.start, end: args.end }]
-    : [];
 }
 
 export type PrometheusQueryValidationSummary = PrometheusQuerySummary & {
@@ -605,7 +162,7 @@ function failedPrometheusQuerySummary(
   };
 }
 
-function getPrometheusDatasourceSettings(toolConfig: GrafanaToolConfig) {
+export function getPrometheusDatasourceSettings(toolConfig: GrafanaToolConfig) {
   return filterAllowedPrometheusDatasourceSettings(
     getDataSourceSrv().getList({ metrics: true }),
     getAllowedPrometheusDatasourceUids(toolConfig)
@@ -630,7 +187,7 @@ export async function getPrometheusDatasource(
   return getDataSourceSrv().get({ uid: selected.uid, type: selected.type }) as Promise<ResourceCapableDataSource>;
 }
 
-async function getDatasourceResource<T>(
+export async function getDatasourceResource<T>(
   ds: ResourceCapableDataSource,
   path: string,
   params?: Record<string, unknown>,
@@ -869,10 +426,6 @@ function parseTime(raw: string) {
   return parsed.isValid() ? parsed : undefined;
 }
 
-function frameToJson(frame: DataFrame) {
-  return dataFrameToJSON(frame);
-}
-
 export type PrometheusQuerySummary = {
   datasourceUid: string;
   query: string;
@@ -1093,31 +646,6 @@ function prometheusApiTime(raw: number | string): string | undefined {
     return undefined;
   }
   return new Date(seconds * 1000).toISOString();
-}
-
-function prometheusVisualizationDetails(summary: PrometheusQuerySummary) {
-  if (summary.queryType !== 'range') {
-    return {};
-  }
-
-  return {
-    visualization: {
-      kind: 'prometheus-timeseries',
-      datasourceUid: summary.datasourceUid,
-      query: summary.query,
-      queryType: summary.queryType,
-      interval: summary.interval,
-      maxDataPoints: PROMETHEUS_QUERY_MAX_DATA_POINTS,
-      range: {
-        from: summary.range.from,
-        to: summary.range.to,
-        raw: {
-          from: String(summary.range.raw.from),
-          to: String(summary.range.raw.to),
-        },
-      },
-    },
-  };
 }
 
 function summarizeNumberField(frame: DataFrame, field: Field, timeField?: Field): SeriesSummary {
@@ -1460,11 +988,4 @@ function chooseRangeInterval(timeRange: TimeRange): string {
     return '5m';
   }
   return '1h';
-}
-
-function clampInt(value: number, min: number, max: number) {
-  if (!Number.isFinite(value)) {
-    return min;
-  }
-  return Math.min(max, Math.max(min, Math.floor(value)));
 }

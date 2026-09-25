@@ -200,7 +200,10 @@ export async function inspectPreparedStack(state, expected, sourceSha256, grafan
     const actual = settings.models?.find((model) => model.default) ?? settings.models?.[0];
     if (
       settings.openAIBaseUrl?.replace(/\/$/, '') !== expected.baseUrl.replace(/\/$/, '') ||
-      ['id', 'protocol', 'thinkingLevel', 'thinkingFormat'].some((field) => actual?.[field] !== expected[field])
+      ['id', 'protocol', 'thinkingLevel', 'thinkingFormat'].some((field) => actual?.[field] !== expected[field]) ||
+      ['contextWindow', 'maxOutputTokens'].some(
+        (field) => expected[field] !== undefined && Number(actual?.[field]) !== expected[field]
+      )
     ) {
       return { reusable: false, reason: 'Model configuration changed' };
     }

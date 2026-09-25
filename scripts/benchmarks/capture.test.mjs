@@ -29,7 +29,7 @@ const request = {
 };
 const url = '/api/plugins/grafana-assistant-app/resources/llm/api/stream';
 
-test('observes split SSE frames, counts specialist calls, and preserves the response', async () => {
+test('observes split SSE frames, counts concurrent model calls, and preserves the response', async () => {
   const body = [
     'data: {"type":"start"}\r\n\r\n',
     'data: {"type":"thinking_delta","delta":"h',

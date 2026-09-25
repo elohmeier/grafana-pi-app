@@ -2,37 +2,23 @@ import { test, expect } from './fixtures';
 import { ROUTES } from '../src/constants';
 import { testIds } from '../src/components/testIds';
 
-const LLM_ROUTE = '**/api/plugins/g42-pi-app/resources/llm/api/stream';
-const SAVE_ROUTE = '**/api/plugins/g42-pi-app/resources/jsonnet-dashboards/save';
+const LLM_ROUTE = '**/resources/llm/api/stream';
 
 test.describe('assistant safety workflows', () => {
-  test('requires approval before saving a persistent dashboard write', async ({ gotoPage, page }) => {
-    const deniedUid = `denied-e2e-${Date.now()}`;
-    const approvedUid = `approved-e2e-${Date.now()}`;
+  test('requires approval before workspace apply writes a dashboard to Grafana', async ({ gotoPage, page }) => {
+    const suffix = Date.now().toString(36);
+    const deniedUid = `denied-e2e-${suffix}`;
+    const approvedUid = `approved-e2e-${suffix}`;
+    // Stage the working copy with the write tool, then plan and apply it in a separate bash call.
     const responses = [
-      toolCallResponse(
-        'save_dashboard',
-        {
-          uid: deniedUid,
-          overwrite: true,
-          dashboard_jsonnet: `{ title: 'Denied E2E', uid: '${deniedUid}', panels: [] }`,
-        },
-        'call_denied_save'
-      ),
+      toolCallResponse('write', stagedDashboard(deniedUid, 'Denied E2E'), 'call_denied_write'),
+      toolCallResponse('bash', { command: planAndApplyCommand(deniedUid) }, 'call_denied_apply'),
       textResponse('Denied path handled.'),
-      toolCallResponse(
-        'save_dashboard',
-        {
-          uid: approvedUid,
-          overwrite: true,
-          dashboard_jsonnet: `{ title: 'Approved E2E', uid: '${approvedUid}', panels: [] }`,
-        },
-        'call_approved_save'
-      ),
+      toolCallResponse('write', stagedDashboard(approvedUid, 'Approved E2E'), 'call_approved_write'),
+      toolCallResponse('bash', { command: planAndApplyCommand(approvedUid) }, 'call_approved_apply'),
       textResponse('Approved path handled.'),
     ];
     const llmRequests: any[] = [];
-    const saveRequests: any[] = [];
 
     await page.route(LLM_ROUTE, async (route) => {
       llmRequests.push(await route.request().postDataJSON());
@@ -40,19 +26,6 @@ test.describe('assistant safety workflows', () => {
         status: 200,
         contentType: 'text/event-stream',
         body: responses.shift() ?? textResponse('No scripted response available.'),
-      });
-    });
-    await page.route(SAVE_ROUTE, async (route) => {
-      saveRequests.push(await route.request().postDataJSON());
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          uid: approvedUid,
-          url: `/d/${approvedUid}/approved-e2e`,
-          status: 'created',
-          sourceChecksum: 'sha256:e2e',
-        }),
       });
     });
 
@@ -66,28 +39,36 @@ test.describe('assistant safety workflows', () => {
 
       const confirmation = page.getByTestId(testIds.chat.toolConfirmation);
       await expect(confirmation).toBeVisible();
-      await expect(confirmation.getByText(deniedUid, { exact: true })).toBeVisible();
+      await expect(confirmation).toContainText('workspace apply');
+      await expect(confirmation).toContainText(deniedUid);
+      await expect(confirmation.getByTestId('workspace-apply-diff')).toContainText('Denied E2E');
       await page.getByTestId(testIds.chat.toolConfirmationDeny).click();
       await expect(page.getByText('Denied path handled.')).toBeVisible();
-      expect(saveRequests).toHaveLength(0);
+      expect((await page.request.get(`/api/dashboards/uid/${deniedUid}`)).status()).toBe(404);
 
+      // The denied change stays staged in the session; the plan is scoped to the new path.
       await composer.fill('Create a dashboard for confirmation approval');
       await page.getByTestId(testIds.chat.send).click();
 
       await expect(confirmation).toBeVisible();
-      await expect(confirmation.getByText(approvedUid, { exact: true })).toBeVisible();
+      await expect(confirmation).toContainText(approvedUid);
+      await expect(confirmation).not.toContainText(deniedUid);
       await page.getByTestId(testIds.chat.toolConfirmationApprove).click();
       await expect(page.getByText('Approved path handled.')).toBeVisible();
 
-      expect(saveRequests).toHaveLength(1);
-      expect(saveRequests[0]).toMatchObject({
-        uid: approvedUid,
-        overwrite: true,
-      });
-      expect(llmRequests[0].context.tools.map((tool: any) => tool.name)).toContain('save_dashboard');
+      const saved = await page.request.get(`/api/dashboards/uid/${approvedUid}`);
+      expect(saved.ok()).toBe(true);
+      expect((await saved.json()).dashboard).toMatchObject({ uid: approvedUid, title: 'Approved E2E' });
+      expect((await page.request.get(`/api/dashboards/uid/${deniedUid}`)).status()).toBe(404);
+
+      const toolNames = llmRequests[0].context.tools.map((tool: any) => tool.name);
+      expect(toolNames).toEqual(expect.arrayContaining(['read', 'write', 'edit', 'bash']));
+      expect(toolNames).not.toContain('save_dashboard');
     } finally {
       await page.unroute(LLM_ROUTE).catch(() => undefined);
-      await page.unroute(SAVE_ROUTE).catch(() => undefined);
+      for (const uid of [deniedUid, approvedUid]) {
+        await page.request.delete(`/api/dashboards/uid/${uid}`).catch(() => undefined);
+      }
     }
   });
 
@@ -142,6 +123,30 @@ test.describe('assistant safety workflows', () => {
     }
   });
 });
+
+function dashboardPath(uid: string) {
+  return `/grafana/dashboards/${uid}/dashboard.json`;
+}
+
+function stagedDashboard(uid: string, title: string) {
+  const resource = {
+    apiVersion: 'dashboard.grafana.app/v1',
+    kind: 'Dashboard',
+    metadata: { name: uid },
+    spec: {
+      title,
+      schemaVersion: 41,
+      panels: [
+        { id: 1, type: 'text', title: 'Note', gridPos: { x: 0, y: 0, w: 12, h: 4 }, options: { content: title } },
+      ],
+    },
+  };
+  return { path: dashboardPath(uid), content: `${JSON.stringify(resource, null, 2)}\n` };
+}
+
+function planAndApplyCommand(uid: string) {
+  return `plan=$(workspace plan --path ${dashboardPath(uid)} | jq -r .planId) && workspace apply "$plan"`;
+}
 
 function sseResponse(events: unknown[]) {
   return events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');

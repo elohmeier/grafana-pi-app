@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,8 +33,6 @@ type App struct {
 	backend.CallResourceHandler
 	settings             appSettings
 	httpClient           *http.Client
-	jsonnetFiles         *virtualJsonnetFileStore
-	agentSample          *agentContractSampleStore
 	llmProtocolMu        sync.RWMutex
 	resolvedLLMProtocols map[string]string
 	authzMu              sync.Mutex
@@ -50,7 +49,6 @@ type appSettings struct {
 	SystemPromptAddendum            string          `json:"systemPromptAddendum"`
 	OpenAIAPIKey                    string
 	PluginID                        string `json:"pluginId"`
-	EnableAgentContractSample       bool   `json:"enableAgentContractSample"`
 }
 
 type modelSettings struct {
@@ -60,6 +58,36 @@ type modelSettings struct {
 	Protocol       string `json:"protocol,omitempty"`
 	ThinkingLevel  string `json:"thinkingLevel,omitempty"`
 	ThinkingFormat string `json:"thinkingFormat,omitempty"`
+	// ContextWindow is the endpoint's input-plus-output token capacity.
+	ContextWindow flexibleInt `json:"contextWindow,omitempty"`
+	// MaxOutputTokens bounds the output tokens requested per model call.
+	MaxOutputTokens flexibleInt `json:"maxOutputTokens,omitempty"`
+}
+
+const (
+	defaultContextWindow   = 131072
+	minContextWindow       = 4096
+	maxContextWindow       = 10_000_000
+	defaultMaxOutputTokens = 16384
+	minMaxOutputTokens     = 256
+)
+
+// flexibleInt accepts JSON numbers and numeric strings; Grafana provisioning
+// interpolates environment variables into strings.
+type flexibleInt int
+
+func (v *flexibleInt) UnmarshalJSON(data []byte) error {
+	text := strings.Trim(strings.TrimSpace(string(data)), `"`)
+	if text == "" || text == "null" {
+		*v = 0
+		return nil
+	}
+	parsed, err := strconv.Atoi(text)
+	if err != nil {
+		return fmt.Errorf("expected an integer, got %s", string(data))
+	}
+	*v = flexibleInt(parsed)
+	return nil
 }
 
 const (
@@ -83,11 +111,7 @@ func NewApp(_ context.Context, settings backend.AppInstanceSettings) (instancemg
 	app := App{
 		settings:             loadSettings(settings),
 		httpClient:           &http.Client{Timeout: 10 * time.Minute},
-		jsonnetFiles:         newVirtualJsonnetFileStore(),
 		resolvedLLMProtocols: map[string]string{},
-	}
-	if app.settings.EnableAgentContractSample {
-		app.agentSample = newAgentContractSampleStore(app.settings.PluginID)
 	}
 
 	// Use a httpadapter (provided by the SDK) for resource calls. This allows us
@@ -151,12 +175,6 @@ func loadSettings(settings backend.AppInstanceSettings) appSettings {
 	if loaded.PluginID == "" {
 		loaded.PluginID = ID()
 	}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("PI_AGENT_CONTRACT_SAMPLE"))) {
-	case "1", "true", "yes":
-		loaded.EnableAgentContractSample = true
-	case "0", "false", "no":
-		loaded.EnableAgentContractSample = false
-	}
 
 	return loaded
 }
@@ -178,6 +196,7 @@ func normalizeModels(models []modelSettings) []modelSettings {
 		model.Protocol = normalizeOpenAIProtocol(model.Protocol)
 		model.ThinkingLevel = normalizeThinkingLevel(model.ThinkingLevel)
 		model.ThinkingFormat = normalizeThinkingFormat(model.ThinkingFormat)
+		model.ContextWindow, model.MaxOutputTokens = normalizeModelLimits(model.ContextWindow, model.MaxOutputTokens)
 		if model.Default && defaultIndex == -1 {
 			defaultIndex = len(normalized)
 		}
@@ -192,6 +211,32 @@ func normalizeModels(models []modelSettings) []modelSettings {
 	}
 	normalized[defaultIndex].Default = true
 	return normalized
+}
+
+// normalizeModelLimits applies defaults and keeps the output budget within half
+// of the context window so compaction always has room for history.
+func normalizeModelLimits(contextWindow, maxOutputTokens flexibleInt) (flexibleInt, flexibleInt) {
+	if contextWindow <= 0 {
+		contextWindow = defaultContextWindow
+	}
+	contextWindow = min(max(contextWindow, minContextWindow), maxContextWindow)
+	if maxOutputTokens <= 0 {
+		maxOutputTokens = defaultMaxOutputTokens
+	}
+	maxOutputTokens = min(max(maxOutputTokens, minMaxOutputTokens), contextWindow/2)
+	return contextWindow, maxOutputTokens
+}
+
+// clampRequestMaxTokens sets the request output budget, bounded by the model's configured maximum.
+func clampRequestMaxTokens(requested *int, model modelSettings) *int {
+	limit := int(model.MaxOutputTokens)
+	if limit <= 0 {
+		limit = defaultMaxOutputTokens
+	}
+	if requested == nil || *requested <= 0 || *requested > limit {
+		return &limit
+	}
+	return requested
 }
 
 func (a *App) defaultModelSettings() (modelSettings, bool) {

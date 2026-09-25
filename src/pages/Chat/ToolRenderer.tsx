@@ -2,21 +2,11 @@ import React, { useMemo, useState } from 'react';
 import { css, cx, keyframes } from '@emotion/css';
 import type { AgentToolResult } from '@earendil-works/pi-agent-core';
 import { renderMarkdown, type GrafanaTheme2, type IconName } from '@grafana/data';
-import { config } from '@grafana/runtime';
-import {
-  EmbeddedScene,
-  PanelBuilders,
-  SceneFlexItem,
-  SceneFlexLayout,
-  SceneQueryRunner,
-  SceneTimeRange,
-} from '@grafana/scenes';
-import { Badge, Button, Icon, LinkButton, Spinner, type BadgeColor, useStyles2 } from '@grafana/ui';
+import { Badge, Icon, LinkButton, Spinner, type BadgeColor, useStyles2 } from '@grafana/ui';
 import { structuredPatch } from 'diff';
-import type { ArtifactPreview, ArtifactRef, SubagentRunDetails, SubagentToolCall } from './tools';
+import type { ArtifactPreview, ArtifactRef } from './tools';
 import {
   highlightJsonnetLines,
-  partialJsonStringField,
   shouldHighlightJsonnet,
   utf8ByteLength,
   type CodeToken,
@@ -39,7 +29,6 @@ export type DashboardAction = {
   status?: string;
   uid?: string;
   url?: string;
-  sourceChecksum?: string;
 };
 
 export type DashboardOpenHandler = (action: DashboardAction) => void;
@@ -117,37 +106,19 @@ export function ToolResultMessageBody({
   content,
   details,
   isError,
-  onOpenDashboard,
 }: {
   toolName?: string;
   content: unknown;
   details: unknown;
   isError?: boolean;
+  /** Accepted for API compatibility; no remaining tool result renders a dashboard open action. */
   onOpenDashboard?: DashboardOpenHandler;
 }) {
   const styles = useStyles2(getToolStyles);
-  const subagentDetails = asSubagentDetails(details);
   const artifactResult = isError ? undefined : asArtifactResult(details);
   const showArtifactCard = Boolean(artifactResult && !isArtifactReadResult(toolName, details));
-  const structuredResult = isError
-    ? undefined
-    : renderStructuredToolResult(toolName, details, content, undefined, onOpenDashboard);
+  const structuredResult = isError ? undefined : renderStructuredToolResult(toolName, details, content);
   const error = isError ? extractToolError(toolName, details, content) : undefined;
-
-  if (subagentDetails) {
-    return (
-      <div className={cx(styles.toolFrame, subagentDetails.status === 'failed' && styles.toolFrameError)}>
-        <ToolHeader
-          label={subagentLabel(subagentDetails.agent)}
-          name={toolName ?? subagentDetails.agent}
-          status={subagentDetails.status}
-        />
-        {subagentDetails.status === 'failed' && <ToolErrorView error={extractToolError(toolName, details, content)} />}
-        <SubagentResultView content={content} details={subagentDetails} />
-        <SubagentDetailsView details={subagentDetails} onOpenDashboard={onOpenDashboard} />
-      </div>
-    );
-  }
 
   return (
     <div className={cx(styles.toolFrame, isError && styles.toolFrameError)}>
@@ -186,29 +157,15 @@ export function ToolActivityPanel({ runs, elapsed }: { runs: ToolRunView[]; elap
         {elapsed && <span className={styles.activityElapsed}>{elapsed}</span>}
       </div>
       <div className={styles.activityList}>
-        {runs.map((run) => {
-          const subagentDetails = asSubagentDetails(run.partialResult?.details);
-          return (
-            <div className={styles.activityItem} key={run.id}>
-              <ToolHeader
-                label={subagentDetails ? subagentLabel(subagentDetails.agent) : undefined}
-                name={run.name}
-                status={run.status}
-                compact
-              />
-              {subagentDetails ? (
-                <SubagentDetailsView details={subagentDetails} compact />
-              ) : (
-                <>
-                  {renderStructuredToolCall(run.name, run.args, undefined, run.status === 'running') ?? (
-                    <pre className={styles.toolCallJson}>{formatJson(run.args)}</pre>
-                  )}
-                  {run.partialResult && <ContentBlocks content={run.partialResult.content} isStreaming />}
-                </>
-              )}
-            </div>
-          );
-        })}
+        {runs.map((run) => (
+          <div className={styles.activityItem} key={run.id}>
+            <ToolHeader name={run.name} status={run.status} compact />
+            {renderStructuredToolCall(run.name, run.args, undefined, run.status === 'running') ?? (
+              <pre className={styles.toolCallJson}>{formatJson(run.args)}</pre>
+            )}
+            {run.partialResult && <ContentBlocks content={run.partialResult.content} isStreaming />}
+          </div>
+        ))}
       </div>
     </section>
   );
@@ -315,221 +272,11 @@ function renderStructuredToolCall(
   partialJson: string | undefined,
   isStreaming: boolean
 ): React.ReactNode | undefined {
-  const prometheusQuery = asPrometheusQueryToolCall(name, args, partialJson, isStreaming);
-  if (prometheusQuery) {
-    return <PrometheusQueryToolCallView call={prometheusQuery} />;
-  }
-
   const simpleCall = asSimpleToolCallSummary(name, args, partialJson, isStreaming);
   if (simpleCall) {
     return <SimpleToolCallSummaryView call={simpleCall} />;
   }
 
-  const jsonnetWrite = asJsonnetWriteToolCall(name, args, partialJson, isStreaming);
-  if (jsonnetWrite) {
-    return <JsonnetWriteToolCallView call={jsonnetWrite} />;
-  }
-
-  return undefined;
-}
-
-type PrometheusQueryToolCall = {
-  datasourceUid?: string;
-  queries: PrometheusQueryToolCallQuery[];
-  partial: boolean;
-};
-
-type PrometheusQueryToolCallQuery = {
-  query: string;
-  type: string;
-  start?: string;
-  end?: string;
-  interval?: string;
-};
-
-function PrometheusQueryToolCallView({ call }: { call: PrometheusQueryToolCall }) {
-  const styles = useStyles2(getToolStyles);
-  const commonType = commonPrometheusQueryToolCallType(call.queries);
-  const commonRange = commonPrometheusQueryToolCallRange(call.queries);
-  const queryCount = call.queries.length;
-  const querySummary = commonType
-    ? `${formatCount(queryCount)} ${commonType} ${queryCount === 1 ? 'query' : 'queries'}`
-    : `${formatCount(queryCount)} queries`;
-  const summaryParts = [
-    querySummary,
-    commonRange,
-    call.datasourceUid ? `datasource ${call.datasourceUid}` : 'default datasource',
-    call.partial ? 'streaming' : undefined,
-  ].filter(Boolean);
-
-  return (
-    <div className={styles.structuredResult}>
-      <div className={styles.resultSummary}>{summaryParts.join(' | ')}</div>
-      <div className={styles.prometheusQueryPlanList}>
-        {call.queries.map((query, index) => (
-          <div className={styles.prometheusQueryPlanRow} key={`${index}:${query.query}`}>
-            <span className={styles.prometheusQueryPlanIndex}>Query {index + 1}</span>
-            <span className={styles.prometheusQueryPlanMeta}>{formatPrometheusQueryToolCallMeta(query)}</span>
-            <code className={styles.prometheusQueryPlanExpression} title={query.query}>
-              {query.query}
-            </code>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function asPrometheusQueryToolCall(
-  name: string,
-  args: unknown,
-  partialJson: string | undefined,
-  isStreaming: boolean
-): PrometheusQueryToolCall | undefined {
-  if (name !== 'query_prometheus' && name !== 'query_prometheus_raw') {
-    return undefined;
-  }
-
-  const partial = partialJson ? prometheusQueryToolCallFromPartialJson(partialJson) : undefined;
-  const complete = prometheusQueryToolCallFromArgs(args, false);
-  if (partial && (isStreaming || !complete)) {
-    return partial;
-  }
-  return complete;
-}
-
-function prometheusQueryToolCallFromPartialJson(partialJson: string): PrometheusQueryToolCall | undefined {
-  try {
-    return prometheusQueryToolCallFromArgs(JSON.parse(partialJson), true);
-  } catch {
-    const query = partialJsonStringField(partialJson, 'query') ?? partialJsonStringField(partialJson, 'expr');
-    if (query === undefined) {
-      return undefined;
-    }
-
-    const start = partialJsonStringField(partialJson, 'start') ?? partialJsonStringField(partialJson, 'from');
-    const end = partialJsonStringField(partialJson, 'end') ?? partialJsonStringField(partialJson, 'to');
-    return {
-      datasourceUid: partialJsonStringField(partialJson, 'datasourceUid'),
-      queries: [
-        {
-          query,
-          type:
-            partialJsonStringField(partialJson, 'type') ??
-            partialJsonStringField(partialJson, 'queryType') ??
-            (start || end ? 'range' : 'instant'),
-          start,
-          end,
-          interval: partialJsonStringField(partialJson, 'interval') ?? partialJsonStringField(partialJson, 'step'),
-        },
-      ],
-      partial: true,
-    };
-  }
-}
-
-function prometheusQueryToolCallFromArgs(args: unknown, partial: boolean): PrometheusQueryToolCall | undefined {
-  if (!isRecord(args)) {
-    return undefined;
-  }
-
-  const queryRecords = recordsField(args, 'queries');
-  const queries =
-    queryRecords.length > 0
-      ? queryRecords
-          .map((queryRecord) => prometheusQueryToolCallQueryFromRecord(queryRecord, args))
-          .filter((query): query is PrometheusQueryToolCallQuery => Boolean(query))
-      : [prometheusQueryToolCallQueryFromRecord(args, args)].filter((query): query is PrometheusQueryToolCallQuery =>
-          Boolean(query)
-        );
-
-  if (queries.length === 0) {
-    return undefined;
-  }
-
-  return {
-    datasourceUid: stringField(args, 'datasourceUid'),
-    queries,
-    partial,
-  };
-}
-
-function prometheusQueryToolCallQueryFromRecord(
-  record: Record<string, unknown>,
-  defaults: Record<string, unknown>
-): PrometheusQueryToolCallQuery | undefined {
-  const query = stringField(record, 'query') ?? stringField(record, 'expr');
-  if (!query) {
-    return undefined;
-  }
-
-  const range = recordField(record, 'range');
-  const rawRange = recordField(range, 'raw');
-  const defaultRange = recordField(defaults, 'range');
-  const defaultRawRange = recordField(defaultRange, 'raw');
-  const start =
-    stringField(record, 'start') ??
-    stringField(record, 'from') ??
-    stringField(range, 'from') ??
-    stringField(rawRange, 'from') ??
-    stringField(defaults, 'start') ??
-    stringField(defaults, 'from') ??
-    stringField(defaultRange, 'from') ??
-    stringField(defaultRawRange, 'from');
-  const end =
-    stringField(record, 'end') ??
-    stringField(record, 'to') ??
-    stringField(range, 'to') ??
-    stringField(rawRange, 'to') ??
-    stringField(defaults, 'end') ??
-    stringField(defaults, 'to') ??
-    stringField(defaultRange, 'to') ??
-    stringField(defaultRawRange, 'to');
-  const type =
-    stringField(record, 'type') ??
-    stringField(record, 'queryType') ??
-    stringField(defaults, 'type') ??
-    stringField(defaults, 'queryType') ??
-    (start || end ? 'range' : 'instant');
-
-  return {
-    query,
-    type,
-    start,
-    end,
-    interval: stringField(record, 'interval') ?? stringField(record, 'step') ?? stringField(defaults, 'interval'),
-  };
-}
-
-function commonPrometheusQueryToolCallType(queries: PrometheusQueryToolCallQuery[]) {
-  const firstType = queries[0]?.type;
-  return firstType && queries.every((query) => query.type === firstType) ? firstType : undefined;
-}
-
-function commonPrometheusQueryToolCallRange(queries: PrometheusQueryToolCallQuery[]) {
-  const firstRange = formatPrometheusQueryToolCallRange(queries[0]);
-  return firstRange && queries.every((query) => formatPrometheusQueryToolCallRange(query) === firstRange)
-    ? firstRange
-    : undefined;
-}
-
-function formatPrometheusQueryToolCallMeta(query: PrometheusQueryToolCallQuery) {
-  return [query.type, formatPrometheusQueryToolCallRange(query), query.interval].filter(Boolean).join(' | ');
-}
-
-function formatPrometheusQueryToolCallRange(query: PrometheusQueryToolCallQuery | undefined) {
-  if (!query) {
-    return undefined;
-  }
-  if (query.start && query.end) {
-    return `${query.start} -> ${query.end}`;
-  }
-  if (query.start) {
-    return `from ${query.start}`;
-  }
-  if (query.end) {
-    return `to ${query.end}`;
-  }
   return undefined;
 }
 
@@ -559,90 +306,20 @@ function asSimpleToolCallSummary(
   const record = toolCallArgsRecord(args, partialJson, isStreaming) ?? {};
 
   switch (name) {
-    case 'list_datasources':
-    case 'grafana_get_datasources':
-      return { summary: 'Discover Prometheus datasources' };
-    case 'list_metrics':
-      return listMetricsToolCallSummary(record);
-    case 'list_label_values':
-      return labelValuesToolCallSummary(record);
-    case 'inspect_metric_series':
-      return inspectMetricSeriesToolCallSummary(record);
-    case 'run_query_agent':
-      return specialistToolCallSummary('query agent', record, [
-        { label: 'Task', key: 'task' },
-        { label: 'Datasource', key: 'datasourceUid' },
-        { label: 'Metric prefix', key: 'metricPrefix' },
-      ]);
-    case 'run_dashboard_agent':
-      return specialistToolCallSummary('dashboard agent', record, [
-        { label: 'Task', key: 'task' },
-        { label: 'Intent', key: 'intent' },
-        { label: 'Datasource', key: 'datasourceUid' },
-        { label: 'Dashboard', key: 'existingDashboardUid' },
-      ]);
-    case 'run_investigation_agent':
-      return specialistToolCallSummary('investigation agent', record, [
-        { label: 'Task', key: 'task' },
-        { label: 'Datasource', key: 'datasourceUid' },
-        { label: 'Time range', key: 'timeRange' },
-      ]);
-    case 'run_alert_agent':
-      return specialistToolCallSummary('alert agent', record, [
-        { label: 'Task', key: 'task' },
-        { label: 'Datasource', key: 'datasourceUid' },
-        { label: 'Dashboard', key: 'dashboardUid' },
-        { label: 'Panel', key: 'panelId' },
-        { label: 'Time range', key: 'timeRange' },
-      ]);
-    case 'run_support_agent':
-      return specialistToolCallSummary('support agent', record, [
-        { label: 'Task', key: 'task' },
-        { label: 'Audience', key: 'audience' },
-      ]);
-    case 'run_navigation_agent':
-      return specialistToolCallSummary('navigation agent', record, [
-        { label: 'Task', key: 'task' },
-        { label: 'Destination', key: 'destinationHint' },
-      ]);
     case 'navigate':
       return navigateToolCallSummary(record);
     case 'update_report':
       return updateReportToolCallSummary(record);
     case 'read_artifact':
       return readArtifactToolCallSummary(record);
-    case 'workspace_info':
-      return { summary: 'Inspect workspace' };
-    case 'ls':
-      return workspacePathToolCallSummary('List workspace files', record);
-    case 'find':
-      return workspacePathToolCallSummary('Find workspace files', record, 'pattern');
-    case 'grep':
-      return workspaceGrepToolCallSummary(record);
     case 'read':
       return workspaceReadToolCallSummary(record);
-    case 'edit':
-      return workspaceEditToolCallSummary(record);
     case 'write':
       return workspaceWriteToolCallSummary(record);
-    case 'get_schema':
-      return workspaceSchemaToolCallSummary(record);
-    case 'validate_workspace':
-      return { summary: 'Validate workspace overlay' };
-    case 'preview_diff':
-      return { summary: 'Preview workspace diff' };
-    case 'save_changes':
-      return { summary: 'Save workspace changes' };
+    case 'edit':
+      return workspaceEditToolCallSummary(record);
     case 'bash':
       return workspaceBashToolCallSummary(record);
-    case 'upsert_resource':
-      return workspaceSemanticToolCallSummary('Create or update resource', record);
-    case 'list_dashboards':
-    case 'grafana_list_dashboards':
-      return { summary: 'List dashboards' };
-    case 'get_dashboard':
-    case 'grafana_get_dashboard':
-      return dashboardToolCallSummary('Get dashboard', record);
     case 'inspect_dashboard_context':
       return dashboardToolCallSummary('Inspect dashboard context', record);
     case 'inspect_dashboard_metric_usage':
@@ -685,117 +362,12 @@ function asSimpleToolCallSummary(
       return liveDashboardToolCallSummary('Update live dashboard variable', record);
     case 'apply_live_dashboard_mutation':
       return liveDashboardToolCallSummary('Apply live dashboard mutation', record);
-    case 'render_dashboard':
-      return dashboardToolCallSummary('Render dashboard', record);
-    case 'save_dashboard':
-      return dashboardToolCallSummary('Save dashboard', record);
-    case 'upload_dashboard':
-    case 'grafana_upload_dashboard':
-      return dashboardToolCallSummary('Upload dashboard', record);
-    case 'delete_dashboard':
-    case 'grafana_delete_dashboard':
-      return dashboardToolCallSummary('Delete dashboard', record);
     case 'screenshot_dashboard':
     case 'grafana_screenshot':
       return screenshotDashboardToolCallSummary(record);
-    case 'list_grafonnet':
-    case 'list_jsonnet_libs':
-      return { summary: 'List Jsonnet library files' };
-    case 'search_grafonnet':
-    case 'search_jsonnet_libs':
-      return jsonnetSearchToolCallSummary(record);
-    case 'read_grafonnet':
-    case 'read_jsonnet_lib':
-    case 'read_jsonnet':
-    case 'grafana_read_jsonnet_file':
-      return jsonnetPathToolCallSummary('Read Jsonnet source', record);
-    case 'read_skill_resource':
-      return readSkillResourceToolCallSummary(record);
-    case 'edit_jsonnet':
-    case 'grafana_edit_jsonnet_file':
-      return jsonnetPathToolCallSummary('Edit Jsonnet source', record);
-    case 'fix_jsonnet':
-      return jsonnetPathToolCallSummary('Repair Jsonnet source', record);
     default:
       return undefined;
   }
-}
-
-function labelValuesToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const label = stringField(record, 'label') ?? stringField(record, 'labelName') ?? stringField(record, 'name');
-  const selector = stringField(record, 'match') ?? stringField(record, 'selector') ?? stringField(record, 'metric');
-  return {
-    summary: summaryLine(['List label values', label ? `label ${label}` : undefined, formatDatasourceSummary(record)]),
-    items: [
-      { label: 'Label', value: label },
-      { label: 'Datasource', value: formatDatasourceMetaValue(record) },
-      { label: 'Selector', value: selector ? <code>{selector}</code> : undefined },
-    ],
-  };
-}
-
-function listMetricsToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const prefix = stringField(record, 'prefix');
-  const prefixes = stringArrayField(record, 'prefixes') ?? [];
-  const prefixSummary =
-    prefixes.length > 0 ? `${formatCount(prefixes.length)} prefixes` : prefix ? `prefix ${prefix}` : undefined;
-  const prefixCode = prefixes.length > 0 ? prefixes.join('\n') : prefix;
-
-  return {
-    summary: summaryLine(['List metric names', prefixSummary, formatDatasourceSummary(record)]),
-    items: [
-      { label: 'Datasource', value: formatDatasourceMetaValue(record) },
-      {
-        label: 'Prefixes',
-        value: prefixCode ? <code>{prefixes.length > 0 ? prefixes.join(', ') : prefix}</code> : undefined,
-      },
-    ],
-    code: prefixCode,
-  };
-}
-
-function inspectMetricSeriesToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const selector = stringField(record, 'match') ?? stringField(record, 'selector') ?? stringField(record, 'metric');
-  const selectors = stringArrayField(record, 'matches') ?? [];
-  const selectorSummary =
-    selectors.length > 0 ? `${formatCount(selectors.length)} selectors` : selector ? 'selector provided' : undefined;
-  const selectorCode = selectors.length > 0 ? selectors.join('\n') : selector;
-
-  return {
-    summary: summaryLine(['Inspect metric series', selectorSummary, formatDatasourceSummary(record)]),
-    items: [
-      { label: 'Datasource', value: formatDatasourceMetaValue(record) },
-      {
-        label: selectors.length > 0 ? 'Selectors' : 'Selector',
-        value: selectorCode ? <code>{selectors.length > 0 ? selectors.join(', ') : selector}</code> : undefined,
-      },
-    ],
-  };
-}
-
-function specialistToolCallSummary(
-  label: string,
-  record: Record<string, unknown>,
-  fields: Array<{ label: string; key: string }>
-): SimpleToolCallSummary {
-  const datasourceUid = stringField(record, 'datasourceUid');
-  const metricPrefix = stringField(record, 'metricPrefix');
-  const intent = stringField(record, 'intent');
-  const destinationHint = stringField(record, 'destinationHint');
-
-  return {
-    summary: summaryLine([
-      `Run ${label}`,
-      intent,
-      metricPrefix ? `prefix ${metricPrefix}` : undefined,
-      datasourceUid ? `datasource ${datasourceUid}` : undefined,
-      destinationHint,
-    ]),
-    items: fields.map((field) => ({
-      label: field.label,
-      value: formatSummaryFieldValue(record, field.key),
-    })),
-  };
 }
 
 function navigateToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
@@ -850,47 +422,30 @@ function readArtifactToolCallSummary(record: Record<string, unknown>): SimpleToo
   };
 }
 
-function workspacePathToolCallSummary(
-  action: string,
-  record: Record<string, unknown>,
-  selectorKey = 'path'
-): SimpleToolCallSummary {
-  const selector = stringField(record, selectorKey);
-  const path = stringField(record, 'path');
-  return {
-    summary: action,
-    items: [
-      { label: selectorKey === 'pattern' ? 'Pattern' : 'Path', value: selector ? <code>{selector}</code> : undefined },
-      { label: 'Path', value: selectorKey !== 'path' && path ? <code>{path}</code> : undefined },
-    ],
-  };
-}
-
-function workspaceGrepToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const pattern = stringField(record, 'pattern');
-  const path = stringField(record, 'path');
-  return {
-    summary: 'Search workspace files',
-    items: [
-      { label: 'Pattern', value: pattern ? <code>{pattern}</code> : undefined },
-      { label: 'Path', value: path ? <code>{path}</code> : undefined },
-      { label: 'Case sensitive', value: booleanLabel(record, 'caseSensitive') },
-    ],
-  };
-}
-
 function workspaceReadToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
   const path = stringField(record, 'path');
   const offset = numberField(record, 'offset');
   const limit = numberField(record, 'limit');
   return {
-    summary: 'Read workspace file',
+    summary: 'Read file',
     items: [
       { label: 'Path', value: path ? <code>{path}</code> : undefined },
-      {
-        label: 'Lines',
-        value: offset !== undefined || limit !== undefined ? `${offset ?? 1}:${limit ?? ''}` : undefined,
-      },
+      { label: 'Offset', value: offset !== undefined ? String(offset) : undefined },
+      { label: 'Limit', value: limit !== undefined ? formatLabeledCount(limit, 'line', 'lines') : undefined },
+    ],
+  };
+}
+
+function workspaceWriteToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
+  const path = stringField(record, 'path');
+  const content = stringField(record, 'content');
+  const size = content !== undefined ? formatBytes(utf8ByteLength(content)) : undefined;
+  return {
+    summary: summaryLine(['Write file', size]),
+    items: [
+      { label: 'Path', value: path ? <code>{path}</code> : undefined },
+      { label: 'Revision', value: formatSummaryFieldValue(record, 'revision') },
+      { label: 'Content', value: size },
     ],
   };
 }
@@ -899,63 +454,24 @@ function workspaceEditToolCallSummary(record: Record<string, unknown>): SimpleTo
   const path = stringField(record, 'path');
   const edits = recordsField(record, 'edits');
   return {
-    summary: summaryLine(['Edit workspace file', edits.length ? formatPatchCount(edits.length) : undefined]),
+    summary: summaryLine(['Edit file', edits.length ? formatLabeledCount(edits.length, 'edit', 'edits') : undefined]),
     items: [
       { label: 'Path', value: path ? <code>{path}</code> : undefined },
-      { label: 'Base version', value: formatSummaryFieldValue(record, 'baseVersion') },
-      { label: 'Edits', value: edits.length ? formatCount(edits.length) : undefined },
-    ],
-  };
-}
-
-function workspaceWriteToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const path = stringField(record, 'path');
-  const content = stringField(record, 'content');
-  return {
-    summary: summaryLine(['Write workspace file', content ? formatBytes(utf8ByteLength(content)) : undefined]),
-    items: [
-      { label: 'Path', value: path ? <code>{path}</code> : undefined },
-      { label: 'Base version', value: formatSummaryFieldValue(record, 'baseVersion') },
-      { label: 'Content', value: content ? formatBytes(utf8ByteLength(content)) : undefined },
-    ],
-  };
-}
-
-function workspaceSchemaToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const schemaId = stringField(record, 'schemaId');
-  const path = stringField(record, 'path');
-  return {
-    summary: 'Read workspace schema',
-    items: [
-      { label: 'Schema', value: schemaId ? <code>{schemaId}</code> : undefined },
-      { label: 'Path', value: path ? <code>{path}</code> : undefined },
+      { label: 'Revision', value: formatSummaryFieldValue(record, 'revision') },
+      { label: 'Replace all', value: edits.some((edit) => edit.replaceAll === true) ? 'yes' : undefined },
     ],
   };
 }
 
 function workspaceBashToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const command = stringField(record, 'command');
+  const cwd = stringField(record, 'cwd');
   return {
-    summary: 'Run workspace bash',
+    summary: 'Run bash',
     items: [
-      { label: 'Timeout', value: stringOrNumberField(record, 'timeoutMs') },
-      { label: 'Stdin', value: stringField(record, 'stdin') ? 'provided' : undefined },
+      { label: 'CWD', value: cwd ? <code>{cwd}</code> : undefined },
+      { label: 'Timeout', value: formatDurationMs(numberField(record, 'timeoutMs')) },
     ],
-    code: command,
-  };
-}
-
-function workspaceSemanticToolCallSummary(action: string, record: Record<string, unknown>): SimpleToolCallSummary {
-  const schemaId = stringField(record, 'schemaId');
-  const resourceName = stringField(record, 'resourceName') ?? stringField(record, 'name');
-  return {
-    summary: action,
-    items: [
-      { label: 'Schema', value: schemaId ? <code>{schemaId}</code> : undefined },
-      { label: 'Resource', value: resourceName ? <code>{resourceName}</code> : undefined },
-      { label: 'Document', value: record.document !== undefined ? formatShortValue(record.document) : undefined },
-    ],
-    code: record.document !== undefined ? formatJson(record.document) : undefined,
+    code: stringField(record, 'command'),
   };
 }
 
@@ -1180,49 +696,6 @@ function screenshotDashboardToolCallSummary(record: Record<string, unknown>): Si
   };
 }
 
-function jsonnetSearchToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const query =
-    stringField(record, 'query') ??
-    stringField(record, 'pattern') ??
-    stringField(record, 'search') ??
-    stringField(record, 'term');
-  return {
-    summary: summaryLine(['Search Jsonnet libraries', query]),
-    items: [
-      { label: 'Query', value: query ? <code>{query}</code> : undefined },
-      { label: 'Base path', value: stringField(record, 'basePath') },
-    ],
-    code: query,
-  };
-}
-
-function jsonnetPathToolCallSummary(action: string, record: Record<string, unknown>): SimpleToolCallSummary {
-  const path = jsonnetToolCallPath(record);
-  const lineRange = formatToolCallLineRange(record);
-  const instructions =
-    stringField(record, 'instructions') ?? stringField(record, 'prompt') ?? stringField(record, 'description');
-  return {
-    summary: summaryLine([action, path]),
-    items: [
-      { label: 'Path', value: path ? <code>{path}</code> : undefined },
-      { label: 'Lines', value: lineRange },
-      { label: 'Instructions', value: instructions },
-    ],
-  };
-}
-
-function readSkillResourceToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const skill = stringField(record, 'skill');
-  const path = stringField(record, 'path');
-  return {
-    summary: summaryLine(['Read skill resource', skill, path]),
-    items: [
-      { label: 'Skill', value: skill ? <code>{skill}</code> : undefined },
-      { label: 'Resource', value: path ? <code>{path}</code> : undefined },
-    ],
-  };
-}
-
 function toolCallArgsRecord(
   args: unknown,
   partialJson: string | undefined,
@@ -1242,11 +715,6 @@ function toolCallArgsRecord(
   return isRecord(args) ? args : undefined;
 }
 
-function formatDatasourceSummary(record: Record<string, unknown>) {
-  const datasourceUid = stringField(record, 'datasourceUid');
-  return datasourceUid ? `datasource ${datasourceUid}` : 'default datasource';
-}
-
 function formatDatasourceMetaValue(record: Record<string, unknown>) {
   return stringField(record, 'datasourceUid') ?? 'default';
 }
@@ -1260,24 +728,6 @@ function dashboardToolCallIdentifier(record: Record<string, unknown>) {
   );
 }
 
-function jsonnetToolCallPath(record: Record<string, unknown>) {
-  return (
-    stringField(record, 'path') ??
-    stringField(record, 'file') ??
-    stringField(record, 'resource') ??
-    stringField(record, 'uri')
-  );
-}
-
-function formatToolCallLineRange(record: Record<string, unknown>) {
-  const start = numberField(record, 'startLine') ?? numberField(record, 'line');
-  const end = numberField(record, 'endLine');
-  if (start !== undefined && end !== undefined && end !== start) {
-    return `${start}-${end}`;
-  }
-  return start !== undefined ? String(start) : undefined;
-}
-
 function booleanLabel(record: Record<string, unknown>, key: string) {
   const value = booleanField(record, key);
   return value === undefined ? undefined : value ? 'yes' : 'no';
@@ -1285,88 +735,6 @@ function booleanLabel(record: Record<string, unknown>, key: string) {
 
 function summaryLine(parts: Array<string | undefined>) {
   return parts.filter(Boolean).join(' | ');
-}
-
-type JsonnetWriteToolCall = {
-  path: string;
-  content: string;
-  partial: boolean;
-};
-
-const DEFAULT_TOOL_CALL_JSONNET_PATH = 'dashboard.jsonnet';
-
-function JsonnetWriteToolCallView({ call }: { call: JsonnetWriteToolCall }) {
-  const styles = useStyles2(getToolStyles);
-  const lines = useMemo(() => (call.content ? textToCodeLines(call.content) : []), [call.content]);
-  return (
-    <div className={styles.structuredResult}>
-      <div className={styles.resultSummary}>
-        {call.partial ? 'Writing' : 'Created'} <code>{call.path}</code>
-      </div>
-      <ResultMetaGrid
-        items={[
-          { label: 'Path', value: <code>{call.path}</code> },
-          { label: 'Lines', value: lines.length > 0 ? formatCount(lines.length) : undefined },
-          { label: 'Source', value: formatBytes(utf8ByteLength(call.content)) },
-          { label: 'Status', value: call.partial ? 'streaming' : 'ready' },
-        ]}
-      />
-      {lines.length > 0 ? <CodeViewer lines={lines} /> : <div className={styles.emptyState}>Waiting for source.</div>}
-    </div>
-  );
-}
-
-function asJsonnetWriteToolCall(
-  name: string,
-  args: unknown,
-  partialJson: string | undefined,
-  isStreaming: boolean
-): JsonnetWriteToolCall | undefined {
-  if (name !== 'write_jsonnet' && name !== 'grafana_write_jsonnet_file') {
-    return undefined;
-  }
-
-  const partial = partialJson ? jsonnetWriteToolCallFromPartialJson(partialJson) : undefined;
-  const complete = jsonnetWriteToolCallFromArgs(args);
-  if (partial && (isStreaming || !complete)) {
-    return partial;
-  }
-  return complete;
-}
-
-function jsonnetWriteToolCallFromArgs(args: unknown): JsonnetWriteToolCall | undefined {
-  if (!isRecord(args)) {
-    return undefined;
-  }
-
-  const content = stringField(args, 'content') ?? stringField(args, 'dashboard_jsonnet');
-  if (content === undefined) {
-    return undefined;
-  }
-
-  return {
-    path: stringField(args, 'path') ?? DEFAULT_TOOL_CALL_JSONNET_PATH,
-    content,
-    partial: false,
-  };
-}
-
-function jsonnetWriteToolCallFromPartialJson(partialJson: string): JsonnetWriteToolCall | undefined {
-  try {
-    return jsonnetWriteToolCallFromArgs(JSON.parse(partialJson));
-  } catch {
-    const content =
-      partialJsonStringField(partialJson, 'content') ?? partialJsonStringField(partialJson, 'dashboard_jsonnet');
-    if (content === undefined) {
-      return undefined;
-    }
-
-    return {
-      path: partialJsonStringField(partialJson, 'path') ?? DEFAULT_TOOL_CALL_JSONNET_PATH,
-      content,
-      partial: true,
-    };
-  }
 }
 
 function ToolHeader({
@@ -1532,51 +900,12 @@ function hasUsefulErrorContent(content: unknown, message: string) {
 }
 
 const TOOL_ICONS: Record<string, IconName> = {
-  list_datasources: 'database',
-  grafana_get_datasources: 'database',
-  list_metrics: 'list-ul',
-  list_label_values: 'list-ul',
-  inspect_metric_series: 'search',
-  query_prometheus: 'gf-prometheus',
-  query_prometheus_raw: 'gf-prometheus',
-  run_query_agent: 'database',
-  run_dashboard_agent: 'apps',
-  run_investigation_agent: 'search',
-  run_alert_agent: 'bell',
-  run_support_agent: 'question-circle',
-  run_navigation_agent: 'compass',
   navigate: 'compass',
   read_artifact: 'file-alt',
-  workspace_info: 'folder-open',
-  ls: 'list-ul',
-  find: 'search',
-  grep: 'search',
   read: 'file-alt',
   edit: 'file-edit-alt',
   write: 'file-edit-alt',
-  get_schema: 'book',
-  validate_workspace: 'check-circle',
-  preview_diff: 'file-alt',
-  save_changes: 'save',
   bash: 'brackets-curly',
-  upsert_resource: 'upload',
-  write_jsonnet: 'brackets-curly',
-  grafana_write_jsonnet_file: 'brackets-curly',
-  edit_jsonnet: 'file-edit-alt',
-  grafana_edit_jsonnet_file: 'file-edit-alt',
-  fix_jsonnet: 'bug',
-  read_jsonnet: 'file-alt',
-  grafana_read_jsonnet_file: 'file-alt',
-  search_grafonnet: 'search',
-  search_jsonnet_libs: 'search',
-  read_grafonnet: 'book-open',
-  read_jsonnet_lib: 'book-open',
-  list_grafonnet: 'list-ul',
-  list_jsonnet_libs: 'list-ul',
-  list_dashboards: 'dashboard',
-  grafana_list_dashboards: 'dashboard',
-  get_dashboard: 'dashboard',
-  grafana_get_dashboard: 'dashboard',
   inspect_dashboard_context: 'dashboard',
   inspect_dashboard_metric_usage: 'dashboard',
   find_panel_alert_rules: 'bell',
@@ -1598,358 +927,18 @@ const TOOL_ICONS: Record<string, IconName> = {
   add_live_dashboard_variable: 'plus',
   update_live_dashboard_variable: 'edit',
   apply_live_dashboard_mutation: 'dashboard',
-  render_dashboard: 'dashboard',
-  save_dashboard: 'save',
-  upload_dashboard: 'upload',
-  grafana_upload_dashboard: 'upload',
-  delete_dashboard: 'trash-alt',
-  grafana_delete_dashboard: 'trash-alt',
   screenshot_dashboard: 'camera',
   grafana_screenshot: 'camera',
-  read_skill_resource: 'book',
 };
 
 function toolIconName(name: string): IconName | undefined {
   return TOOL_ICONS[name];
 }
 
-function SubagentResultView({ content, details }: { content: unknown; details: SubagentRunDetails }) {
-  const styles = useStyles2(getToolStyles);
-  const [isOpen, setIsOpen] = useState(false);
-  const preview = subagentResultPreview(content, details);
-  return (
-    <details className={styles.subagentResult} data-testid="subagent-result" open={isOpen}>
-      <summary
-        aria-expanded={isOpen}
-        className={styles.subagentResultSummary}
-        onClick={(event) => {
-          event.preventDefault();
-          setIsOpen((open) => !open);
-        }}
-      >
-        <Icon aria-hidden className={styles.queryResultChevron} name={isOpen ? 'angle-down' : 'angle-right'} />
-        <span className={styles.subagentResultSummaryText}>
-          <span>{subagentResultLabel(details)}</span>
-          {!isOpen && preview && (
-            <span className={styles.subagentResultPreview} data-testid="subagent-result-preview">
-              {preview}
-            </span>
-          )}
-        </span>
-      </summary>
-      <div className={styles.subagentResultBody}>
-        <ContentBlocks content={content} />
-      </div>
-    </details>
-  );
-}
-
-function subagentResultPreview(content: unknown, details: SubagentRunDetails) {
-  const text = extractToolText(content) ?? details.finalOutput;
-  if (!text?.trim()) {
-    return undefined;
-  }
-  return truncateInline(text.replace(/\s+/g, ' ').trim(), 240);
-}
-
-function subagentResultLabel(details: SubagentRunDetails) {
-  const agentLabel = subagentLabel(details.agent);
-  if (details.status === 'failed') {
-    return `${agentLabel} error`;
-  }
-  if (details.status === 'running') {
-    return `${agentLabel} output`;
-  }
-  return `${agentLabel} result`;
-}
-
-function SubagentDetailsView({
-  details,
-  compact,
-  onOpenDashboard,
-}: {
-  details: SubagentRunDetails;
-  compact?: boolean;
-  onOpenDashboard?: DashboardOpenHandler;
-}) {
-  const styles = useStyles2(getToolStyles);
-  const recoveredCallIds = recoveredSubagentToolCallIds(details.toolCalls);
-  const latestCompletedCall = lastSuccessfulSubagentToolCall(details.toolCalls);
-  const prominentCalls = compact
-    ? details.toolCalls.filter(
-        (call) =>
-          call.status === 'running' ||
-          call.id === latestCompletedCall?.id ||
-          ((call.status === 'failed' || call.isError) && !recoveredCallIds.has(call.id))
-      )
-    : details.toolCalls;
-  const historyCalls = compact
-    ? details.toolCalls.filter(
-        (call) =>
-          ((call.status === 'completed' && !call.isError) || recoveredCallIds.has(call.id)) &&
-          call.id !== latestCompletedCall?.id
-      )
-    : [];
-
-  return (
-    <div className={styles.subagent}>
-      {compact && <SubagentLiveStatus details={details} />}
-      <div className={styles.subagentMeta}>
-        <span>{formatUsage(details.usage)}</span>
-        {!compact && <span>{details.toolCalls.length} tool calls</span>}
-      </div>
-      {!compact && (
-        <details className={styles.collapsible}>
-          <summary>Task</summary>
-          <pre>{details.task}</pre>
-        </details>
-      )}
-      <div className={styles.toolTimeline}>
-        {prominentCalls.map((call, index) => (
-          <SubagentToolCallRow
-            agent={details.agent}
-            call={call}
-            key={call.id || String(index)}
-            onOpenDashboard={onOpenDashboard}
-            recovered={recoveredCallIds.has(call.id)}
-          />
-        ))}
-        {compact && historyCalls.length > 0 && (
-          <details className={styles.toolHistory}>
-            <summary>{subagentToolHistoryLabel(historyCalls, recoveredCallIds)}</summary>
-            <div className={styles.toolTimeline}>
-              {historyCalls.map((call, index) => (
-                <SubagentToolCallRow
-                  agent={details.agent}
-                  call={call}
-                  key={call.id || String(index)}
-                  onOpenDashboard={onOpenDashboard}
-                  recovered={recoveredCallIds.has(call.id)}
-                />
-              ))}
-            </div>
-          </details>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function SubagentLiveStatus({ details }: { details: SubagentRunDetails }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div aria-atomic="true" aria-live="polite" className={styles.subagentLiveStatus} role="status">
-      <span className={styles.subagentLiveStatusLabel}>Now</span>
-      <span className={styles.subagentLiveStatusText}>{subagentLiveStatus(details)}</span>
-    </div>
-  );
-}
-
-function subagentLiveStatus(details: SubagentRunDetails) {
-  const runningCall = [...details.toolCalls].reverse().find((call) => call.status === 'running');
-  if (runningCall) {
-    return subagentToolCallLabel(runningCall);
-  }
-  if (details.finalOutput?.trim()) {
-    return 'Drafting response';
-  }
-  const recoveredCallIds = recoveredSubagentToolCallIds(details.toolCalls);
-  const latestFailedCall = [...details.toolCalls]
-    .reverse()
-    .find((call) => (call.status === 'failed' || call.isError) && !recoveredCallIds.has(call.id));
-  if (latestFailedCall) {
-    return `Reviewing failed step: ${subagentToolCallLabel(latestFailedCall)}`;
-  }
-  if (lastSuccessfulSubagentToolCall(details.toolCalls)) {
-    return 'Preparing the next step';
-  }
-  return 'Starting specialist';
-}
-
-function lastSuccessfulSubagentToolCall(toolCalls: SubagentToolCall[]) {
-  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
-    const call = toolCalls[index];
-    if (call.status === 'completed' && !call.isError) {
-      return call;
-    }
-  }
-  return undefined;
-}
-
-function subagentLabel(agent: SubagentRunDetails['agent']) {
-  switch (agent) {
-    case 'query':
-      return 'Query agent';
-    case 'dashboard':
-      return 'Dashboard agent';
-    case 'investigation':
-      return 'Investigation agent';
-    case 'alerts':
-      return 'Alert agent';
-    case 'support':
-      return 'Support agent';
-    case 'navigation':
-      return 'Navigation agent';
-    default:
-      return 'Specialist agent';
-  }
-}
-
-function SubagentToolCallRow({
-  agent,
-  call,
-  onOpenDashboard,
-  recovered = false,
-}: {
-  agent: SubagentRunDetails['agent'];
-  call: SubagentToolCall;
-  onOpenDashboard?: DashboardOpenHandler;
-  recovered?: boolean;
-}) {
-  const styles = useStyles2(getToolStyles);
-  const shouldAutoOpen = shouldExpandSubagentToolCall(call, agent, recovered);
-  const [manualOpen, setManualOpen] = useState<boolean | undefined>(undefined);
-  const isOpen = manualOpen ?? shouldAutoOpen;
-  const toolResult = call.result ?? call.partialResult;
-  const resultContent = toolResult?.content ?? contentFromLegacyToolText(call.text);
-  const resultDetails = toolResult?.details;
-  const isStreaming = call.status === 'running';
-  const artifactResult = call.isError ? undefined : asArtifactResult(resultDetails);
-  const showArtifactCard = Boolean(artifactResult && !isArtifactReadResult(call.name, resultDetails));
-  const error = call.isError ? extractToolError(call.name, resultDetails, resultContent) : undefined;
-  const callLabel = subagentToolCallLabel(call);
-
-  return (
-    <details
-      className={cx(styles.toolStep, call.status === 'failed' && !recovered && styles.toolStepError)}
-      open={isOpen}
-    >
-      <summary
-        aria-expanded={isOpen}
-        onClick={(event) => {
-          event.preventDefault();
-          setManualOpen((open) => !(open ?? shouldAutoOpen));
-        }}
-      >
-        <span>
-          {recovered
-            ? 'Recovered'
-            : call.status === 'running'
-              ? 'Running'
-              : call.status === 'failed'
-                ? 'Failed'
-                : 'Done'}
-        </span>
-        <strong title={call.name}>{callLabel}</strong>
-      </summary>
-      {isOpen && (
-        <div className={styles.toolStepBody}>
-          <code className={styles.toolStepTechnicalName}>{call.name}</code>
-          {renderStructuredToolCall(call.name, call.args, undefined, isStreaming) ?? (
-            <pre className={styles.toolCallJson}>{formatJson(call.args)}</pre>
-          )}
-          {(resultContent || error) && (
-            <div className={cx(styles.toolStepResult, call.isError && !recovered && styles.toolStepResultError)}>
-              {showArtifactCard && artifactResult && (
-                <ArtifactResultView artifact={artifactResult.ref} preview={artifactResult.preview} />
-              )}
-              {error ? (
-                <ToolErrorView content={resultContent} details={resultDetails} error={error} />
-              ) : (
-                (renderStructuredToolResult(call.name, resultDetails, resultContent, call.args, onOpenDashboard) ??
-                (!showArtifactCard ? (
-                  <>
-                    <ContentBlocks content={resultContent} isStreaming={isStreaming} />
-                    {hasDetails(resultDetails) && (
-                      <details className={styles.collapsible}>
-                        <summary>Details</summary>
-                        <pre>{formatJson(resultDetails)}</pre>
-                      </details>
-                    )}
-                  </>
-                ) : null))
-              )}
-            </div>
-          )}
-        </div>
-      )}
-    </details>
-  );
-}
-
-function subagentToolCallLabel(call: SubagentToolCall) {
-  if (call.name === 'query_prometheus' || call.name === 'query_prometheus_raw') {
-    return 'Query Prometheus';
-  }
-  if (call.name === 'write_dashboard_plan') {
-    return 'Create dashboard plan';
-  }
-  if (call.name === 'write_jsonnet' || call.name === 'grafana_write_jsonnet_file') {
-    return 'Write Jsonnet source';
-  }
-
-  const summary = asSimpleToolCallSummary(call.name, call.args, undefined, false)?.summary;
-  if (summary) {
-    return summary;
-  }
-
-  return call.name
-    .split('_')
-    .filter(Boolean)
-    .map((word, index) => {
-      const normalized = word === 'jsonnet' ? 'Jsonnet' : word === 'prometheus' ? 'Prometheus' : word;
-      return index === 0 ? normalized.charAt(0).toUpperCase() + normalized.slice(1) : normalized;
-    })
-    .join(' ');
-}
-
-function shouldExpandSubagentToolCall(call: SubagentToolCall, agent: SubagentRunDetails['agent'], recovered = false) {
-  return (
-    (!recovered && (call.status === 'failed' || call.isError)) ||
-    (agent === 'alerts' && call.status === 'completed' && !call.isError && ALERT_EVIDENCE_TOOL_NAMES.has(call.name)) ||
-    (call.status === 'completed' && !call.isError && call.name === 'save_dashboard')
-  );
-}
-
-function recoveredSubagentToolCallIds(toolCalls: SubagentToolCall[]) {
-  const laterSuccessfulToolNames = new Set<string>();
-  const recoveredCallIds = new Set<string>();
-
-  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
-    const call = toolCalls[index];
-    if (call.status === 'completed' && !call.isError) {
-      laterSuccessfulToolNames.add(call.name);
-      continue;
-    }
-    if ((call.status === 'failed' || call.isError) && laterSuccessfulToolNames.has(call.name)) {
-      recoveredCallIds.add(call.id);
-    }
-  }
-
-  return recoveredCallIds;
-}
-
-function subagentToolHistoryLabel(toolCalls: SubagentToolCall[], recoveredCallIds: Set<string>) {
-  const recoveredCount = toolCalls.filter((call) => recoveredCallIds.has(call.id)).length;
-  const labels = [
-    `${toolCalls.length} earlier ${toolCalls.length === 1 ? 'step' : 'steps'}`,
-    recoveredCount > 0 ? `${recoveredCount} recovered ${recoveredCount === 1 ? 'attempt' : 'attempts'}` : undefined,
-  ];
-  return labels.filter(Boolean).join(' · ');
-}
-
-const ALERT_EVIDENCE_TOOL_NAMES = new Set(['find_panel_alert_rules', 'get_alert_rule', 'query_prometheus']);
-
-function contentFromLegacyToolText(text: string | undefined) {
-  return text ? [{ type: 'text', text }] : undefined;
-}
-
 function renderStructuredToolResult(
   toolName: string | undefined,
   details: unknown,
-  content: unknown,
-  args?: unknown,
-  onOpenDashboard?: DashboardOpenHandler
+  content: unknown
 ): React.ReactNode | undefined {
   const artifactResult = asArtifactResult(details);
   const workspaceResult = asWorkspaceToolResult(toolName, details, content);
@@ -1960,55 +949,6 @@ function renderStructuredToolResult(
   const artifactRead = asArtifactReadResult(toolName, details, content);
   if (artifactRead) {
     return <ArtifactReadResultView result={artifactRead} />;
-  }
-
-  const datasources = asDatasourceResult(toolName, details, content);
-  if (datasources) {
-    return <DatasourceResultView datasources={datasources} />;
-  }
-
-  const lineListBatch = asLineListBatchResult(toolName, details, content);
-  if (lineListBatch) {
-    return <LineListBatchResultView result={lineListBatch} />;
-  }
-
-  const lineList = asLineListResult(toolName, details, content);
-  if (lineList) {
-    return <LineListResultView result={lineList} />;
-  }
-
-  const metricSeries = asMetricSeriesInspection(toolName, details, content);
-  if (metricSeries) {
-    return <MetricSeriesInspectionView result={metricSeries} />;
-  }
-
-  const metricSeriesBatch = asMetricSeriesInspectionBatch(toolName, details, content);
-  if (metricSeriesBatch) {
-    return <MetricSeriesInspectionBatchView result={metricSeriesBatch} />;
-  }
-
-  const prometheusBatchQuery = asPrometheusBatchQuerySummary(toolName, details, content, args);
-  if (prometheusBatchQuery) {
-    return <PrometheusBatchQueryResultView result={prometheusBatchQuery} />;
-  }
-
-  const prometheusQuery = asPrometheusQuerySummary(toolName, details, content, args);
-  if (prometheusQuery) {
-    return (
-      <PrometheusQueryResultView
-        result={prometheusQuery}
-        visualization={
-          prometheusQuery.visualization ??
-          asPrometheusTimeseriesVisualization(toolName, details) ??
-          prometheusTimeseriesVisualizationFromSummary(prometheusQuery)
-        }
-      />
-    );
-  }
-
-  const rawPrometheusQuery = asRawPrometheusQuery(toolName, details);
-  if (rawPrometheusQuery) {
-    return <RawPrometheusQueryResultView content={artifactResult ? undefined : content} result={rawPrometheusQuery} />;
   }
 
   const alertRuleMatches = asAlertRuleMatchesResult(toolName, details, content);
@@ -2026,11 +966,6 @@ function renderStructuredToolResult(
     return <ScreenshotResultView content={artifactResult ? undefined : content} result={screenshot} />;
   }
 
-  const skillResource = asSkillResourceReadResult(toolName, details, content);
-  if (skillResource) {
-    return <SkillResourceReadResultView result={skillResource} />;
-  }
-
   const liveSchema = asLiveDashboardMutationSchemaResult(toolName, details, content);
   if (liveSchema) {
     return <LiveDashboardMutationSchemaResultView result={liveSchema} />;
@@ -2039,41 +974,6 @@ function renderStructuredToolResult(
   const liveMutation = asLiveDashboardMutationResult(toolName, details);
   if (liveMutation) {
     return <LiveDashboardMutationResultView result={liveMutation} />;
-  }
-
-  const dashboardList = asDashboardList(toolName, details, content);
-  if (dashboardList) {
-    return <DashboardListView result={dashboardList} />;
-  }
-
-  const jsonnetSearch = asJsonnetSearchResult(toolName, content);
-  if (jsonnetSearch) {
-    return <JsonnetSearchResultView result={jsonnetSearch} />;
-  }
-
-  const jsonnetList = asJsonnetListResult(toolName, content);
-  if (jsonnetList) {
-    return <JsonnetListResultView result={jsonnetList} />;
-  }
-
-  const jsonnetRead = asJsonnetReadResult(toolName, content);
-  if (jsonnetRead) {
-    return <JsonnetReadResultView result={jsonnetRead} />;
-  }
-
-  const jsonnetFile = asJsonnetFileResult(toolName, details, content);
-  if (jsonnetFile) {
-    return <JsonnetFileResultView result={jsonnetFile} />;
-  }
-
-  const dashboardSummary = asDashboardSummary(toolName, details, content);
-  if (dashboardSummary) {
-    return <DashboardSummaryView result={dashboardSummary} />;
-  }
-
-  const action = asDashboardAction(toolName, details);
-  if (action) {
-    return <DashboardActionView action={action} onOpenDashboard={onOpenDashboard} />;
   }
 
   return undefined;
@@ -3103,693 +2003,6 @@ function formatAlertCheckRange(check: AlertPrometheusCheckView) {
   return formatAlertRelativeTimeRange(check.relativeTimeRange);
 }
 
-type DatasourceResult = {
-  name: string;
-  uid: string;
-  type: string;
-  isDefault: boolean;
-};
-
-function DatasourceResultView({ datasources }: { datasources: DatasourceResult[] }) {
-  const styles = useStyles2(getToolStyles);
-  const summary = `${datasources.length} Prometheus datasource${datasources.length === 1 ? '' : 's'} available`;
-
-  if (datasources.length === 0) {
-    return <div className={styles.emptyState}>No Prometheus datasources are available to this assistant.</div>;
-  }
-
-  return (
-    <div className={styles.structuredResult}>
-      <div className={styles.resultSummary}>{summary}</div>
-      <div className={styles.tableWrap}>
-        <table className={styles.dataTable}>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>UID</th>
-              <th>Type</th>
-              <th>Default</th>
-            </tr>
-          </thead>
-          <tbody>
-            {datasources.map((datasource) => (
-              <tr key={`${datasource.type}:${datasource.uid}`}>
-                <td>{datasource.name}</td>
-                <td className={styles.monospace}>{datasource.uid}</td>
-                <td>{datasource.type}</td>
-                <td>
-                  {datasource.isDefault ? (
-                    <Badge text="default" color="green" />
-                  ) : (
-                    <span className={styles.muted}>-</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-type LineListResult = {
-  title: string;
-  datasourceUid?: string;
-  count?: number;
-  truncated?: boolean;
-  items: string[];
-};
-
-function LineListResultView({ result }: { result: LineListResult }) {
-  const styles = useStyles2(getToolStyles);
-  const count = result.count ?? result.items.length;
-  const title = result.title === 'Metrics' ? (count === 1 ? 'metric' : 'metrics') : result.title.toLowerCase();
-  const summaryParts = [`${formatCount(count)} ${title}`];
-  if (result.datasourceUid) {
-    summaryParts.push(`from ${result.datasourceUid}`);
-  }
-  if (result.truncated) {
-    summaryParts.push('truncated');
-  }
-
-  return (
-    <div className={styles.structuredResult}>
-      <div className={styles.resultSummary}>{summaryParts.join(' | ')}</div>
-      <div className={styles.scrollList}>
-        {result.items.length === 0 ? (
-          <span className={styles.muted}>No results</span>
-        ) : (
-          result.items.map((item) => (
-            <div className={styles.listItem} key={item}>
-              {item}
-            </div>
-          ))
-        )}
-      </div>
-    </div>
-  );
-}
-
-type LineListBatchResult = {
-  groupLabel: string;
-  groupLabelPlural: string;
-  groupIndexLabel: string;
-  itemLabel: string;
-  itemLabelPlural: string;
-  datasourceUid?: string;
-  groupCount: number;
-  totalCount: number;
-  truncated?: boolean;
-  groups: LineListBatchGroup[];
-  contentAvailable: boolean;
-};
-
-type LineListBatchGroup = {
-  label: string;
-  count: number;
-  truncated: boolean;
-  items: string[];
-};
-
-function LineListBatchResultView({ result }: { result: LineListBatchResult }) {
-  const styles = useStyles2(getToolStyles);
-  const summaryParts = [
-    formatLabeledCount(result.groupCount, result.groupLabel, result.groupLabelPlural),
-    formatLabeledCount(result.totalCount, result.itemLabel, result.itemLabelPlural),
-    result.datasourceUid ? `from ${result.datasourceUid}` : undefined,
-    result.truncated ? 'truncated' : undefined,
-  ].filter(Boolean);
-
-  return (
-    <div className={styles.structuredResult}>
-      <div className={styles.resultSummary}>{summaryParts.join(' | ')}</div>
-      {!result.contentAvailable && (
-        <div className={styles.emptyState}>
-          The metric list batch completed, but the detailed result text was unavailable.
-        </div>
-      )}
-      <div className={styles.queryResultList}>
-        {result.groups.map((group, index) => (
-          <LineListBatchResultItem
-            group={group}
-            groupIndexLabel={result.groupIndexLabel}
-            index={index}
-            itemLabel={result.itemLabel}
-            itemLabelPlural={result.itemLabelPlural}
-            key={`${group.label}:${index}`}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function LineListBatchResultItem({
-  group,
-  groupIndexLabel,
-  index,
-  itemLabel,
-  itemLabelPlural,
-}: {
-  group: LineListBatchGroup;
-  groupIndexLabel: string;
-  index: number;
-  itemLabel: string;
-  itemLabelPlural: string;
-}) {
-  const styles = useStyles2(getToolStyles);
-  const [isOpen, setIsOpen] = useState(index === 0);
-  const meta = [formatLabeledCount(group.count, itemLabel, itemLabelPlural), group.truncated ? 'truncated' : undefined]
-    .filter(Boolean)
-    .join(' | ');
-
-  return (
-    <details className={styles.queryResultItem} open={isOpen} onToggle={(event) => setIsOpen(event.currentTarget.open)}>
-      <summary className={styles.queryResultSummary}>
-        <Icon aria-hidden className={styles.queryResultChevron} name={isOpen ? 'angle-down' : 'angle-right'} />
-        <span className={styles.queryResultIndex}>
-          {groupIndexLabel} {index + 1}
-        </span>
-        <code className={styles.queryResultExpression} title={group.label}>
-          {group.label}
-        </code>
-        <span className={styles.queryResultMeta}>{meta}</span>
-      </summary>
-      <div className={styles.scrollList}>
-        {group.items.length === 0 ? (
-          <span className={styles.muted}>No results</span>
-        ) : (
-          group.items.map((item) => (
-            <div className={styles.listItem} key={item}>
-              {item}
-            </div>
-          ))
-        )}
-      </div>
-    </details>
-  );
-}
-
-type MetricSeriesInspection = {
-  datasourceUid?: string;
-  match: string;
-  labelNames: string[];
-  totalSeries: number;
-  truncated: boolean;
-  examples: Array<Record<string, string>>;
-};
-
-type MetricSeriesInspectionBatch = {
-  datasourceUid?: string;
-  matchCount: number;
-  truncatedMatches: boolean;
-  totalSeries: number;
-  results: MetricSeriesInspection[];
-  contentAvailable: boolean;
-};
-
-function MetricSeriesInspectionBatchView({ result }: { result: MetricSeriesInspectionBatch }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.structuredResult}>
-      <div className={styles.resultSummary}>
-        {formatCount(result.results.length || result.matchCount)} of {formatCount(result.matchCount)} metric selectors
-        inspected
-      </div>
-      <ResultMetaGrid
-        items={[
-          { label: 'Datasource', value: result.datasourceUid },
-          { label: 'Selectors', value: formatCount(result.matchCount) },
-          { label: 'Series', value: formatCount(result.totalSeries) },
-          {
-            label: 'Shown',
-            value: result.truncatedMatches
-              ? `${formatCount(result.results.length)} of ${formatCount(result.matchCount)}`
-              : formatCount(result.results.length || result.matchCount),
-          },
-        ]}
-      />
-      {!result.contentAvailable && (
-        <div className={styles.emptyState}>
-          The metric series inspection completed, but the detailed result text was unavailable.
-        </div>
-      )}
-      {result.results.length > 0 && (
-        <div className={styles.queryResultList}>
-          {result.results.map((inspection, index) => (
-            <MetricSeriesInspectionBatchItem index={index} key={`${inspection.match}:${index}`} result={inspection} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function MetricSeriesInspectionBatchItem({ index, result }: { index: number; result: MetricSeriesInspection }) {
-  const styles = useStyles2(getToolStyles);
-  const [isOpen, setIsOpen] = useState(index === 0);
-
-  return (
-    <details className={styles.queryResultItem} open={isOpen} onToggle={(event) => setIsOpen(event.currentTarget.open)}>
-      <summary className={styles.queryResultSummary}>
-        <Icon aria-hidden className={styles.queryResultChevron} name={isOpen ? 'angle-down' : 'angle-right'} />
-        <span className={styles.queryResultIndex}>Selector {index + 1}</span>
-        <code className={styles.queryResultExpression} title={result.match}>
-          {result.match}
-        </code>
-        <span className={styles.queryResultMeta}>
-          {formatCount(result.totalSeries)} series | {formatCount(result.labelNames.length)} labels
-        </span>
-      </summary>
-      <MetricSeriesInspectionView result={result} />
-    </details>
-  );
-}
-
-function MetricSeriesInspectionView({ result }: { result: MetricSeriesInspection }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.structuredResult}>
-      <ResultMetaGrid
-        items={[
-          { label: 'Selector', value: <code>{result.match}</code> },
-          { label: 'Datasource', value: result.datasourceUid },
-          { label: 'Series', value: formatCount(result.totalSeries) },
-          {
-            label: 'Examples',
-            value: result.truncated ? `${result.examples.length} shown` : String(result.examples.length),
-          },
-        ]}
-      />
-      <StringChips values={result.labelNames} />
-      <div className={styles.tableWrap}>
-        <table className={styles.dataTable}>
-          <thead>
-            <tr>
-              <th>Series</th>
-              <th>Labels</th>
-            </tr>
-          </thead>
-          <tbody>
-            {result.examples.map((example, index) => (
-              <tr key={`${result.match}:${index}`}>
-                <td>{index + 1}</td>
-                <td>
-                  <LabelPills labels={example} />
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-type PrometheusQuerySummaryView = {
-  datasourceUid: string;
-  query: string;
-  queryType: string;
-  interval: string;
-  range?: {
-    from?: string;
-    to?: string;
-    raw?: {
-      from?: string;
-      to?: string;
-    };
-  };
-  frameCount: number;
-  totalSeries: number;
-  truncatedSeries: boolean;
-  notices: QueryNoticeView[];
-  executedQueryStrings: string[];
-  series: SeriesSummaryView[];
-  visualization?: PrometheusTimeseriesVisualization;
-};
-
-type QueryNoticeView = {
-  severity?: string;
-  text?: string;
-};
-
-type SeriesSummaryView = {
-  name: string;
-  labels: Record<string, string>;
-  points: number;
-  nonNullPoints: number;
-  nullPoints: number;
-  last?: SummaryPointView;
-  min?: SummaryPointView;
-  max?: SummaryPointView;
-  mean?: number;
-  delta?: number;
-  deltaPercent?: number;
-};
-
-type SummaryPointView = {
-  time?: string;
-  value: number | null;
-};
-
-type PrometheusBatchQuerySummaryView = {
-  datasourceUid: string;
-  queryCount: number;
-  truncatedQueries: boolean;
-  results: PrometheusQuerySummaryView[];
-  contentAvailable: boolean;
-};
-
-type PrometheusTimeseriesVisualization = {
-  kind: 'prometheus-timeseries';
-  datasourceUid: string;
-  query: string;
-  interval: string;
-  maxDataPoints?: number;
-  range: {
-    from: string;
-    to: string;
-    raw?: {
-      from?: string;
-      to?: string;
-    };
-  };
-};
-
-function PrometheusBatchQueryResultView({ result }: { result: PrometheusBatchQuerySummaryView }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.structuredResult}>
-      <div className={styles.resultSummary}>
-        {formatCount(result.results.length || result.queryCount)} of {formatCount(result.queryCount)} Prometheus queries
-        summarized
-      </div>
-      <ResultMetaGrid
-        items={[
-          { label: 'Datasource', value: result.datasourceUid },
-          { label: 'Queries', value: formatCount(result.queryCount) },
-          {
-            label: 'Shown',
-            value: result.truncatedQueries
-              ? `${formatCount(result.results.length)} of ${formatCount(result.queryCount)}`
-              : formatCount(result.results.length || result.queryCount),
-          },
-        ]}
-      />
-      {!result.contentAvailable && (
-        <div className={styles.emptyState}>
-          The query batch completed, but the detailed result text was unavailable.
-        </div>
-      )}
-      {result.results.length > 0 && (
-        <div className={styles.queryResultList}>
-          {result.results.map((queryResult, index) => (
-            <PrometheusBatchQueryResultItem index={index} key={`${queryResult.query}:${index}`} result={queryResult} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function PrometheusBatchQueryResultItem({ index, result }: { index: number; result: PrometheusQuerySummaryView }) {
-  const styles = useStyles2(getToolStyles);
-  const [isOpen, setIsOpen] = useState(index === 0);
-  const visualization = isOpen
-    ? (result.visualization ?? prometheusTimeseriesVisualizationFromSummary(result))
-    : undefined;
-  const summaryMeta = formatQueryResultSummaryMeta(result);
-
-  return (
-    <details className={styles.queryResultItem} open={isOpen} onToggle={(event) => setIsOpen(event.currentTarget.open)}>
-      <summary className={styles.queryResultSummary}>
-        <Icon aria-hidden className={styles.queryResultChevron} name={isOpen ? 'angle-down' : 'angle-right'} />
-        <span className={styles.queryResultIndex}>Query {index + 1}</span>
-        <code className={styles.queryResultExpression} title={result.query}>
-          {result.query}
-        </code>
-        <span className={styles.queryResultMeta}>{summaryMeta}</span>
-      </summary>
-      <PrometheusQueryResultView result={result} visualization={visualization} />
-    </details>
-  );
-}
-
-function PrometheusQueryResultView({
-  result,
-  visualization,
-}: {
-  result: PrometheusQuerySummaryView;
-  visualization?: PrometheusTimeseriesVisualization;
-}) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.structuredResult}>
-      <ResultMetaGrid
-        items={[
-          { label: 'Datasource', value: result.datasourceUid },
-          { label: 'Type', value: result.queryType },
-          { label: 'Interval', value: result.interval },
-          { label: 'Frames', value: formatCount(result.frameCount) },
-          {
-            label: 'Series',
-            value: result.truncatedSeries
-              ? `${formatCount(result.series.length)} of ${formatCount(result.totalSeries)}`
-              : formatCount(result.totalSeries),
-          },
-        ]}
-      />
-      <pre className={styles.queryBlock}>{result.query}</pre>
-      {visualization && <PrometheusTimeseriesSection visualization={visualization} />}
-      {result.notices.length > 0 && (
-        <div className={styles.noticeList}>
-          {result.notices.map((notice, index) => (
-            <div className={styles.notice} key={`${notice.severity ?? 'notice'}:${index}`}>
-              <strong>{notice.severity ?? 'notice'}</strong>
-              <span>{notice.text ?? ''}</span>
-            </div>
-          ))}
-        </div>
-      )}
-      {result.executedQueryStrings.length > 0 && (
-        <details className={styles.collapsible}>
-          <summary>Executed query</summary>
-          {result.executedQueryStrings.map((query, index) => (
-            <pre className={styles.queryBlock} key={`${query}:${index}`}>
-              {query}
-            </pre>
-          ))}
-        </details>
-      )}
-      <div className={styles.tableWrap}>
-        <table className={cx(styles.dataTable, styles.wideTable)}>
-          <thead>
-            <tr>
-              <th>Series</th>
-              <th>Labels</th>
-              <th>Points</th>
-              <th>Last</th>
-              <th>Min</th>
-              <th>Max</th>
-              <th>Delta</th>
-            </tr>
-          </thead>
-          <tbody>
-            {result.series.map((series, index) => (
-              <tr key={`${series.name}:${index}`}>
-                <td className={styles.textClip} title={series.name}>
-                  {series.name}
-                </td>
-                <td>
-                  <LabelPills labels={series.labels} limit={6} />
-                </td>
-                <td>{formatCount(series.points)}</td>
-                <td>{formatPoint(series.last)}</td>
-                <td>{formatPoint(series.min)}</td>
-                <td>{formatPoint(series.max)}</td>
-                <td>{formatDelta(series.delta, series.deltaPercent)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-// The scene panel runs the PromQL live on mount, so it must never mount from
-// merely rendering a message (loading a session with N stored query results
-// would fire N queries). Mount only after the user opens the section, and stay
-// mounted afterwards so toggling does not re-run the query.
-function PrometheusTimeseriesSection({ visualization }: { visualization: PrometheusTimeseriesVisualization }) {
-  const styles = useStyles2(getToolStyles);
-  const [isOpen, setIsOpen] = useState(false);
-  const [hasOpened, setHasOpened] = useState(false);
-
-  return (
-    <details className={styles.collapsible} open={isOpen}>
-      <summary
-        onClick={(event) => {
-          event.preventDefault();
-          setIsOpen((open) => !open);
-          setHasOpened(true);
-        }}
-      >
-        Chart
-      </summary>
-      {hasOpened && <PrometheusTimeseriesPanelView visualization={visualization} />}
-    </details>
-  );
-}
-
-function PrometheusTimeseriesPanelView({ visualization }: { visualization: PrometheusTimeseriesVisualization }) {
-  const styles = useStyles2(getToolStyles);
-  const { datasourceUid, query, interval, maxDataPoints, range } = visualization;
-  const scene = useMemo(
-    () =>
-      createPrometheusTimeseriesScene({
-        kind: 'prometheus-timeseries',
-        datasourceUid,
-        query,
-        interval,
-        maxDataPoints,
-        range: {
-          from: range.from,
-          to: range.to,
-          raw:
-            range.raw?.from || range.raw?.to
-              ? {
-                  from: range.raw?.from,
-                  to: range.raw?.to,
-                }
-              : undefined,
-        },
-      }),
-    [datasourceUid, interval, maxDataPoints, query, range.from, range.raw?.from, range.raw?.to, range.to]
-  );
-  const SceneComponent = scene.Component;
-
-  return (
-    <div className={styles.timeseriesPanel} data-testid="prometheus-timeseries-panel">
-      <SceneComponent model={scene} />
-    </div>
-  );
-}
-
-function createPrometheusTimeseriesScene(visualization: PrometheusTimeseriesVisualization) {
-  const timeRange = new SceneTimeRange({
-    from: visualization.range.from,
-    to: visualization.range.to,
-    timeZone: 'browser',
-  });
-  const datasource = {
-    type: 'prometheus',
-    uid: visualization.datasourceUid,
-  };
-  const queryRunner = new SceneQueryRunner({
-    datasource,
-    minInterval: visualization.interval,
-    maxDataPoints: visualization.maxDataPoints ?? 1200,
-    requestIdPrefix: 'observability-query-render-',
-    queries: [
-      {
-        refId: 'A',
-        datasource,
-        expr: visualization.query,
-        range: true,
-        instant: false,
-        interval: visualization.interval,
-        editorMode: 'code',
-      },
-    ],
-  });
-  const exploreHref = buildPrometheusExploreHref(visualization);
-  const panel = PanelBuilders.timeseries()
-    .setTitle('Query result')
-    .setDescription(visualization.query)
-    .setColor({ mode: 'palette-classic' })
-    .setNoValue('-')
-    .setHeaderActions(
-      <LinkButton href={exploreHref} icon="compass" rel="noreferrer" size="sm" target="_blank" variant="secondary">
-        Explore
-      </LinkButton>
-    )
-    .setData(queryRunner)
-    .build();
-
-  return new EmbeddedScene({
-    $timeRange: timeRange,
-    body: new SceneFlexLayout({
-      direction: 'column',
-      children: [
-        new SceneFlexItem({
-          body: panel,
-          minHeight: 300,
-          ySizing: 'fill',
-        }),
-      ],
-    }),
-  });
-}
-
-function buildPrometheusExploreHref(visualization: PrometheusTimeseriesVisualization) {
-  const datasource = {
-    type: 'prometheus',
-    uid: visualization.datasourceUid,
-  };
-  const left = {
-    datasource: visualization.datasourceUid,
-    queries: [
-      {
-        refId: 'A',
-        datasource,
-        expr: visualization.query,
-        range: true,
-        instant: false,
-        interval: visualization.interval,
-        editorMode: 'code',
-      },
-    ],
-    range: {
-      from: visualization.range.raw?.from ?? visualization.range.from,
-      to: visualization.range.raw?.to ?? visualization.range.to,
-    },
-  };
-
-  const subUrl = config.appSubUrl?.replace(/\/+$/, '') ?? '';
-  return `${subUrl}/explore?left=${encodeURIComponent(JSON.stringify(left))}`;
-}
-
-type RawPrometheusQueryResult = {
-  datasourceUid?: string;
-  query?: string;
-  interval?: string;
-  frames?: number;
-};
-
-function RawPrometheusQueryResultView({ result, content }: { result: RawPrometheusQueryResult; content?: unknown }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.structuredResult}>
-      <ResultMetaGrid
-        items={[
-          { label: 'Datasource', value: result.datasourceUid },
-          { label: 'Interval', value: result.interval },
-          { label: 'Frames', value: result.frames === undefined ? undefined : formatCount(result.frames) },
-        ]}
-      />
-      {result.query && <pre className={styles.queryBlock}>{result.query}</pre>}
-      {content !== undefined && (
-        <details className={styles.collapsible}>
-          <summary>Raw frames</summary>
-          <ContentBlocks content={content} />
-        </details>
-      )}
-    </div>
-  );
-}
-
 type ScreenshotResult = {
   uid?: string;
   panelId?: number;
@@ -3809,39 +2022,6 @@ function ScreenshotResultView({ result, content }: { result: ScreenshotResult; c
         ]}
       />
       {content !== undefined && <ContentBlocks content={content} />}
-    </div>
-  );
-}
-
-type SkillResourceReadResult = {
-  skill: string;
-  path: string;
-  bytes?: number;
-  truncated?: boolean;
-  text?: string;
-};
-
-function SkillResourceReadResultView({ result }: { result: SkillResourceReadResult }) {
-  const styles = useStyles2(getToolStyles);
-  const summary = summaryLine(['Skill resource loaded', result.skill, result.path]);
-
-  return (
-    <div className={styles.structuredResult}>
-      <div className={styles.resultSummary}>{summary}</div>
-      <ResultMetaGrid
-        items={[
-          { label: 'Skill', value: <code>{result.skill}</code> },
-          { label: 'Resource', value: <code>{result.path}</code> },
-          { label: 'Size', value: result.bytes !== undefined ? `${result.bytes} bytes` : undefined },
-          { label: 'Truncated', value: formatBoolean(result.truncated) },
-        ]}
-      />
-      {result.text && (
-        <details className={styles.collapsible}>
-          <summary>Reference text</summary>
-          <ContentBlocks content={[{ type: 'text', text: result.text }]} />
-        </details>
-      )}
     </div>
   );
 }
@@ -4088,319 +2268,101 @@ function LiveDashboardMutationChangesTable({ changes }: { changes: LiveDashboard
   );
 }
 
-type DashboardListResult = {
-  dashboards: DashboardListItem[];
-};
-
-type DashboardListItem = {
-  title: string;
-  uid: string;
-  url?: string;
-  folderTitle?: string;
-  folderUid?: string;
-};
-
-function DashboardListView({ result }: { result: DashboardListResult }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.structuredResult}>
-      <div className={styles.resultSummary}>{formatCount(result.dashboards.length)} dashboards</div>
-      <DashboardTable dashboards={result.dashboards} />
-    </div>
-  );
-}
-
-function DashboardTable({ dashboards }: { dashboards: DashboardListItem[] }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.tableWrap}>
-      <table className={styles.dataTable}>
-        <thead>
-          <tr>
-            <th>Title</th>
-            <th>UID</th>
-            <th>Folder</th>
-            <th>Open</th>
-          </tr>
-        </thead>
-        <tbody>
-          {dashboards.map((dashboard) => (
-            <tr key={dashboard.uid}>
-              <td>{dashboard.title}</td>
-              <td className={styles.monospace}>{dashboard.uid}</td>
-              <td>{dashboard.folderTitle || dashboard.folderUid || <span className={styles.muted}>-</span>}</td>
-              <td>
-                {dashboard.url ? (
-                  <ExternalLink href={dashboard.url}>Open</ExternalLink>
-                ) : (
-                  <span className={styles.muted}>-</span>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
+// Renderers for the session filesystem tools (read/write/edit/bash) in src/pages/Chat/workspace/tools.ts.
 function asWorkspaceToolResult(
   toolName: string | undefined,
   details: unknown,
   content: unknown
 ): React.ReactNode | undefined {
-  if (!toolName || !WORKSPACE_TOOL_NAMES.has(toolName)) {
+  if (!toolName || !WORKSPACE_TOOL_NAMES.has(toolName) || !isRecord(details)) {
     return undefined;
   }
 
-  const record = isRecord(details) ? details : parseToolJsonRecord(content, details);
-  if (!record) {
-    return undefined;
-  }
-
+  const text = extractToolText(content) ?? '';
   switch (toolName) {
-    case 'workspace_info':
-      return <WorkspaceInfoResultView result={workspaceInfoResultFromRecord(record)} />;
-    case 'ls':
-      return <WorkspaceDirectoryResultView result={workspaceDirectoryResultFromRecord(record)} />;
-    case 'find':
-      return <WorkspaceFindResultView result={workspaceFindResultFromRecord(record)} />;
-    case 'grep':
-      return <WorkspaceGrepResultView result={workspaceGrepResultFromRecord(record)} />;
     case 'read':
-      return <WorkspaceReadResultView result={workspaceReadResultFromRecord(record)} />;
-    case 'get_schema':
-      return <WorkspaceReadResultView result={workspaceSchemaResultFromRecord(record)} />;
-    case 'edit':
+      return stringField(details, 'type') === 'directory' ? (
+        <WorkspaceDirectoryResultView result={workspaceDirectoryResultFromRecord(details, text)} />
+      ) : (
+        <WorkspaceReadResultView result={workspaceReadResultFromRecord(details, text)} />
+      );
     case 'write':
-    case 'upsert_resource':
-      return <WorkspaceMutationResultView result={workspaceMutationResultFromRecord(toolName, record)} />;
-    case 'validate_workspace':
-      return <WorkspaceValidationResultView result={workspaceValidationResultFromRecord(record)} />;
-    case 'preview_diff':
-      return <WorkspaceDiffResultView result={workspaceDiffResultFromRecord(record)} />;
-    case 'save_changes':
-      return <WorkspaceSaveResultView result={workspaceDiffResultFromRecord(record)} />;
+    case 'edit':
+      return <WorkspaceMutationResultView result={workspaceMutationResultFromRecord(details, text)} />;
     case 'bash':
-      return <WorkspaceBashResultView result={workspaceBashResultFromRecord(record)} />;
+      return <WorkspaceBashResultView result={workspaceBashResultFromRecord(details)} />;
     default:
       return undefined;
   }
 }
 
-const WORKSPACE_TOOL_NAMES = new Set([
-  'workspace_info',
-  'ls',
-  'find',
-  'grep',
-  'read',
-  'edit',
-  'write',
-  'get_schema',
-  'validate_workspace',
-  'preview_diff',
-  'save_changes',
-  'bash',
-  'upsert_resource',
-]);
+const WORKSPACE_TOOL_NAMES = new Set(['read', 'write', 'edit', 'bash']);
 
-type WorkspaceFileRef = {
-  name?: string;
-  path: string;
-  type?: string;
-  layer?: string;
-  language?: string;
-  version?: string;
-  checksum?: string;
-  readOnly?: boolean;
-};
+// Dashboard files under this prefix are local working copies until a plan is approved and applied.
+const WORKSPACE_STAGED_RESOURCE_PREFIX = '/grafana/dashboards/';
 
-type WorkspaceInfoResult = {
-  title: string;
-  provider?: string;
-  workspaceId?: string;
-  workspaceKind?: string;
-  rootPath?: string;
-  baseVersion?: string;
-  files: WorkspaceFileRef[];
-  schemas: WorkspaceFileRef[];
-  pendingChanges: WorkspacePendingChange[];
-  limits?: Record<string, unknown>;
-};
-
-type WorkspacePendingChange = {
-  path: string;
-  baseVersion?: string;
-  checksum?: string;
-  previousBytes?: number;
-  currentBytes?: number;
-};
-
-function WorkspaceInfoResultView({ result }: { result: WorkspaceInfoResult }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.structuredResult}>
-      <ResultMetaGrid
-        items={[
-          { label: 'Workspace', value: result.title },
-          { label: 'ID', value: result.workspaceId ? <code>{result.workspaceId}</code> : undefined },
-          { label: 'Kind', value: result.workspaceKind ? <code>{result.workspaceKind}</code> : undefined },
-          { label: 'Provider', value: result.provider ? <code>{result.provider}</code> : undefined },
-          { label: 'Root', value: result.rootPath ? <code>{result.rootPath}</code> : undefined },
-          { label: 'Base', value: result.baseVersion ? <code>{shortChecksum(result.baseVersion)}</code> : undefined },
-          { label: 'Files', value: formatCount(result.files.length) },
-          { label: 'Pending', value: formatCount(result.pendingChanges.length) },
-        ]}
-      />
-      <WorkspaceFileTable files={result.files} />
-      {result.pendingChanges.length > 0 && <WorkspacePendingChangesView changes={result.pendingChanges} />}
-      {(result.schemas.length > 0 || result.limits) && (
-        <details className={styles.collapsible}>
-          <summary>Workspace metadata</summary>
-          {result.schemas.length > 0 && <WorkspaceFileTable files={result.schemas} title="Schemas" />}
-          {result.limits && <pre className={styles.queryBlock}>{formatJson(result.limits)}</pre>}
-        </details>
-      )}
-    </div>
-  );
-}
-
-function workspaceInfoResultFromRecord(record: Record<string, unknown>): WorkspaceInfoResult {
-  const provider = recordField(record, 'provider');
-  return {
-    title: stringField(record, 'displayName') ?? 'Workspace',
-    provider: stringField(provider, 'pluginId') ?? stringField(provider, 'displayName'),
-    workspaceId: stringField(record, 'workspaceId'),
-    workspaceKind: stringField(record, 'workspaceKind'),
-    rootPath: stringField(record, 'rootPath'),
-    baseVersion: stringField(record, 'baseVersion'),
-    files: recordsField(record, 'files').map(workspaceFileRefFromRecord),
-    schemas: recordsField(record, 'schemas').map(workspaceSchemaRefFromRecord),
-    pendingChanges: recordsField(record, 'pendingChanges').map(workspacePendingChangeFromRecord),
-    limits: recordField(record, 'limits'),
-  };
+function isWorkspaceStagedPath(path: string | undefined) {
+  return Boolean(path?.startsWith(WORKSPACE_STAGED_RESOURCE_PREFIX));
 }
 
 type WorkspaceDirectoryResult = {
-  path?: string;
-  entries: WorkspaceFileRef[];
+  path: string;
+  entries: string[];
 };
 
 function WorkspaceDirectoryResultView({ result }: { result: WorkspaceDirectoryResult }) {
   const styles = useStyles2(getToolStyles);
   return (
-    <div className={styles.structuredResult}>
-      <div className={styles.resultSummary}>
-        {formatCount(result.entries.length)} entries{result.path ? ` | ${result.path}` : ''}
+    <details className={styles.compactResult}>
+      <summary className={styles.compactResultSummary}>
+        <Icon aria-hidden className={styles.toolTypeIcon} name="folder-open" />
+        <span className={styles.compactResultText}>
+          {summaryLine([`${result.path}/`, formatLabeledCount(result.entries.length, 'entry', 'entries')])}
+        </span>
+      </summary>
+      <div className={styles.compactResultBody}>
+        <div className={styles.scrollList}>
+          {result.entries.length === 0 ? (
+            <span className={styles.muted}>Empty directory</span>
+          ) : (
+            result.entries.map((entry) => (
+              <div className={styles.listItem} key={entry}>
+                {entry}
+              </div>
+            ))
+          )}
+        </div>
       </div>
-      <WorkspaceFileTable files={result.entries} />
-    </div>
+    </details>
   );
 }
 
-function workspaceDirectoryResultFromRecord(record: Record<string, unknown>): WorkspaceDirectoryResult {
+function workspaceDirectoryResultFromRecord(record: Record<string, unknown>, text: string): WorkspaceDirectoryResult {
+  // The text is "/path/" followed by one entry per line; empty directories render as "/path/ (empty directory)".
+  const [, ...entries] = text.split('\n');
   return {
-    path: stringField(record, 'path'),
-    entries: recordsField(record, 'entries').map(workspaceFileRefFromRecord),
-  };
-}
-
-type WorkspaceFindResult = {
-  paths: string[];
-};
-
-function WorkspaceFindResultView({ result }: { result: WorkspaceFindResult }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.structuredResult}>
-      <div className={styles.resultSummary}>{formatCount(result.paths.length)} paths</div>
-      <div className={styles.scrollList}>
-        {result.paths.length === 0 ? (
-          <span className={styles.muted}>No matching files</span>
-        ) : (
-          result.paths.map((path) => (
-            <div className={styles.listItem} key={path}>
-              {path}
-            </div>
-          ))
-        )}
-      </div>
-    </div>
-  );
-}
-
-function workspaceFindResultFromRecord(record: Record<string, unknown>): WorkspaceFindResult {
-  return {
-    paths: stringArrayField(record, 'paths') ?? [],
-  };
-}
-
-type WorkspaceGrepResult = {
-  matchCount: number;
-  matches: WorkspaceGrepMatch[];
-};
-
-type WorkspaceGrepMatch = {
-  path: string;
-  line?: number;
-  text: string;
-};
-
-function WorkspaceGrepResultView({ result }: { result: WorkspaceGrepResult }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.structuredResult}>
-      <div className={styles.resultSummary}>{formatCount(result.matchCount)} matches</div>
-      <div className={styles.tableWrap}>
-        <table className={cx(styles.dataTable, styles.wideTable)}>
-          <thead>
-            <tr>
-              <th>File</th>
-              <th>Line</th>
-              <th>Text</th>
-            </tr>
-          </thead>
-          <tbody>
-            {result.matches.map((match, index) => (
-              <tr key={`${match.path}:${match.line ?? index}`}>
-                <td className={styles.monospace}>{match.path}</td>
-                <td>{match.line ?? <span className={styles.muted}>-</span>}</td>
-                <td className={styles.codeTextCell}>{match.text}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function workspaceGrepResultFromRecord(record: Record<string, unknown>): WorkspaceGrepResult {
-  return {
-    matchCount: numberField(record, 'matchCount') ?? recordsField(record, 'matches').length,
-    matches: recordsField(record, 'matches').map((match) => ({
-      path: stringField(match, 'path') ?? '-',
-      line: numberField(match, 'line'),
-      text: stringField(match, 'text') ?? '',
-    })),
+    path: (stringField(record, 'path') ?? '-').replace(/\/$/, ''),
+    entries: entries.filter((entry) => entry.trim() !== ''),
   };
 }
 
 type WorkspaceReadResult = {
   path: string;
-  version?: string;
-  checksum?: string;
-  language?: string;
-  readOnly?: boolean;
+  revision?: string;
   totalLines?: number;
+  startLine?: number;
+  endLine?: number;
   lines: CodeLine[];
+  notes: string[];
 };
 
 function WorkspaceReadResultView({ result }: { result: WorkspaceReadResult }) {
   const styles = useStyles2(getToolStyles);
-  const lineSummary = workspaceReadLineSummary(result);
-  const summary = summaryLine([result.path, result.language, lineSummary]);
-  const hasMetadata = result.readOnly !== undefined || Boolean(result.version) || Boolean(result.checksum);
+  const summary = summaryLine([
+    result.path,
+    workspaceReadLineSummary(result),
+    result.revision ? `rev ${result.revision}` : undefined,
+  ]);
   return (
     <details className={styles.compactResult}>
       <summary className={styles.compactResultSummary}>
@@ -4408,293 +2370,98 @@ function WorkspaceReadResultView({ result }: { result: WorkspaceReadResult }) {
         <span className={styles.compactResultText}>{summary}</span>
       </summary>
       <div className={styles.compactResultBody}>
-        {result.lines.length > 0 ? <CodeViewer lines={result.lines} language="plain" /> : null}
-        {hasMetadata && (
-          <details className={styles.collapsible}>
-            <summary>File metadata</summary>
-            <ResultMetaGrid
-              items={[
-                {
-                  label: 'Read only',
-                  value: result.readOnly === undefined ? undefined : result.readOnly ? 'yes' : 'no',
-                },
-                { label: 'Version', value: result.version ? <code>{shortChecksum(result.version)}</code> : undefined },
-                {
-                  label: 'Checksum',
-                  value: result.checksum ? <code>{shortChecksum(result.checksum)}</code> : undefined,
-                },
-              ]}
-            />
-          </details>
+        {result.lines.length > 0 && (
+          <CodeViewer
+            lines={result.lines}
+            language={/\.(jsonnet|libsonnet)$/.test(result.path) ? 'jsonnet' : 'plain'}
+          />
         )}
+        {result.notes.map((note) => (
+          <div className={styles.muted} key={note}>
+            {note}
+          </div>
+        ))}
       </div>
     </details>
   );
 }
 
 function workspaceReadLineSummary(result: WorkspaceReadResult) {
-  if (result.lines.length === 0) {
-    return `${formatCount(result.totalLines ?? 0)} lines`;
+  if (result.totalLines === 0) {
+    return 'empty file';
   }
-
-  return `lines ${result.lines[0].line}-${result.lines[result.lines.length - 1].line} of ${
-    result.totalLines ?? result.lines.length
-  }`;
+  if (result.startLine !== undefined && result.endLine !== undefined && result.endLine >= result.startLine) {
+    return `lines ${result.startLine}-${result.endLine} of ${result.totalLines ?? result.endLine}`;
+  }
+  return result.totalLines !== undefined ? formatLabeledCount(result.totalLines, 'line', 'lines') : undefined;
 }
 
-function workspaceReadResultFromRecord(record: Record<string, unknown>): WorkspaceReadResult {
+function workspaceReadResultFromRecord(record: Record<string, unknown>, text: string): WorkspaceReadResult {
+  // Skip the header line, then split numbered "N\t<text>" lines from footer notes such as continuation hints.
+  const [, ...body] = text.split('\n');
+  const lines: CodeLine[] = [];
+  const notes: string[] = [];
+  for (const line of body) {
+    const match = /^\s*(\d+)\t(.*)$/.exec(line);
+    if (match) {
+      lines.push({ line: Number(match[1]), text: match[2] });
+    } else if (line.trim()) {
+      notes.push(line.trim());
+    }
+  }
   return {
     path: stringField(record, 'path') ?? '-',
-    version: stringField(record, 'version'),
-    checksum: stringField(record, 'checksum'),
-    language: stringField(record, 'language'),
-    readOnly: booleanField(record, 'readOnly'),
+    revision: stringField(record, 'revision'),
     totalLines: numberField(record, 'totalLines'),
-    lines: recordsField(record, 'lines')
-      .map(asCodeLine)
-      .filter((line): line is CodeLine => Boolean(line)),
-  };
-}
-
-function workspaceSchemaResultFromRecord(record: Record<string, unknown>): WorkspaceReadResult {
-  const content = stringField(record, 'content') ?? '';
-  return {
-    path: stringField(record, 'path') ?? stringField(record, 'schemaId') ?? '-',
-    version: stringField(record, 'version'),
-    checksum: stringField(record, 'checksum'),
-    language: 'json',
-    totalLines: content ? textToCodeLines(content).length : undefined,
-    lines: content ? textToCodeLines(content) : [],
+    startLine: numberField(record, 'startLine'),
+    endLine: numberField(record, 'endLine'),
+    lines,
+    notes,
   };
 }
 
 type WorkspaceMutationResult = {
-  title: string;
-  summary?: string;
-  status?: string;
   path?: string;
-  version?: string;
-  checksum?: string;
-  changedRanges: Array<{ startLine: number; endLine: number; newLines: number }>;
-  firstChangedLine?: number;
-  changedFiles: WorkspaceChangedFile[];
-  pendingChanges: WorkspacePendingChange[];
-  operation?: Record<string, unknown>;
-  validation?: WorkspaceValidationResult;
+  summary: string;
   diff?: string;
-};
-
-type WorkspaceChangedFile = WorkspacePendingChange & {
-  addedLines?: number;
-  removedLines?: number;
-  firstChangedLine?: number;
+  staged: boolean;
 };
 
 function WorkspaceMutationResultView({ result }: { result: WorkspaceMutationResult }) {
   const styles = useStyles2(getToolStyles);
-  const hasDiff = Boolean(result.diff);
   return (
     <div className={styles.structuredResult}>
-      {hasDiff ? (
-        result.diff && <DiffViewer defaultOpen diff={result.diff} />
+      {result.diff ? (
+        <DiffViewer defaultOpen diff={result.diff} />
       ) : (
-        <>
-          <div className={styles.resultSummary}>{result.summary ?? result.title}</div>
-          <ResultMetaGrid
-            items={[
-              { label: 'Status', value: result.status ? <WorkspaceStatusBadge status={result.status} /> : undefined },
-              { label: 'Changed', value: formatWorkspaceChangedRanges(result.changedRanges) },
-            ]}
-          />
-          {result.changedFiles.length > 0 && <WorkspaceChangedFilesView files={result.changedFiles} />}
-        </>
+        <div className={styles.resultSummary}>{result.summary}</div>
       )}
-      {result.validation && <WorkspaceValidationResultView result={result.validation} compact />}
-      {result.operation && (
-        <details className={styles.collapsible}>
-          <summary>Operation</summary>
-          <pre className={styles.queryBlock}>{formatJson(result.operation)}</pre>
-        </details>
-      )}
+      {result.staged && <WorkspaceStagedNotice />}
     </div>
   );
 }
 
-function workspaceMutationResultFromRecord(toolName: string, record: Record<string, unknown>): WorkspaceMutationResult {
-  const files = recordsField(record, 'files').map(workspaceChangedFileFromRecord);
-  const changedFiles = recordsField(record, 'changedFiles').map(workspaceChangedFileFromRecord);
-  const pendingChanges = recordsField(record, 'pendingChanges').map(workspacePendingChangeFromRecord);
-  const operation = recordField(record, 'operation');
-  const validationRecord = recordField(record, 'validation');
-  const path = stringField(record, 'path') ?? files[0]?.path ?? changedFiles[0]?.path ?? pendingChanges[0]?.path;
+function workspaceMutationResultFromRecord(record: Record<string, unknown>, text: string): WorkspaceMutationResult {
+  const path = stringField(record, 'path');
+  const diff = stringField(record, 'diff');
+  const fallback = summaryLine([stringField(record, 'change') ?? 'edited', path]);
   return {
-    title: workspaceMutationTitle(toolName),
-    summary: stringField(record, 'summary'),
-    status: stringField(record, 'status'),
     path,
-    version: stringField(record, 'version'),
-    checksum: stringField(record, 'checksum'),
-    changedRanges: recordsField(record, 'changedRanges').map(workspaceChangedRangeFromRecord),
-    firstChangedLine: numberField(record, 'firstChangedLine'),
-    changedFiles: changedFiles.length > 0 ? changedFiles : files,
-    pendingChanges,
-    operation,
-    validation: validationRecord ? workspaceValidationResultFromRecord(validationRecord) : undefined,
-    diff: stringField(record, 'diff'),
+    summary: text.split('\n')[0]?.trim() || fallback,
+    // Writes that leave a file unchanged still produce an empty patch without hunks.
+    diff: diff && /^@@/m.test(diff) ? diff : undefined,
+    staged: isWorkspaceStagedPath(path),
   };
 }
 
-function workspaceMutationTitle(toolName: string) {
-  switch (toolName) {
-    case 'write':
-      return 'Workspace file written';
-    case 'upsert_resource':
-      return 'Workspace resource updated';
-    default:
-      return 'Workspace file edited';
-  }
-}
-
-type WorkspaceValidationResult = {
-  status: string;
-  summary?: string;
-  workspaceId?: string;
-  baseVersion?: string;
-  checkedAt?: string;
-  findings: WorkspaceFinding[];
-  details?: Record<string, unknown>;
-};
-
-type WorkspaceFinding = {
-  severity: string;
-  message: string;
-  sourcePath?: string;
-  line?: number;
-};
-
-function WorkspaceValidationResultView({ result, compact }: { result: WorkspaceValidationResult; compact?: boolean }) {
+function WorkspaceStagedNotice() {
   const styles = useStyles2(getToolStyles);
   return (
-    <div className={styles.structuredResult}>
-      <ResultMetaGrid
-        items={[
-          { label: 'Status', value: <WorkspaceStatusBadge status={result.status} /> },
-          { label: 'Summary', value: result.summary },
-          { label: 'Findings', value: formatCount(result.findings.length) },
-          { label: 'Workspace', value: !compact && result.workspaceId ? <code>{result.workspaceId}</code> : undefined },
-          {
-            label: 'Base',
-            value: !compact && result.baseVersion ? <code>{shortChecksum(result.baseVersion)}</code> : undefined,
-          },
-        ]}
-      />
-      {result.findings.length > 0 && <WorkspaceFindingsTable findings={result.findings} />}
-      {!compact && result.details && (
-        <details className={styles.collapsible}>
-          <summary>Validation details</summary>
-          <pre className={styles.queryBlock}>{formatJson(result.details)}</pre>
-        </details>
-      )}
+    <div className={styles.notice}>
+      <strong>staged</strong>
+      <span>Local working copy only. Grafana is unchanged until the change is planned and applied.</span>
     </div>
   );
-}
-
-function workspaceValidationResultFromRecord(record: Record<string, unknown>): WorkspaceValidationResult {
-  return {
-    status: stringField(record, 'status') ?? 'unknown',
-    summary: stringField(record, 'summary'),
-    workspaceId: stringField(record, 'workspaceId'),
-    baseVersion: stringField(record, 'baseVersion'),
-    checkedAt: stringField(record, 'checkedAt'),
-    findings: recordsField(record, 'findings').map((finding) => ({
-      severity: stringField(finding, 'severity') ?? 'info',
-      message: stringField(finding, 'message') ?? '',
-      sourcePath: stringField(finding, 'sourcePath'),
-      line: numberField(finding, 'line'),
-    })),
-    details: recordField(record, 'details'),
-  };
-}
-
-type WorkspaceDiffResult = {
-  status: string;
-  workspaceId?: string;
-  baseVersion?: string;
-  savedVersion?: string;
-  changedFiles: WorkspaceChangedFile[];
-  validation?: WorkspaceValidationResult;
-  audit?: Record<string, unknown>;
-  diff?: string;
-};
-
-function WorkspaceDiffResultView({ result }: { result: WorkspaceDiffResult }) {
-  const styles = useStyles2(getToolStyles);
-  const hasDiff = Boolean(result.diff);
-  return (
-    <div className={styles.structuredResult}>
-      {hasDiff ? (
-        result.diff && <DiffViewer defaultOpen diff={result.diff} />
-      ) : (
-        <>
-          <ResultMetaGrid
-            items={[
-              { label: 'Status', value: <WorkspaceStatusBadge status={result.status} /> },
-              { label: 'Changed files', value: formatCount(result.changedFiles.length) },
-            ]}
-          />
-          {result.changedFiles.length > 0 ? (
-            <WorkspaceChangedFilesView files={result.changedFiles} />
-          ) : (
-            <div className={styles.emptyState}>No workspace changes.</div>
-          )}
-        </>
-      )}
-      {result.validation && <WorkspaceValidationResultView result={result.validation} compact />}
-    </div>
-  );
-}
-
-function WorkspaceSaveResultView({ result }: { result: WorkspaceDiffResult }) {
-  const styles = useStyles2(getToolStyles);
-  const hasDiff = Boolean(result.diff);
-  return (
-    <div className={styles.structuredResult}>
-      {hasDiff ? (
-        result.diff && <DiffViewer defaultOpen diff={result.diff} />
-      ) : (
-        <>
-          <ResultMetaGrid
-            items={[
-              { label: 'Status', value: <WorkspaceStatusBadge status={result.status} /> },
-              { label: 'Changed files', value: formatCount(result.changedFiles.length) },
-            ]}
-          />
-          {result.changedFiles.length > 0 && <WorkspaceChangedFilesView files={result.changedFiles} />}
-        </>
-      )}
-      {result.validation && <WorkspaceValidationResultView result={result.validation} compact />}
-      {result.audit && (
-        <details className={styles.collapsible}>
-          <summary>Audit</summary>
-          <pre className={styles.queryBlock}>{formatJson(result.audit)}</pre>
-        </details>
-      )}
-    </div>
-  );
-}
-
-function workspaceDiffResultFromRecord(record: Record<string, unknown>): WorkspaceDiffResult {
-  const validation = recordField(record, 'validation');
-  return {
-    status: stringField(record, 'status') ?? 'unknown',
-    workspaceId: stringField(record, 'workspaceId'),
-    baseVersion: stringField(record, 'baseVersion'),
-    savedVersion: stringField(record, 'savedVersion'),
-    changedFiles: recordsField(record, 'changedFiles').map(workspaceChangedFileFromRecord),
-    validation: validation ? workspaceValidationResultFromRecord(validation) : undefined,
-    audit: recordField(record, 'audit'),
-    diff: stringField(record, 'diff'),
-  };
 }
 
 type WorkspaceBashResult = {
@@ -4706,8 +2473,16 @@ type WorkspaceBashResult = {
   stdoutTruncated?: boolean;
   stderrTruncated?: boolean;
   timedOut?: boolean;
-  changedFiles: WorkspaceChangedFile[];
-  pendingChanges: WorkspacePendingChange[];
+  durationMs?: number;
+  changes: WorkspaceFileChange[];
+  discardedChanges?: string;
+};
+
+type WorkspaceFileChange = {
+  path: string;
+  change: string;
+  bytes?: number;
+  revision?: string;
 };
 
 function WorkspaceBashResultView({ result }: { result: WorkspaceBashResult }) {
@@ -4719,12 +2494,17 @@ function WorkspaceBashResultView({ result }: { result: WorkspaceBashResult }) {
         items={[
           { label: 'Status', value: <WorkspaceStatusBadge status={status} /> },
           { label: 'Exit code', value: result.exitCode === undefined ? undefined : String(result.exitCode) },
+          { label: 'Duration', value: formatDurationMs(result.durationMs) },
           { label: 'CWD', value: result.cwd ? <code>{result.cwd}</code> : undefined },
-          { label: 'Changed files', value: formatCount(result.changedFiles.length) },
-          { label: 'Pending', value: formatCount(result.pendingChanges.length) },
         ]}
       />
       <pre className={styles.queryBlock}>{result.command}</pre>
+      {result.discardedChanges && (
+        <div className={styles.notice}>
+          <strong>discarded</strong>
+          <span>File changes from this command were discarded: {result.discardedChanges}</span>
+        </div>
+      )}
       {result.stdout && (
         <details className={styles.collapsible} open>
           <summary>stdout{result.stdoutTruncated ? ' | truncated' : ''}</summary>
@@ -4732,13 +2512,12 @@ function WorkspaceBashResultView({ result }: { result: WorkspaceBashResult }) {
         </details>
       )}
       {result.stderr && (
-        <details className={styles.collapsible} open={result.exitCode !== 0}>
+        <details className={styles.collapsible} open={status !== 'completed'}>
           <summary>stderr{result.stderrTruncated ? ' | truncated' : ''}</summary>
           <pre className={styles.queryBlock}>{result.stderr}</pre>
         </details>
       )}
-      {result.changedFiles.length > 0 && <WorkspaceChangedFilesView files={result.changedFiles} />}
-      {result.pendingChanges.length > 0 && <WorkspacePendingChangesView changes={result.pendingChanges} />}
+      {result.changes.length > 0 && <WorkspaceFileChangesTable changes={result.changes} />}
     </div>
   );
 }
@@ -4753,52 +2532,18 @@ function workspaceBashResultFromRecord(record: Record<string, unknown>): Workspa
     stdoutTruncated: booleanField(record, 'stdoutTruncated'),
     stderrTruncated: booleanField(record, 'stderrTruncated'),
     timedOut: booleanField(record, 'timedOut'),
-    changedFiles: recordsField(record, 'changedFiles').map(workspaceChangedFileFromRecord),
-    pendingChanges: recordsField(record, 'pendingChanges').map(workspacePendingChangeFromRecord),
+    durationMs: numberField(record, 'durationMs'),
+    changes: recordsField(record, 'changes').map((change) => ({
+      path: stringField(change, 'path') ?? '-',
+      change: stringField(change, 'change') ?? 'modified',
+      bytes: numberField(change, 'bytes'),
+      revision: stringField(change, 'revision'),
+    })),
+    discardedChanges: stringField(record, 'discardedChanges'),
   };
 }
 
-function WorkspaceFileTable({ files, title }: { files: WorkspaceFileRef[]; title?: string }) {
-  const styles = useStyles2(getToolStyles);
-  if (files.length === 0) {
-    return <div className={styles.emptyState}>{title ? `${title}: none` : 'No files.'}</div>;
-  }
-
-  return (
-    <div className={styles.tableWrap}>
-      <table className={cx(styles.dataTable, styles.wideTable)}>
-        <thead>
-          <tr>
-            <th>{title ?? 'Path'}</th>
-            <th>Type</th>
-            <th>Layer</th>
-            <th>Language</th>
-            <th>Version</th>
-          </tr>
-        </thead>
-        <tbody>
-          {files.map((file, index) => (
-            <tr key={`${file.path}:${index}`}>
-              <td className={styles.monospace}>{file.path}</td>
-              <td>{file.type ?? (file.readOnly ? 'read-only' : 'file')}</td>
-              <td>{file.layer ?? <span className={styles.muted}>-</span>}</td>
-              <td>{file.language ?? <span className={styles.muted}>-</span>}</td>
-              <td className={styles.monospace}>
-                {(file.version ?? file.checksum) ? (
-                  shortChecksum(file.version ?? file.checksum ?? '')
-                ) : (
-                  <span className={styles.muted}>-</span>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function WorkspaceChangedFilesView({ files }: { files: WorkspaceChangedFile[] }) {
+function WorkspaceFileChangesTable({ changes }: { changes: WorkspaceFileChange[] }) {
   const styles = useStyles2(getToolStyles);
   return (
     <div className={styles.tableWrap}>
@@ -4806,81 +2551,26 @@ function WorkspaceChangedFilesView({ files }: { files: WorkspaceChangedFile[] })
         <thead>
           <tr>
             <th>File</th>
-            <th>Changed</th>
+            <th>Change</th>
             <th>Size</th>
+            <th>Revision</th>
           </tr>
         </thead>
         <tbody>
-          {files.map((file, index) => (
-            <tr key={`${file.path}:${index}`}>
-              <td className={styles.monospace}>{file.path}</td>
-              <td>{workspaceChangedFileSummary(file)}</td>
-              <td>{workspaceBytesSummary(file)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function WorkspacePendingChangesView({ changes }: { changes: WorkspacePendingChange[] }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <details className={styles.collapsible} open={changes.length <= 3}>
-      <summary>Pending changes</summary>
-      <div className={styles.tableWrap}>
-        <table className={cx(styles.dataTable, styles.wideTable)}>
-          <thead>
-            <tr>
-              <th>File</th>
-              <th>Size</th>
-              <th>Checksum</th>
-              <th>Base</th>
-            </tr>
-          </thead>
-          <tbody>
-            {changes.map((change, index) => (
-              <tr key={`${change.path}:${index}`}>
-                <td className={styles.monospace}>{change.path}</td>
-                <td>{workspaceBytesSummary(change)}</td>
-                <td className={styles.monospace}>
-                  {change.checksum ? shortChecksum(change.checksum) : <span className={styles.muted}>-</span>}
-                </td>
-                <td className={styles.monospace}>
-                  {change.baseVersion ? shortChecksum(change.baseVersion) : <span className={styles.muted}>-</span>}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </details>
-  );
-}
-
-function WorkspaceFindingsTable({ findings }: { findings: WorkspaceFinding[] }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.tableWrap}>
-      <table className={cx(styles.dataTable, styles.wideTable)}>
-        <thead>
-          <tr>
-            <th>Severity</th>
-            <th>Source</th>
-            <th>Line</th>
-            <th>Message</th>
-          </tr>
-        </thead>
-        <tbody>
-          {findings.map((finding, index) => (
-            <tr key={`${finding.sourcePath ?? 'finding'}:${finding.line ?? index}:${index}`}>
+          {changes.map((change, index) => (
+            <tr key={`${change.path}:${index}`}>
+              <td className={styles.monospace}>{change.path}</td>
               <td>
-                <WorkspaceStatusBadge status={finding.severity} />
+                {change.change}
+                {isWorkspaceStagedPath(change.path) && (
+                  <>
+                    {' '}
+                    <Badge text="staged" color="blue" />
+                  </>
+                )}
               </td>
-              <td className={styles.monospace}>{finding.sourcePath ?? <span className={styles.muted}>-</span>}</td>
-              <td>{finding.line ?? <span className={styles.muted}>-</span>}</td>
-              <td>{finding.message}</td>
+              <td>{formatBytes(change.bytes) ?? <span className={styles.muted}>-</span>}</td>
+              <td className={styles.monospace}>{change.revision ?? <span className={styles.muted}>-</span>}</td>
             </tr>
           ))}
         </tbody>
@@ -4890,363 +2580,22 @@ function WorkspaceFindingsTable({ findings }: { findings: WorkspaceFinding[] }) 
 }
 
 function WorkspaceStatusBadge({ status }: { status: string }) {
-  const normalized = status.toLowerCase();
   const color: BadgeColor =
-    normalized === 'valid' || normalized === 'saved' || normalized === 'completed'
-      ? 'green'
-      : normalized === 'warning' || normalized === 'changed'
-        ? 'orange'
-        : normalized === 'error' || normalized === 'failed' || normalized === 'timed out'
-          ? 'red'
-          : 'blue';
+    status === 'completed' ? 'green' : status === 'failed' || status === 'timed out' ? 'red' : 'blue';
   return <Badge text={status} color={color} />;
 }
 
-function workspaceFileRefFromRecord(record: Record<string, unknown>): WorkspaceFileRef {
-  return {
-    name: stringField(record, 'name'),
-    path: stringField(record, 'path') ?? stringField(record, 'name') ?? '-',
-    type: stringField(record, 'type'),
-    layer: stringField(record, 'layer'),
-    language: stringField(record, 'language'),
-    version: stringField(record, 'version'),
-    checksum: stringField(record, 'checksum'),
-    readOnly: booleanField(record, 'readOnly'),
-  };
-}
-
-function workspaceSchemaRefFromRecord(record: Record<string, unknown>): WorkspaceFileRef {
-  return {
-    path: stringField(record, 'path') ?? stringField(record, 'schemaId') ?? '-',
-    type: 'schema',
-    language: stringField(record, 'language'),
-    version: stringField(record, 'schemaId'),
-    checksum: stringField(record, 'checksum'),
-    readOnly: true,
-  };
-}
-
-function workspacePendingChangeFromRecord(record: Record<string, unknown>): WorkspacePendingChange {
-  return {
-    path: stringField(record, 'path') ?? '-',
-    baseVersion: stringField(record, 'baseVersion'),
-    checksum: stringField(record, 'checksum'),
-    previousBytes: numberField(record, 'previousBytes'),
-    currentBytes: numberField(record, 'currentBytes') ?? numberField(record, 'bytes'),
-  };
-}
-
-function workspaceChangedFileFromRecord(record: Record<string, unknown>): WorkspaceChangedFile {
-  return {
-    ...workspacePendingChangeFromRecord(record),
-    addedLines: numberField(record, 'addedLines'),
-    removedLines: numberField(record, 'removedLines'),
-    firstChangedLine: numberField(record, 'firstChangedLine'),
-  };
-}
-
-function workspaceChangedRangeFromRecord(record: Record<string, unknown>) {
-  return {
-    startLine: numberField(record, 'startLine') ?? 0,
-    endLine: numberField(record, 'endLine') ?? 0,
-    newLines: numberField(record, 'newLines') ?? 0,
-  };
-}
-
-function workspaceChangedFileSummary(file: WorkspaceChangedFile) {
-  const parts = [
-    file.addedLines !== undefined ? `+${file.addedLines}` : undefined,
-    file.removedLines !== undefined ? `-${file.removedLines}` : undefined,
-    file.firstChangedLine ? `line ${file.firstChangedLine}` : undefined,
-  ].filter(Boolean);
-  return parts.length > 0 ? parts.join(' | ') : 'changed';
-}
-
-function workspaceBytesSummary(file: WorkspacePendingChange) {
-  if (file.previousBytes !== undefined && file.currentBytes !== undefined) {
-    return `${formatBytes(file.previousBytes)} -> ${formatBytes(file.currentBytes)}`;
-  }
-  return formatBytes(file.currentBytes) ?? '-';
-}
-
-function formatWorkspaceChangedRanges(ranges: WorkspaceMutationResult['changedRanges']) {
-  const visible = ranges.filter((range) => range.startLine > 0);
-  if (visible.length === 0) {
+function formatDurationMs(value: number | undefined) {
+  if (value === undefined) {
     return undefined;
   }
-  return visible
-    .slice(0, 3)
-    .map((range) =>
-      range.endLine < range.startLine
-        ? `${range.startLine} insert`
-        : `${range.startLine}-${range.endLine || range.startLine}`
-    )
-    .join(', ');
+  return value < 1000 ? `${Math.round(value)} ms` : `${(value / 1000).toFixed(1)} s`;
 }
-
-type JsonnetSearchResult = {
-  total: number;
-  capped: boolean;
-  matches: JsonnetSearchMatch[];
-};
-
-type JsonnetSearchMatch = {
-  file: string;
-  line: number;
-  text: string;
-};
-
-function JsonnetSearchResultView({ result }: { result: JsonnetSearchResult }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.structuredResult}>
-      <div className={styles.resultSummary}>
-        {formatCount(result.total)} matches{result.capped ? ' | capped' : ''}
-      </div>
-      <div className={styles.tableWrap}>
-        <table className={cx(styles.dataTable, styles.wideTable)}>
-          <thead>
-            <tr>
-              <th>File</th>
-              <th>Line</th>
-              <th>Text</th>
-            </tr>
-          </thead>
-          <tbody>
-            {result.matches.map((match, index) => (
-              <tr key={`${match.file}:${match.line}:${index}`}>
-                <td className={styles.monospace}>{match.file}</td>
-                <td>{match.line}</td>
-                <td className={styles.codeTextCell}>{match.text}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-type JsonnetListResult = {
-  basePath: string;
-  files: string[];
-};
-
-function JsonnetListResultView({ result }: { result: JsonnetListResult }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.structuredResult}>
-      <ResultMetaGrid
-        items={[
-          { label: 'Base path', value: <code>{result.basePath}</code> },
-          { label: 'Files', value: formatCount(result.files.length) },
-        ]}
-      />
-      <div className={styles.scrollList}>
-        {result.files.map((file) => (
-          <div className={styles.listItem} key={file}>
-            {file}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-type JsonnetReadResult = {
-  path: string;
-  totalLines: number;
-  lines: CodeLine[];
-};
 
 type CodeLine = {
   line: number;
   text: string;
 };
-
-function JsonnetReadResultView({ result }: { result: JsonnetReadResult }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.structuredResult}>
-      <ResultMetaGrid
-        items={[
-          { label: 'Path', value: <code>{result.path}</code> },
-          {
-            label: 'Lines',
-            value:
-              result.lines.length > 0
-                ? `${result.lines[0].line}-${result.lines[result.lines.length - 1].line} of ${result.totalLines}`
-                : undefined,
-          },
-        ]}
-      />
-      <CodeViewer lines={result.lines} />
-    </div>
-  );
-}
-
-type JsonnetFileResult = {
-  action?: string;
-  path: string;
-  version?: number;
-  checksum?: string;
-  lineCount?: number;
-  dashboardJsonnetSize?: number;
-  changedRanges: Array<{ startLine: number; endLine: number; newLines: number }>;
-  diff?: string;
-  firstChangedLine?: number;
-  totalLines?: number;
-  lines: CodeLine[];
-  repairs?: string[];
-};
-
-function JsonnetFileResultView({ result }: { result: JsonnetFileResult }) {
-  const styles = useStyles2(getToolStyles);
-  const range =
-    result.lines.length > 0
-      ? `${result.lines[0].line}-${result.lines[result.lines.length - 1].line} of ${result.totalLines ?? result.lineCount ?? result.lines.length}`
-      : undefined;
-
-  return (
-    <div className={styles.structuredResult}>
-      <ResultMetaGrid
-        items={[
-          { label: 'Action', value: result.action },
-          { label: 'Path', value: <code>{result.path}</code> },
-          { label: 'Version', value: result.version === undefined ? undefined : String(result.version) },
-          {
-            label: 'Lines',
-            value: range ?? (result.lineCount === undefined ? undefined : formatCount(result.lineCount)),
-          },
-          { label: 'Source', value: formatBytes(result.dashboardJsonnetSize) },
-          { label: 'Changed', value: formatChangedRanges(result.changedRanges) },
-          { label: 'Repairs', value: result.repairs?.slice(0, 2).join(', ') },
-          { label: 'Checksum', value: result.checksum ? <code>{shortChecksum(result.checksum)}</code> : undefined },
-        ]}
-      />
-      {result.lines.length > 0 && <CodeViewer lines={result.lines} />}
-      {result.diff && <DiffViewer diff={result.diff} />}
-    </div>
-  );
-}
-
-type DashboardSummaryResult = {
-  title: string;
-  uid?: string;
-  url?: string;
-  folder?: string;
-  tags: string[];
-  sourceChecksum?: string;
-  sourceBytes?: number;
-  panels: DashboardPanelSummary[];
-};
-
-type DashboardPanelSummary = {
-  id?: string;
-  title: string;
-  type: string;
-};
-
-function DashboardSummaryView({ result }: { result: DashboardSummaryResult }) {
-  const styles = useStyles2(getToolStyles);
-  const typeCounts = countBy(result.panels.map((panel) => panel.type || 'unknown'));
-  return (
-    <div className={styles.structuredResult}>
-      <ResultMetaGrid
-        items={[
-          { label: 'Title', value: result.title },
-          { label: 'UID', value: result.uid ? <code>{result.uid}</code> : undefined },
-          { label: 'Folder', value: result.folder },
-          { label: 'Panels', value: formatCount(result.panels.length) },
-          { label: 'Source', value: result.sourceBytes ? formatBytes(result.sourceBytes) : undefined },
-          {
-            label: 'Checksum',
-            value: result.sourceChecksum ? <code>{shortChecksum(result.sourceChecksum)}</code> : undefined,
-          },
-          { label: 'Open', value: result.url ? <ExternalLink href={result.url}>Open</ExternalLink> : undefined },
-        ]}
-      />
-      {result.tags.length > 0 && <StringChips values={result.tags} />}
-      {typeCounts.length > 0 && (
-        <div className={styles.chipList}>
-          {typeCounts.map(({ key, count }) => (
-            <span className={styles.chip} key={key}>
-              {key}: {count}
-            </span>
-          ))}
-        </div>
-      )}
-      {result.panels.length > 0 && (
-        <details className={styles.collapsible}>
-          <summary>Panels</summary>
-          <div className={styles.tableWrap}>
-            <table className={styles.dataTable}>
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>Title</th>
-                  <th>Type</th>
-                </tr>
-              </thead>
-              <tbody>
-                {result.panels.slice(0, 30).map((panel, index) => (
-                  <tr key={`${panel.id ?? index}:${panel.title}`}>
-                    <td>{panel.id ?? <span className={styles.muted}>-</span>}</td>
-                    <td>{panel.title}</td>
-                    <td>{panel.type}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </details>
-      )}
-    </div>
-  );
-}
-
-function DashboardActionView({
-  action,
-  onOpenDashboard,
-}: {
-  action: DashboardAction;
-  onOpenDashboard?: DashboardOpenHandler;
-}) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.actionCard}>
-      <div className={styles.actionTitle}>{action.title}</div>
-      <ResultMetaGrid
-        items={[
-          { label: 'Status', value: action.status },
-          { label: 'UID', value: action.uid ? <code>{action.uid}</code> : undefined },
-          {
-            label: 'Source',
-            value: action.sourceChecksum ? <code>{shortChecksum(action.sourceChecksum)}</code> : undefined,
-          },
-          {
-            label: 'Open',
-            value: action.url ? (
-              onOpenDashboard ? (
-                <Button
-                  icon="external-link-alt"
-                  size="sm"
-                  type="button"
-                  variant="secondary"
-                  onClick={() => onOpenDashboard(action)}
-                >
-                  Open dashboard
-                </Button>
-              ) : (
-                <ExternalLink href={action.url}>Open dashboard</ExternalLink>
-              )
-            ) : undefined,
-          },
-        ]}
-      />
-    </div>
-  );
-}
 
 function ArtifactResultView({ artifact, preview }: { artifact: ArtifactRef; preview?: ArtifactPreview }) {
   const styles = useStyles2(getToolStyles);
@@ -5391,9 +2740,12 @@ function safeLinkHref(href: string): string | undefined {
 
 function CodeViewer({ lines, language = 'jsonnet' }: { lines: CodeLine[]; language?: 'jsonnet' | 'plain' }) {
   const styles = useStyles2(getToolStyles);
+  // Result views re-parse tool text on every render, so key highlighting on the line content rather than identity.
+  const contentKey = lines.map((line) => line.text).join('\n');
   const highlighted = useMemo(
     () => (language === 'jsonnet' && shouldHighlightJsonnet(lines) ? highlightJsonnetLines(lines) : undefined),
-    [language, lines]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [language, contentKey]
   );
   return (
     <pre className={styles.codeViewer}>
@@ -5612,39 +2964,6 @@ function isDiffBoundaryLine(line: string) {
   return line.startsWith('@@') || line.startsWith('Index:') || line.startsWith('diff ');
 }
 
-// Details come from persisted or imported sessions, so every field the
-// renderer dereferences must be normalized here rather than trusted.
-function asSubagentDetails(details: unknown): SubagentRunDetails | undefined {
-  if (!isRecord(details) || details.type !== 'subagent') {
-    return undefined;
-  }
-
-  const usage = isRecord(details.usage) ? details.usage : {};
-  const toolCalls = Array.isArray(details.toolCalls) ? details.toolCalls.filter(isRecord) : [];
-  return {
-    ...details,
-    type: 'subagent',
-    agent: typeof details.agent === 'string' ? details.agent : 'specialist',
-    status: typeof details.status === 'string' ? details.status : 'completed',
-    task: typeof details.task === 'string' ? details.task : '',
-    toolCalls: toolCalls.map((call, index) => ({
-      ...call,
-      id: typeof call.id === 'string' && call.id ? call.id : `call-${index + 1}`,
-      name: typeof call.name === 'string' && call.name ? call.name : 'tool',
-      status: typeof call.status === 'string' ? call.status : 'completed',
-    })),
-    usage: {
-      turns: numberField(usage, 'turns') ?? 0,
-      input: numberField(usage, 'input') ?? 0,
-      output: numberField(usage, 'output') ?? 0,
-      cacheRead: numberField(usage, 'cacheRead') ?? 0,
-      cacheWrite: numberField(usage, 'cacheWrite') ?? 0,
-      totalTokens: numberField(usage, 'totalTokens') ?? 0,
-      cost: numberField(usage, 'cost') ?? 0,
-    },
-  } as SubagentRunDetails;
-}
-
 function asArtifactResult(details: unknown): { ref: ArtifactRef; preview?: ArtifactPreview } | undefined {
   if (!isRecord(details)) {
     return undefined;
@@ -5724,561 +3043,6 @@ function isArtifactReadResult(toolName: string | undefined, details: unknown) {
   return toolName === 'read_artifact' || (isRecord(details) && details.artifactRead === true);
 }
 
-function asDatasourceResult(
-  toolName: string | undefined,
-  details: unknown,
-  content: unknown
-): DatasourceResult[] | undefined {
-  if (toolName !== 'list_datasources' && toolName !== 'grafana_get_datasources') {
-    return undefined;
-  }
-
-  const detailsDatasources = isRecord(details) ? asDatasourceArray(details.datasources) : undefined;
-  if (detailsDatasources) {
-    return detailsDatasources;
-  }
-
-  const contentText = getSingleTextContent(content);
-  if (!contentText) {
-    return undefined;
-  }
-
-  try {
-    return asDatasourceArray(JSON.parse(contentText));
-  } catch {
-    return undefined;
-  }
-}
-
-function asDatasourceArray(value: unknown): DatasourceResult[] | undefined {
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-
-  const datasources = value.map(asDatasource);
-  return datasources.every(Boolean) ? (datasources as DatasourceResult[]) : undefined;
-}
-
-function asDatasource(value: unknown): DatasourceResult | undefined {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-
-  const { name, uid, type, isDefault } = value;
-  if (typeof name !== 'string' || typeof uid !== 'string' || typeof type !== 'string') {
-    return undefined;
-  }
-
-  return {
-    name,
-    uid,
-    type,
-    isDefault: Boolean(isDefault),
-  };
-}
-
-function asLineListResult(
-  toolName: string | undefined,
-  details: unknown,
-  content: unknown
-): LineListResult | undefined {
-  if (toolName !== 'list_metrics' && toolName !== 'list_label_values') {
-    return undefined;
-  }
-
-  const contentText = getSingleTextContent(content);
-  if (contentText === undefined) {
-    return undefined;
-  }
-
-  const detailRecord = isRecord(details) ? details : {};
-  const items = contentText
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith('... '));
-
-  return {
-    title:
-      toolName === 'list_metrics'
-        ? 'Metrics'
-        : `Label values${typeof detailRecord.label === 'string' ? `: ${detailRecord.label}` : ''}`,
-    datasourceUid: stringField(detailRecord, 'datasourceUid'),
-    count: numberField(detailRecord, 'count'),
-    truncated: booleanField(detailRecord, 'truncated'),
-    items,
-  };
-}
-
-function asLineListBatchResult(
-  toolName: string | undefined,
-  details: unknown,
-  content: unknown
-): LineListBatchResult | undefined {
-  if (toolName !== 'list_metrics') {
-    return undefined;
-  }
-
-  const detailRecord = isRecord(details) ? details : {};
-  const record = parseJsonRecord(content);
-  const groups = record ? recordsField(record, 'results').map(metricListBatchGroupFromRecord) : [];
-  if (record && groups.length > 0) {
-    const groupCount = numberField(record, 'prefixCount') ?? groups.length;
-    const totalCount = numberField(detailRecord, 'count') ?? groups.reduce((sum, group) => sum + group.count, 0);
-
-    return {
-      groupLabel: 'metric prefix',
-      groupLabelPlural: 'metric prefixes',
-      groupIndexLabel: 'Prefix',
-      itemLabel: 'metric',
-      itemLabelPlural: 'metrics',
-      datasourceUid: stringField(record, 'datasourceUid') ?? stringField(detailRecord, 'datasourceUid'),
-      groupCount,
-      totalCount,
-      truncated: booleanField(detailRecord, 'truncated') ?? groups.some((group) => group.truncated),
-      groups,
-      contentAvailable: true,
-    };
-  }
-
-  // Batch content over the truncation limit does not parse as JSON. Fall back
-  // to the batch details so the truncated JSON is never rendered line-by-line
-  // as metric names by the single-list view.
-  if (booleanField(detailRecord, 'batch') !== true) {
-    return undefined;
-  }
-
-  const prefixes = stringArrayField(detailRecord, 'prefixes') ?? [];
-  const totalCount = numberField(detailRecord, 'count');
-  if (prefixes.length === 0 && totalCount === undefined) {
-    return undefined;
-  }
-
-  return {
-    groupLabel: 'metric prefix',
-    groupLabelPlural: 'metric prefixes',
-    groupIndexLabel: 'Prefix',
-    itemLabel: 'metric',
-    itemLabelPlural: 'metrics',
-    datasourceUid: stringField(detailRecord, 'datasourceUid'),
-    groupCount: prefixes.length,
-    totalCount: totalCount ?? 0,
-    truncated: booleanField(detailRecord, 'truncated') ?? false,
-    groups: [],
-    contentAvailable: false,
-  };
-}
-
-function metricListBatchGroupFromRecord(record: Record<string, unknown>): LineListBatchGroup {
-  const prefix = stringField(record, 'prefix');
-  const metrics = stringArrayField(record, 'metrics') ?? [];
-  return {
-    label: prefix ? `prefix ${prefix}` : 'all metrics',
-    count: numberField(record, 'count') ?? metrics.length,
-    truncated: booleanField(record, 'truncated') ?? false,
-    items: metrics,
-  };
-}
-
-function asMetricSeriesInspection(
-  toolName: string | undefined,
-  details: unknown,
-  content: unknown
-): MetricSeriesInspection | undefined {
-  if (toolName !== 'inspect_metric_series') {
-    return undefined;
-  }
-
-  const record = isRecord(details) ? details : parseJsonRecord(content);
-  if (!record) {
-    return undefined;
-  }
-
-  return metricSeriesInspectionFromRecord(record);
-}
-
-function asMetricSeriesInspectionBatch(
-  toolName: string | undefined,
-  details: unknown,
-  content: unknown
-): MetricSeriesInspectionBatch | undefined {
-  if (toolName !== 'inspect_metric_series') {
-    return undefined;
-  }
-
-  const record = parseJsonRecord(content);
-  if (record) {
-    const resultRecords = recordsField(record, 'results');
-    const matchCount = numberField(record, 'matchCount');
-    if (matchCount !== undefined && resultRecords.length > 0) {
-      const results = resultRecords
-        .map(metricSeriesInspectionFromRecord)
-        .filter((result): result is MetricSeriesInspection => Boolean(result));
-      return {
-        datasourceUid: stringField(record, 'datasourceUid'),
-        matchCount,
-        truncatedMatches: booleanField(record, 'truncatedMatches') ?? false,
-        totalSeries: results.reduce((sum, result) => sum + result.totalSeries, 0),
-        results,
-        contentAvailable: true,
-      };
-    }
-  }
-
-  if (!isRecord(details) || booleanField(details, 'batch') !== true) {
-    return undefined;
-  }
-
-  const matchCount = numberField(details, 'matches') ?? numberField(details, 'matchCount');
-  if (matchCount === undefined) {
-    return undefined;
-  }
-
-  return {
-    datasourceUid: stringField(details, 'datasourceUid'),
-    matchCount,
-    truncatedMatches: booleanField(details, 'truncatedMatches') ?? false,
-    totalSeries: numberField(details, 'totalSeries') ?? 0,
-    results: [],
-    contentAvailable: false,
-  };
-}
-
-function metricSeriesInspectionFromRecord(record: Record<string, unknown>): MetricSeriesInspection | undefined {
-  const match = stringField(record, 'match');
-  const labelNames = stringArrayField(record, 'labelNames');
-  const examples = recordsField(record, 'examples').map(stringRecord);
-  if (!match || !labelNames) {
-    return undefined;
-  }
-
-  return {
-    datasourceUid: stringField(record, 'datasourceUid'),
-    match,
-    labelNames,
-    totalSeries: numberField(record, 'totalSeries') ?? examples.length,
-    truncated: booleanField(record, 'truncated') ?? false,
-    examples,
-  };
-}
-
-function asPrometheusQuerySummary(
-  toolName: string | undefined,
-  details: unknown,
-  content: unknown,
-  args?: unknown
-): PrometheusQuerySummaryView | undefined {
-  if (toolName !== 'query_prometheus') {
-    return undefined;
-  }
-
-  const record = parseToolJsonRecord(content, details);
-  if (!record) {
-    return undefined;
-  }
-
-  const summary = prometheusQuerySummaryFromRecord(record);
-  if (!summary) {
-    return undefined;
-  }
-
-  return enrichPrometheusQuerySummaryFromArgs(summary, args);
-}
-
-function asPrometheusBatchQuerySummary(
-  toolName: string | undefined,
-  details: unknown,
-  content: unknown,
-  args?: unknown
-): PrometheusBatchQuerySummaryView | undefined {
-  if (toolName !== 'query_prometheus') {
-    return undefined;
-  }
-
-  const record = parseToolJsonRecord(content, details);
-  if (record) {
-    const datasourceUid = stringField(record, 'datasourceUid');
-    const queryCount = numberField(record, 'queryCount');
-    const resultRecords = recordsField(record, 'results');
-    if (datasourceUid && queryCount !== undefined && resultRecords.length > 0) {
-      const results = resultRecords
-        .map((resultRecord) => {
-          const summary = prometheusQuerySummaryFromRecord(resultRecord, { datasourceUid });
-          return summary ? enrichPrometheusQuerySummaryFromArgs(summary, args) : undefined;
-        })
-        .filter((result): result is PrometheusQuerySummaryView => Boolean(result));
-
-      return {
-        datasourceUid,
-        queryCount,
-        truncatedQueries: booleanField(record, 'truncatedQueries') ?? false,
-        results,
-        contentAvailable: true,
-      };
-    }
-  }
-
-  if (!isRecord(details) || booleanField(details, 'batch') !== true) {
-    return undefined;
-  }
-
-  const datasourceUid = stringField(details, 'datasourceUid');
-  const queryCount = numberField(details, 'queries');
-  if (!datasourceUid || queryCount === undefined) {
-    return undefined;
-  }
-
-  return {
-    datasourceUid,
-    queryCount,
-    truncatedQueries: false,
-    results: [],
-    contentAvailable: false,
-  };
-}
-
-function prometheusQuerySummaryFromRecord(
-  record: Record<string, unknown>,
-  defaults?: { datasourceUid?: string }
-): PrometheusQuerySummaryView | undefined {
-  const datasourceUid = stringField(record, 'datasourceUid') ?? defaults?.datasourceUid;
-  const query = stringField(record, 'query');
-  const seriesRecords = recordsField(record, 'series');
-  if (!datasourceUid || !query) {
-    return undefined;
-  }
-
-  const range = recordField(record, 'range');
-  const rawRange = recordField(range, 'raw');
-  return {
-    datasourceUid,
-    query,
-    queryType: stringField(record, 'queryType') ?? 'query',
-    interval: stringField(record, 'interval') ?? '-',
-    range: range
-      ? {
-          from: stringField(range, 'from'),
-          to: stringField(range, 'to'),
-          raw: rawRange
-            ? {
-                from: stringField(rawRange, 'from'),
-                to: stringField(rawRange, 'to'),
-              }
-            : undefined,
-        }
-      : undefined,
-    frameCount: numberField(record, 'frameCount') ?? 0,
-    totalSeries: numberField(record, 'totalSeries') ?? seriesRecords.length,
-    truncatedSeries: booleanField(record, 'truncatedSeries') ?? false,
-    notices: recordsField(record, 'notices').map((notice) => ({
-      severity: stringField(notice, 'severity'),
-      text: stringField(notice, 'text'),
-    })),
-    executedQueryStrings: stringArrayField(record, 'executedQueryStrings') ?? [],
-    series: seriesRecords.map(asSeriesSummary).filter((series): series is SeriesSummaryView => Boolean(series)),
-  };
-}
-
-function enrichPrometheusQuerySummaryFromArgs(
-  summary: PrometheusQuerySummaryView,
-  args: unknown
-): PrometheusQuerySummaryView {
-  const queryArg = prometheusQueryToolCallQueryForSummary(args, summary);
-  const enriched = {
-    ...summary,
-    queryType: summary.queryType === 'query' ? (queryArg?.type ?? summary.queryType) : summary.queryType,
-    interval: summary.interval === '-' ? (queryArg?.interval ?? '1m') : summary.interval,
-  };
-
-  return {
-    ...enriched,
-    visualization:
-      prometheusTimeseriesVisualizationFromSummary(enriched) ??
-      prometheusTimeseriesVisualizationFromArgs(args, enriched),
-  };
-}
-
-function prometheusTimeseriesVisualizationFromSummary(
-  result: PrometheusQuerySummaryView
-): PrometheusTimeseriesVisualization | undefined {
-  if (result.queryType !== 'range' || !result.range?.from || !result.range.to || result.interval === '-') {
-    return undefined;
-  }
-
-  return {
-    kind: 'prometheus-timeseries',
-    datasourceUid: result.datasourceUid,
-    query: result.query,
-    interval: result.interval,
-    range: {
-      from: result.range.from,
-      to: result.range.to,
-      raw: result.range.raw,
-    },
-  };
-}
-
-function prometheusTimeseriesVisualizationFromArgs(
-  args: unknown,
-  result: PrometheusQuerySummaryView
-): PrometheusTimeseriesVisualization | undefined {
-  const queryArg = prometheusQueryToolCallQueryForSummary(args, result);
-  if (!queryArg) {
-    return undefined;
-  }
-
-  const range = prometheusVisualizationRangeFromQueryArg(queryArg, result);
-  const interval = queryArg.interval ?? (result.interval !== '-' ? result.interval : '1m');
-
-  return {
-    kind: 'prometheus-timeseries',
-    datasourceUid: result.datasourceUid,
-    query: result.query,
-    interval,
-    range,
-  };
-}
-
-function prometheusQueryToolCallQueryForSummary(
-  args: unknown,
-  result: PrometheusQuerySummaryView
-): PrometheusQueryToolCallQuery | undefined {
-  const call = prometheusQueryToolCallFromArgs(args, false);
-  if (!call) {
-    return undefined;
-  }
-
-  return (
-    call.queries.find((query) => query.query === result.query) ??
-    (call.queries.length === 1 ? call.queries[0] : undefined)
-  );
-}
-
-function prometheusVisualizationRangeFromQueryArg(
-  query: PrometheusQueryToolCallQuery,
-  result: PrometheusQuerySummaryView
-): PrometheusTimeseriesVisualization['range'] {
-  if (query.start && query.end) {
-    return {
-      from: query.start,
-      to: query.end,
-      raw: { from: query.start, to: query.end },
-    };
-  }
-  if (result.range?.from && result.range.to) {
-    return {
-      from: result.range.from,
-      to: result.range.to,
-      raw: result.range.raw,
-    };
-  }
-
-  const latestTime = latestPrometheusSummaryTime(result);
-  if (latestTime) {
-    return {
-      from: new Date(latestTime.getTime() - 6 * 60 * 60 * 1000).toISOString(),
-      to: latestTime.toISOString(),
-    };
-  }
-
-  return {
-    from: 'now-6h',
-    to: 'now',
-    raw: { from: 'now-6h', to: 'now' },
-  };
-}
-
-function latestPrometheusSummaryTime(result: PrometheusQuerySummaryView): Date | undefined {
-  const times = result.series
-    .flatMap((series) => [series.last?.time, series.min?.time, series.max?.time])
-    .filter((time): time is string => Boolean(time))
-    .map((time) => new Date(time))
-    .filter((time) => Number.isFinite(time.getTime()));
-
-  return times.reduce<Date | undefined>(
-    (latest, time) => (!latest || time.getTime() > latest.getTime() ? time : latest),
-    undefined
-  );
-}
-
-function asPrometheusTimeseriesVisualization(
-  toolName: string | undefined,
-  details: unknown
-): PrometheusTimeseriesVisualization | undefined {
-  if (toolName !== 'query_prometheus' || !isRecord(details)) {
-    return undefined;
-  }
-
-  const visualization = recordField(details, 'visualization');
-  if (stringField(visualization, 'kind') !== 'prometheus-timeseries') {
-    return undefined;
-  }
-
-  const datasourceUid = stringField(visualization, 'datasourceUid');
-  const query = stringField(visualization, 'query');
-  const interval = stringField(visualization, 'interval');
-  const queryType = stringField(visualization, 'queryType');
-  const range = recordField(visualization, 'range');
-  const rawRange = recordField(range, 'raw');
-  const from = stringField(range, 'from');
-  const to = stringField(range, 'to');
-
-  if (!datasourceUid || !query || !interval || queryType !== 'range' || !from || !to) {
-    return undefined;
-  }
-
-  return {
-    kind: 'prometheus-timeseries',
-    datasourceUid,
-    query,
-    interval,
-    maxDataPoints: numberField(visualization, 'maxDataPoints'),
-    range: {
-      from,
-      to,
-      raw: rawRange
-        ? {
-            from: stringField(rawRange, 'from'),
-            to: stringField(rawRange, 'to'),
-          }
-        : undefined,
-    },
-  };
-}
-
-function asSeriesSummary(record: Record<string, unknown>): SeriesSummaryView | undefined {
-  const name = stringField(record, 'name');
-  if (!name) {
-    return undefined;
-  }
-
-  return {
-    name,
-    labels: stringRecord(recordField(record, 'labels')),
-    points: numberField(record, 'points') ?? 0,
-    nonNullPoints: numberField(record, 'nonNullPoints') ?? 0,
-    nullPoints: numberField(record, 'nullPoints') ?? 0,
-    last: pointField(record, 'last'),
-    min: pointField(record, 'min'),
-    max: pointField(record, 'max'),
-    mean: numberField(record, 'mean'),
-    delta: numberField(record, 'delta'),
-    deltaPercent: numberField(record, 'deltaPercent'),
-  };
-}
-
-function asRawPrometheusQuery(toolName: string | undefined, details: unknown): RawPrometheusQueryResult | undefined {
-  if (toolName !== 'query_prometheus_raw' || !isRecord(details)) {
-    return undefined;
-  }
-
-  return {
-    datasourceUid: stringField(details, 'datasourceUid'),
-    query: stringField(details, 'query'),
-    interval: stringField(details, 'interval'),
-    frames: numberField(details, 'frames'),
-  };
-}
-
 function asScreenshotResult(toolName: string | undefined, details: unknown): ScreenshotResult | undefined {
   if (toolName !== 'screenshot_dashboard' && toolName !== 'grafana_screenshot') {
     return undefined;
@@ -6292,30 +3056,6 @@ function asScreenshotResult(toolName: string | undefined, details: unknown): Scr
     panelId: numberField(details, 'panelId'),
     width: numberField(details, 'width'),
     height: numberField(details, 'height'),
-  };
-}
-
-function asSkillResourceReadResult(
-  toolName: string | undefined,
-  details: unknown,
-  content: unknown
-): SkillResourceReadResult | undefined {
-  if (toolName !== 'read_skill_resource' || !isRecord(details)) {
-    return undefined;
-  }
-
-  const skill = stringField(details, 'skill');
-  const path = stringField(details, 'path');
-  if (!skill || !path) {
-    return undefined;
-  }
-
-  return {
-    skill,
-    path,
-    bytes: numberField(details, 'bytes'),
-    truncated: booleanField(details, 'truncated'),
-    text: extractToolText(content),
   };
 }
 
@@ -6403,256 +3143,6 @@ function asLiveDashboardMutationResult(
   };
 }
 
-function asDashboardList(
-  toolName: string | undefined,
-  details: unknown,
-  content: unknown
-): DashboardListResult | undefined {
-  if (toolName !== 'list_dashboards' && toolName !== 'grafana_list_dashboards') {
-    return undefined;
-  }
-
-  const dashboards = parseToolJsonArray(content, details)
-    ?.map(asDashboardListItem)
-    .filter((item): item is DashboardListItem => Boolean(item));
-  return dashboards ? { dashboards } : undefined;
-}
-
-function asDashboardListItem(record: unknown): DashboardListItem | undefined {
-  if (!isRecord(record)) {
-    return undefined;
-  }
-  const title = stringField(record, 'title');
-  const uid = stringField(record, 'uid');
-  if (!title || !uid) {
-    return undefined;
-  }
-  return {
-    title,
-    uid,
-    url: stringField(record, 'url'),
-    folderTitle: stringField(record, 'folderTitle'),
-    folderUid: stringField(record, 'folderUid'),
-  };
-}
-
-function asJsonnetSearchResult(toolName: string | undefined, content: unknown): JsonnetSearchResult | undefined {
-  if (toolName !== 'search_grafonnet' && toolName !== 'search_jsonnet_libs') {
-    return undefined;
-  }
-
-  const record = parseJsonRecord(content);
-  if (!record) {
-    return undefined;
-  }
-
-  const matches = recordsField(record, 'result')
-    .map(asJsonnetSearchMatch)
-    .filter((match): match is JsonnetSearchMatch => Boolean(match));
-  return {
-    total: numberField(record, 'total') ?? matches.length,
-    capped: booleanField(record, 'capped') ?? false,
-    matches,
-  };
-}
-
-function asJsonnetSearchMatch(record: Record<string, unknown>): JsonnetSearchMatch | undefined {
-  const file = stringField(record, 'file');
-  const line = numberField(record, 'line');
-  const text = stringField(record, 'text');
-  return file && line !== undefined && text !== undefined ? { file, line, text } : undefined;
-}
-
-function asJsonnetListResult(toolName: string | undefined, content: unknown): JsonnetListResult | undefined {
-  if (toolName !== 'list_grafonnet' && toolName !== 'list_jsonnet_libs') {
-    return undefined;
-  }
-
-  const record = parseJsonRecord(content);
-  const files = record ? stringArrayField(record, 'result') : undefined;
-  const basePath = record ? stringField(record, 'basePath') : undefined;
-  return record && files && basePath ? { basePath, files } : undefined;
-}
-
-function asJsonnetReadResult(toolName: string | undefined, content: unknown): JsonnetReadResult | undefined {
-  if (toolName !== 'read_grafonnet' && toolName !== 'read_jsonnet_lib') {
-    return undefined;
-  }
-
-  const record = parseJsonRecord(content);
-  if (!record) {
-    return undefined;
-  }
-
-  const path = stringField(record, 'path');
-  const lines = recordsField(record, 'result')
-    .map(asCodeLine)
-    .filter((line): line is CodeLine => Boolean(line));
-  if (!path) {
-    return undefined;
-  }
-
-  return {
-    path,
-    totalLines: numberField(record, 'totalLines') ?? lines.length,
-    lines,
-  };
-}
-
-function asJsonnetFileResult(
-  toolName: string | undefined,
-  details: unknown,
-  content: unknown
-): JsonnetFileResult | undefined {
-  if (
-    toolName !== 'grafana_write_jsonnet_file' &&
-    toolName !== 'grafana_edit_jsonnet_file' &&
-    toolName !== 'grafana_read_jsonnet_file' &&
-    toolName !== 'write_jsonnet' &&
-    toolName !== 'edit_jsonnet' &&
-    toolName !== 'fix_jsonnet' &&
-    toolName !== 'read_jsonnet'
-  ) {
-    return undefined;
-  }
-
-  const record = isRecord(details) ? details : parseJsonRecord(content);
-  if (!record) {
-    return undefined;
-  }
-  const path = stringField(record, 'path');
-  if (!path) {
-    return undefined;
-  }
-
-  return {
-    action: stringField(record, 'action'),
-    path,
-    version: numberField(record, 'version'),
-    checksum: stringField(record, 'checksum'),
-    lineCount: numberField(record, 'lineCount'),
-    dashboardJsonnetSize: numberField(record, 'dashboardJsonnetSize'),
-    changedRanges: recordsField(record, 'changedRanges')
-      .map((range) => ({
-        startLine: numberField(range, 'startLine') ?? 0,
-        endLine: numberField(range, 'endLine') ?? 0,
-        newLines: numberField(range, 'newLines') ?? 0,
-      }))
-      .filter((range) => range.startLine > 0),
-    diff: stringField(record, 'diff'),
-    firstChangedLine: numberField(record, 'firstChangedLine'),
-    totalLines: numberField(record, 'totalLines'),
-    repairs: stringArrayField(record, 'repairs'),
-    lines: recordsField(record, 'lines')
-      .map(asCodeLine)
-      .filter((line): line is CodeLine => Boolean(line)),
-  };
-}
-
-function asDashboardSummary(
-  toolName: string | undefined,
-  details: unknown,
-  content: unknown
-): DashboardSummaryResult | undefined {
-  if (toolName !== 'render_dashboard' && toolName !== 'get_dashboard' && toolName !== 'grafana_get_dashboard') {
-    return undefined;
-  }
-
-  const record = parseToolJsonRecord(content, details);
-  if (!record) {
-    return undefined;
-  }
-
-  const dashboard = recordField(record, 'dashboard') ?? record;
-  const meta = recordField(record, 'meta');
-  const title = stringField(dashboard, 'title');
-  if (!title) {
-    return undefined;
-  }
-
-  const detailRecord = isRecord(details) ? details : {};
-  return {
-    title,
-    uid: stringField(dashboard, 'uid') ?? stringField(detailRecord, 'uid'),
-    url: stringField(meta, 'url'),
-    folder: stringField(meta, 'folderTitle') ?? stringField(meta, 'folderUid'),
-    tags: stringArrayField(dashboard, 'tags') ?? [],
-    sourceChecksum: stringField(record, 'sourceChecksum'),
-    sourceBytes: numberField(detailRecord, 'sourceBytes'),
-    panels: panelsFromDashboard(dashboard),
-  };
-}
-
-function asDashboardAction(toolName: string | undefined, details: unknown): DashboardAction | undefined {
-  if (!isRecord(details)) {
-    return undefined;
-  }
-
-  if (toolName === 'upload_dashboard' || toolName === 'grafana_upload_dashboard') {
-    return {
-      title: 'Dashboard uploaded',
-      status: stringField(details, 'status'),
-      uid: stringField(details, 'uid'),
-      url: stringField(details, 'url'),
-    };
-  }
-
-  if (toolName === 'save_dashboard') {
-    const status = stringField(details, 'status');
-    if (!status) {
-      return undefined;
-    }
-    return {
-      title: status === 'success' || status === 'saved' ? 'Dashboard saved' : `Dashboard ${status}`,
-      status,
-      uid: stringField(details, 'uid'),
-      url: stringField(details, 'url'),
-      sourceChecksum: stringField(details, 'sourceChecksum'),
-    };
-  }
-
-  if (toolName === 'delete_dashboard' || toolName === 'grafana_delete_dashboard') {
-    return {
-      title: 'Dashboard deleted',
-      status: 'deleted',
-      uid: stringField(details, 'uid'),
-    };
-  }
-
-  return undefined;
-}
-
-function panelsFromDashboard(dashboard: Record<string, unknown>): DashboardPanelSummary[] {
-  return recordsField(dashboard, 'panels').map((panel, index) => ({
-    id: stringOrNumberField(panel, 'id'),
-    title: stringField(panel, 'title') ?? `Panel ${index + 1}`,
-    type: stringField(panel, 'type') ?? 'unknown',
-  }));
-}
-
-function asCodeLine(record: Record<string, unknown>): CodeLine | undefined {
-  const line = numberField(record, 'line');
-  const text = stringField(record, 'text');
-  return line !== undefined && text !== undefined ? { line, text } : undefined;
-}
-
-function pointField(record: Record<string, unknown>, key: string): SummaryPointView | undefined {
-  const point = recordField(record, key);
-  if (!point) {
-    return undefined;
-  }
-  const rawValue = point.value;
-  const value =
-    rawValue === null ? null : typeof rawValue === 'number' && Number.isFinite(rawValue) ? rawValue : undefined;
-  if (value === undefined) {
-    return undefined;
-  }
-  return {
-    time: stringField(point, 'time'),
-    value,
-  };
-}
-
 function getSingleTextContent(content: unknown) {
   if (!Array.isArray(content) || content.length !== 1) {
     return undefined;
@@ -6671,18 +3161,9 @@ function parseToolJsonRecord(content: unknown, details: unknown): Record<string,
   return parseJsonRecord(content) ?? artifactPreviewJsonRecord(details);
 }
 
-function parseToolJsonArray(content: unknown, details: unknown): unknown[] | undefined {
-  return parseJsonArray(content) ?? artifactPreviewJsonArray(details);
-}
-
 function artifactPreviewJsonRecord(details: unknown): Record<string, unknown> | undefined {
   const data = artifactPreviewData(details);
   return isRecord(data) ? data : undefined;
-}
-
-function artifactPreviewJsonArray(details: unknown): unknown[] | undefined {
-  const data = artifactPreviewData(details);
-  return Array.isArray(data) ? data : undefined;
 }
 
 function artifactPreviewData(details: unknown): unknown {
@@ -6692,11 +3173,6 @@ function artifactPreviewData(details: unknown): unknown {
 
   const preview = recordField(details, 'artifactPreview');
   return preview?.data;
-}
-
-function parseJsonArray(content: unknown): unknown[] | undefined {
-  const parsed = parseSingleJsonContent(content);
-  return Array.isArray(parsed) ? parsed : undefined;
 }
 
 function parseSingleJsonContent(content: unknown): unknown {
@@ -6769,17 +3245,6 @@ function hasDetails(details: unknown) {
   return Boolean(details && typeof details === 'object' && Object.keys(details as Record<string, unknown>).length > 0);
 }
 
-function formatUsage(usage: SubagentRunDetails['usage']) {
-  const parts = [`${usage.turns} turn${usage.turns === 1 ? '' : 's'}`];
-  if (usage.totalTokens > 0) {
-    parts.push(`${formatCount(usage.totalTokens)} tokens`);
-  }
-  if (usage.cost > 0) {
-    parts.push(`$${usage.cost.toFixed(4)}`);
-  }
-  return parts.join(' | ');
-}
-
 function formatCount(value: number) {
   if (value < 1000) {
     return String(value);
@@ -6822,46 +3287,6 @@ function truncateInline(value: string, maxLength: number) {
   return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
 }
 
-function formatPoint(point: SummaryPointView | undefined) {
-  return point ? formatNumber(point.value) : '-';
-}
-
-function formatDelta(delta: number | undefined, deltaPercent: number | undefined) {
-  if (delta === undefined) {
-    return '-';
-  }
-  const percent = deltaPercent === undefined ? '' : ` (${formatNumber(deltaPercent)}%)`;
-  return `${formatNumber(delta)}${percent}`;
-}
-
-function formatQueryResultSummaryMeta(result: PrometheusQuerySummaryView) {
-  const parts = [result.queryType, `${formatCount(result.totalSeries)} series`];
-  if (result.interval !== '-') {
-    parts.push(result.interval);
-  }
-  if (result.truncatedSeries) {
-    parts.push('truncated');
-  }
-  return parts.join(' | ');
-}
-
-function formatNumber(value: number | null | undefined) {
-  if (value === null || value === undefined) {
-    return '-';
-  }
-  if (value === 0) {
-    return '0';
-  }
-  const abs = Math.abs(value);
-  if (abs >= 1000000 || abs < 0.0001) {
-    return value.toExponential(3);
-  }
-  if (abs >= 1000) {
-    return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
-  }
-  return Number(value.toPrecision(5)).toString();
-}
-
 function formatBytes(value: number | undefined) {
   if (value === undefined) {
     return undefined;
@@ -6873,41 +3298,6 @@ function formatBytes(value: number | undefined) {
     return `${(value / 1024).toFixed(1)} KiB`;
   }
   return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
-function formatChangedRanges(ranges: JsonnetFileResult['changedRanges']) {
-  if (ranges.length === 0) {
-    return undefined;
-  }
-  return ranges
-    .slice(0, 3)
-    .map((range) =>
-      range.endLine < range.startLine
-        ? `${range.startLine} insert`
-        : `${range.startLine}-${range.endLine || range.startLine}`
-    )
-    .join(', ');
-}
-
-function shortChecksum(value: string) {
-  return value.length > 20 ? `${value.slice(0, 19)}...` : value;
-}
-
-function textToCodeLines(value: string): CodeLine[] {
-  return value.split('\n').map((text, index) => ({
-    line: index + 1,
-    text,
-  }));
-}
-
-function countBy(values: string[]) {
-  const counts = new Map<string, number>();
-  for (const value of values) {
-    counts.set(value, (counts.get(value) ?? 0) + 1);
-  }
-  return Array.from(counts.entries())
-    .map(([key, count]) => ({ key, count }))
-    .sort((left, right) => left.key.localeCompare(right.key));
 }
 
 function formatJson(value: unknown) {
@@ -7349,15 +3739,6 @@ const getToolStyles = (theme: GrafanaTheme2) => ({
     fontFamily: theme.typography.fontFamilyMonospace,
     fontSize: theme.typography.bodySmall.fontSize,
   }),
-  timeseriesPanel: css({
-    minHeight: 320,
-    height: 360,
-    maxWidth: '100%',
-    overflow: 'hidden',
-    border: `1px solid ${theme.colors.border.weak}`,
-    borderRadius: theme.shape.radius.default,
-    background: theme.colors.background.primary,
-  }),
   queryResultList: css({
     display: 'grid',
     gap: theme.spacing(1),
@@ -7487,27 +3868,10 @@ const getToolStyles = (theme: GrafanaTheme2) => ({
       fontSize: theme.typography.bodySmall.fontSize,
     },
   }),
-  textClip: css({
-    maxWidth: 260,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-  }),
   codeTextCell: css({
     fontFamily: theme.typography.fontFamilyMonospace,
     fontSize: theme.typography.bodySmall.fontSize,
     whiteSpace: 'pre-wrap',
-  }),
-  actionCard: css({
-    display: 'grid',
-    gap: theme.spacing(1),
-    padding: theme.spacing(1),
-    border: `1px solid ${theme.colors.success.border}`,
-    borderRadius: theme.shape.radius.default,
-    background: theme.colors.background.primary,
-  }),
-  actionTitle: css({
-    fontWeight: theme.typography.fontWeightMedium,
   }),
   externalLink: css({
     color: theme.colors.text.link,
@@ -7649,161 +4013,5 @@ const getToolStyles = (theme: GrafanaTheme2) => ({
     display: 'grid',
     gap: theme.spacing(1),
     minWidth: 0,
-  }),
-  subagent: css({
-    display: 'grid',
-    gap: theme.spacing(1),
-    minWidth: 0,
-  }),
-  subagentMeta: css({
-    display: 'flex',
-    flexWrap: 'wrap',
-    gap: theme.spacing(1),
-    color: theme.colors.text.secondary,
-    fontSize: theme.typography.bodySmall.fontSize,
-  }),
-  subagentLiveStatus: css({
-    display: 'grid',
-    gridTemplateColumns: 'auto minmax(0, 1fr)',
-    alignItems: 'center',
-    gap: theme.spacing(1),
-    minWidth: 0,
-    minHeight: theme.spacing(3),
-  }),
-  subagentLiveStatusLabel: css({
-    color: theme.colors.text.secondary,
-    fontSize: theme.typography.bodySmall.fontSize,
-    fontWeight: theme.typography.fontWeightMedium,
-    textTransform: 'uppercase',
-  }),
-  subagentLiveStatusText: css({
-    minWidth: 0,
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-    color: theme.colors.text.primary,
-    fontWeight: theme.typography.fontWeightMedium,
-  }),
-  subagentResult: css({
-    display: 'grid',
-    gap: theme.spacing(1),
-    minWidth: 0,
-    padding: theme.spacing(0.75, 1),
-    border: `1px solid ${theme.colors.border.weak}`,
-    borderRadius: theme.shape.radius.default,
-    background: theme.colors.background.primary,
-    '&[open]': {
-      borderColor: theme.colors.border.medium,
-    },
-    '&[open] summary': {
-      marginBottom: theme.spacing(0.5),
-    },
-  }),
-  subagentResultSummary: css({
-    display: 'grid',
-    gridTemplateColumns: 'auto minmax(0, 1fr)',
-    alignItems: 'center',
-    gap: theme.spacing(1),
-    minWidth: 0,
-    cursor: 'pointer',
-    color: theme.colors.text.secondary,
-    fontSize: theme.typography.bodySmall.fontSize,
-    listStyle: 'none',
-    '&::marker': {
-      content: '""',
-    },
-    '&::-webkit-details-marker': {
-      display: 'none',
-    },
-    '&:focus-visible': {
-      outline: `2px solid ${theme.colors.primary.border}`,
-      outlineOffset: theme.spacing(0.5),
-      borderRadius: theme.shape.radius.default,
-    },
-  }),
-  subagentResultSummaryText: css({
-    display: 'grid',
-    gap: theme.spacing(0.25),
-    minWidth: 0,
-  }),
-  subagentResultPreview: css({
-    display: '-webkit-box',
-    minWidth: 0,
-    overflow: 'hidden',
-    color: theme.colors.text.primary,
-    fontSize: theme.typography.body.fontSize,
-    lineHeight: theme.typography.body.lineHeight,
-    WebkitBoxOrient: 'vertical',
-    WebkitLineClamp: 3,
-  }),
-  subagentResultBody: css({
-    minWidth: 0,
-  }),
-  toolTimeline: css({
-    display: 'grid',
-    gap: theme.spacing(0.75),
-    minWidth: 0,
-  }),
-  toolHistory: css({
-    minWidth: 0,
-    '& > summary': {
-      cursor: 'pointer',
-      color: theme.colors.text.secondary,
-      fontSize: theme.typography.bodySmall.fontSize,
-      marginBottom: theme.spacing(0.75),
-    },
-  }),
-  toolStep: css({
-    minWidth: 0,
-    maxWidth: '100%',
-    padding: theme.spacing(0.75, 1),
-    borderLeft: `3px solid ${theme.colors.success.border}`,
-    background: theme.colors.background.primary,
-    '& summary': {
-      cursor: 'pointer',
-      display: 'flex',
-      alignItems: 'center',
-      gap: theme.spacing(1),
-      minWidth: 0,
-      color: theme.colors.text.secondary,
-      fontSize: theme.typography.bodySmall.fontSize,
-      '& span': {
-        flex: '0 0 auto',
-      },
-      '& strong': {
-        minWidth: 0,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-      },
-    },
-  }),
-  toolStepError: css({
-    borderLeftColor: theme.colors.error.border,
-  }),
-  toolStepBody: css({
-    display: 'grid',
-    gap: theme.spacing(1),
-    minWidth: 0,
-    marginTop: theme.spacing(1),
-  }),
-  toolStepTechnicalName: css({
-    width: 'fit-content',
-    maxWidth: '100%',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-    color: theme.colors.text.secondary,
-    fontFamily: theme.typography.fontFamilyMonospace,
-    fontSize: theme.typography.bodySmall.fontSize,
-  }),
-  toolStepResult: css({
-    minWidth: 0,
-  }),
-  toolStepResultError: css({
-    color: theme.colors.error.text,
-  }),
-  toolStepText: css({
-    marginTop: theme.spacing(1),
   }),
 });

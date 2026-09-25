@@ -12,7 +12,6 @@ export const suites = [
   ['dashboard-editing', 'agentDashboardEditingBenchmark.spec.ts', 480_000],
   ['alert-troubleshooting', 'agentAlertTroubleshootingBenchmark.spec.ts', 240_000],
   ['dashboard-metric-discovery', 'agentDashboardMetricDiscoveryBenchmark.spec.ts', 180_000],
-  ['agent-contract-sample', 'agentContractSampleBenchmark.spec.ts', 240_000],
   ['explore-metrics', 'agentExploreMetricsBenchmark.spec.ts', 150_000],
 ].map(([id, file, timeoutMs]) => ({ id, file, timeoutMs }));
 
@@ -41,8 +40,22 @@ export function validateConfig(value) {
       throw new Error(`model.${field} must be one of ${choices.join(', ')}`);
     }
   }
+  for (const field of ['contextWindow', 'maxOutputTokens']) {
+    if (config.model[field] !== undefined && (!Number.isInteger(config.model[field]) || config.model[field] <= 0)) {
+      throw new Error(`model.${field} must be a positive integer`);
+    }
+  }
   // Copy only declared fields. Credentials stay in environment variables or Pi's config.
-  const allowedModel = ['id', 'provider', 'baseUrl', 'protocol', 'thinkingLevel', 'thinkingFormat'];
+  const allowedModel = [
+    'id',
+    'provider',
+    'baseUrl',
+    'protocol',
+    'thinkingLevel',
+    'thinkingFormat',
+    'contextWindow',
+    'maxOutputTokens',
+  ];
   for (const key of Object.keys(config.model)) {
     if (!allowedModel.includes(key)) {
       throw new Error(`Unknown model field: ${key}`);

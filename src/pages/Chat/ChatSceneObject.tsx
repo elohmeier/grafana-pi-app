@@ -35,24 +35,19 @@ import {
   TextArea,
   useStyles2,
 } from '@grafana/ui';
-import { FolderPicker, getBackendSrv, locationService, usePluginUserStorage } from '@grafana/runtime';
+import { getBackendSrv, locationService, usePluginUserStorage } from '@grafana/runtime';
 import { useRestrictedGrafanaApis, type DashboardMutationAPI, type GrafanaTheme2 } from '@grafana/data';
 import { PLUGIN_BASE_URL, PLUGIN_ID } from '../../constants';
 import { testIds } from '../../components/testIds';
 import { usePluginMeta } from '../../utils/utils.plugin';
 import {
-  createGrafanaSupervisorTools,
-  createGrafanaToolsForSkillGroups,
-  createSkillTools,
+  createGrafanaTools,
   artifactByteSize,
   artifactizeToolResult,
-  normalizeJsonnetPath,
   type Artifact,
-  type DashboardSaveFolderSelection,
   type ArtifactRuntime,
   type GrafanaToolRuntime,
   type InvestigationReport,
-  type VirtualJsonnetFileSnapshot,
 } from './grafanaTools';
 import { formatAssistantError, type AssistantErrorView } from './llmErrors';
 import {
@@ -106,27 +101,27 @@ import {
   type ChatRunStatus,
 } from './streamingStatus';
 import {
-  clearDashboardSaveFolderOverride,
   getChatRun,
-  getDashboardSaveFolderOverride,
   isStoredChatRunAgent,
   removeChatRun,
   setChatRunConfirmationHandler,
-  setDashboardSaveFolderOverride,
   storeChatRun,
   type ChatRunSnapshot,
   type ChatToolConfirmationHandler,
 } from './chatRunRegistry';
+import { createSessionWorkspaceToolkit, SessionWorkspace, type PersistedWorkspace } from './workspace';
+import type { WorkspaceApprovalRequest, WorkspaceApprovalService } from './workspace/broker';
+import { createGrafanaWorkspaceBroker } from './workspace/grafanaBroker';
+import { migrateLegacyJsonnetFiles } from './workspace/migration';
 import {
-  agentWorkspaceLaunchFromSearch,
-  agentWorkspaceSessionTitle,
-  removeAgentWorkspaceLaunchParams,
-  renderAgentWorkspaceContextBlock,
-  renderAgentWorkspaceSystemPrompt,
-} from './agentWorkspace/launch';
-import { createAgentWorkspaceState } from './agentWorkspace/providerClient';
-import { createAgentWorkspaceTools } from './agentWorkspace/tools';
-import type { AgentWorkspaceLaunchPayload, AgentWorkspaceRuntime, AgentWorkspaceState } from './agentWorkspace/types';
+  buildSummarizerPrompt,
+  ContextCompactor,
+  estimateTextTokens,
+  isCompactionState,
+  SUMMARIZER_SYSTEM_PROMPT,
+  type CompactionState,
+} from './compaction';
+import { createBrowserPythonRunner } from './workspace/python/pythonBrowserRunner';
 
 type ChatSceneObjectState = SceneObjectState;
 
@@ -141,10 +136,13 @@ type StoredSession = SessionIndexItem & {
   messages: AgentMessage[];
   modelId?: string;
   thinkingLevel?: PiAppThinkingLevel;
-  virtualJsonnetFiles?: Record<string, VirtualJsonnetFileSnapshot>;
+  /** Legacy Jsonnet sources from sessions created before the session filesystem; migrated on load. */
+  virtualJsonnetFiles?: unknown;
   investigationReport?: InvestigationReport;
   artifacts?: Record<string, Artifact>;
   artifactCounter?: number;
+  workspace?: PersistedWorkspace;
+  compaction?: CompactionState;
 };
 
 type ToolRunState = Record<string, ToolRunView>;
@@ -157,7 +155,8 @@ type ToolConfirmationView = {
   description: string;
   fields: Array<{ label: string; value: string }>;
   args: unknown;
-  saveDashboardFolder?: DashboardSaveFolderSelection;
+  /** Unified diff of the exact change being approved. */
+  diff?: string;
 };
 
 type ChatLeaveGuardAction = {
@@ -173,20 +172,14 @@ const SESSION_INDEX_KEY = 'sessions:index';
 const CHAT_SESSION_EXPORT_KIND = 'g42-pi-app.chat-session';
 const LEGACY_CHAT_SESSION_EXPORT_KINDS = ['grafana-pi-app.chat-session'];
 const CHAT_SESSION_EXPORT_SCHEMA_VERSION = 1;
-const PERSISTENT_WRITE_TOOLS = new Set([
-  'save_dashboard',
-  'upload_dashboard',
-  'delete_dashboard',
-  'save_changes',
-  'submit_changes',
-]);
+const WORKSPACE_APPLY_APPROVAL = 'workspace_apply';
+const PERSISTENT_WRITE_TOOLS = new Set([WORKSPACE_APPLY_APPROVAL]);
 const ACTIVE_CHAT_LEAVE_MESSAGE =
   'The assistant is still working. Leaving now will stop the run and discard any partial response.';
 const DRAFT_CHAT_LEAVE_MESSAGE = 'The current draft message will be discarded.';
 const CHAT_SESSION_PARAM = 'session';
 const SIDEBAR_SESSION_MENU_LIMIT = 8;
 const ASSISTANT_SIDEBAR_PLUGIN_ID = 'grafana-assistant-app';
-const GENERAL_FOLDER_TITLE = 'General';
 const STREAMING_REVISION_WATCHDOG_MS = 80;
 const sessionKey = (id: string) => `sessions:${id}`;
 const THINKING_LEVEL_OPTIONS: Array<{
@@ -210,7 +203,7 @@ type ChatSessionExport = {
 };
 
 type BenchmarkAgentEvent = {
-  type: AgentEvent['type'];
+  type: AgentEvent['type'] | 'context_compaction';
   timestamp: number;
   [key: string]: unknown;
 };
@@ -239,7 +232,6 @@ function ChatSceneRenderer({ model }: SceneComponentProps<ChatSceneObject>) {
 }
 
 export function ChatApp({
-  agentWorkspaceLaunch,
   variant = 'page',
   launchContextId,
   sidebarRoute,
@@ -249,7 +241,6 @@ export function ChatApp({
   initialAutoSend,
   initialChatId,
 }: {
-  agentWorkspaceLaunch?: AgentWorkspaceLaunchPayload;
   variant?: ChatAppVariant;
   launchContextId?: string;
   sidebarRoute?: string;
@@ -312,20 +303,22 @@ export function ChatApp({
     (model, context, options) =>
       streamProxy(model, context, {
         ...options,
+        // Request the configured output budget explicitly; the backend clamps it per model.
+        maxTokens: options?.maxTokens ?? model.maxTokens,
         authToken: 'grafana',
         proxyUrl: `/api/plugins/${PLUGIN_ID}/resources/llm`,
       }),
     []
   );
   const sessionIdRef = useRef<string>(undefined);
-  const virtualJsonnetFilesRef = useRef<Record<string, VirtualJsonnetFileSnapshot>>({});
-  const virtualJsonnetHydratedRef = useRef<Record<string, number>>({});
   const investigationReportRef = useRef<InvestigationReport>(undefined);
   const artifactsRef = useRef<Record<string, Artifact>>({});
   const artifactCounterRef = useRef(0);
+  const workspaceRef = useRef<SessionWorkspace>(new SessionWorkspace());
+  // Shared holder so a run handed off between page and sidebar keeps one compaction state.
+  const compactionRef = useRef<CompactionHolder>({});
   const dashboardLaunchRef = useRef<DashboardAssistantLaunch>(undefined);
   const externalLaunchRef = useRef<ExternalAssistantLaunch>(undefined);
-  const agentWorkspaceRef = useRef<AgentWorkspaceState>(undefined);
   const [investigationReport, setInvestigationReport] = useState<InvestigationReport>();
   useEffect(() => {
     if (pluginMetaJsonData.isOpenAIAPIKeySet) {
@@ -350,49 +343,16 @@ export function ChatApp({
       mounted = false;
     };
   }, [pluginMetaJsonData.isOpenAIAPIKeySet]);
-  const setVirtualJsonnetFile = useCallback((file: VirtualJsonnetFileSnapshot, options?: { hydrated?: boolean }) => {
-    const path = normalizeJsonnetPath(file.path);
-    const snapshot = { ...file, path };
-    virtualJsonnetFilesRef.current = {
-      ...virtualJsonnetFilesRef.current,
-      [path]: snapshot,
-    };
-    if (options?.hydrated) {
-      virtualJsonnetHydratedRef.current[path] = file.version;
-    }
-  }, []);
   const setInvestigationReportSnapshot = useCallback((report: InvestigationReport) => {
     investigationReportRef.current = report;
     setInvestigationReport(report);
   }, []);
-  const virtualJsonnetRuntime = useMemo(
-    () => ({
-      getSessionId: () => sessionIdRef.current,
-      getFile: (path: string) => virtualJsonnetFilesRef.current[normalizeJsonnetPath(path)],
-      setFile: setVirtualJsonnetFile,
-      isHydrated: (path: string, version: number) =>
-        virtualJsonnetHydratedRef.current[normalizeJsonnetPath(path)] === version,
-      markHydrated: (path: string, version: number) => {
-        virtualJsonnetHydratedRef.current[normalizeJsonnetPath(path)] = version;
-      },
-    }),
-    [setVirtualJsonnetFile]
-  );
   const investigationReportRuntime = useMemo(
     () => ({
       getReport: () => investigationReportRef.current,
       setReport: setInvestigationReportSnapshot,
     }),
     [setInvestigationReportSnapshot]
-  );
-  const agentWorkspaceRuntime = useMemo<AgentWorkspaceRuntime>(
-    () => ({
-      getState: () => agentWorkspaceRef.current,
-      setState: (state) => {
-        agentWorkspaceRef.current = state;
-      },
-    }),
-    []
   );
   const setArtifactSnapshots = useCallback((artifacts: Record<string, Artifact>, counter?: number) => {
     const compacted = compactArtifacts(artifacts);
@@ -447,13 +407,6 @@ export function ChatApp({
       }
     },
     [artifactRuntime]
-  );
-  const dashboardSaveFolderRuntime = useMemo(
-    () => ({
-      getFolderOverride: (toolCallId: string) => getDashboardSaveFolderOverride(sessionIdRef.current, toolCallId),
-      clearFolderOverride: (toolCallId: string) => clearDashboardSaveFolderOverride(sessionIdRef.current, toolCallId),
-    }),
-    []
   );
   const [agent, setAgent] = useState<Agent>();
   const agentRef = useRef<Agent>(undefined);
@@ -550,15 +503,6 @@ export function ChatApp({
           }
           settled = true;
           signal?.removeEventListener('abort', handleAbort);
-          const pending = pendingToolConfirmationRef.current;
-          if (approved && pending?.toolCallId === toolCallId && pending.saveDashboardFolder) {
-            const sessionId = sessionIdRef.current;
-            if (sessionId) {
-              setDashboardSaveFolderOverride(sessionId, toolCallId, pending.saveDashboardFolder);
-            }
-          } else {
-            clearDashboardSaveFolderOverride(sessionIdRef.current, toolCallId);
-          }
           toolConfirmationResolverRef.current = undefined;
           setPendingToolConfirmation(undefined);
           resolve(
@@ -593,105 +537,55 @@ export function ChatApp({
     [requestToolConfirmation]
   );
 
-  const emitRuntimeToolUpdate = useCallback<NonNullable<GrafanaToolRuntime['emitToolUpdate']>>(
-    (update) => {
-      const event: AgentEvent = {
-        type: 'tool_execution_update',
-        toolCallId: update.toolCallId,
-        toolName: update.toolName,
-        args: update.args,
-        partialResult: update.partialResult,
-      };
-
-      updateRunStatus(event);
-      scheduleRevision();
-      setToolRuns((value) => {
-        const next = reduceToolRuns(value, event);
-        const sessionId = sessionIdRef.current;
-        const run = getChatRun(sessionId);
-        if (run && run.agent === agentRef.current) {
-          run.toolRuns = next;
-          run.updatedAt = Date.now();
-        }
-        return next;
-      });
-    },
-    [scheduleRevision, updateRunStatus]
-  );
-
-  const handleDashboardFolderChange = useCallback(
-    (folderUid: string | undefined, folderTitle: string | undefined) => {
-      const uid = folderUid || undefined;
-      const title = folderTitle || (uid ? uid : GENERAL_FOLDER_TITLE);
-      setPendingToolConfirmation((current) => {
-        if (!current?.saveDashboardFolder) {
-          return current;
-        }
-        return {
-          ...current,
-          saveDashboardFolder: {
-            uid,
-            title,
-          },
-        };
-      });
-    },
-    [setPendingToolConfirmation]
+  const workspaceBroker = useMemo(() => createGrafanaWorkspaceBroker(jsonData), [jsonData]);
+  const pythonRunner = useMemo(() => createBrowserPythonRunner(), []);
+  const workspaceApprovals = useMemo<WorkspaceApprovalService>(
+    () => ({
+      async request(approval: WorkspaceApprovalRequest, signal?: AbortSignal) {
+        // Resolve the handler at call time so approvals follow a run handed off between page and sidebar.
+        const handler = getChatRun(sessionIdRef.current)?.requestToolConfirmation ?? requestToolConfirmation;
+        const decision = await handler(
+          `${WORKSPACE_APPLY_APPROVAL}-${approval.planId}`,
+          WORKSPACE_APPLY_APPROVAL,
+          approval,
+          signal
+        );
+        return decision?.block ? { approved: false, reason: decision.reason } : { approved: true };
+      },
+    }),
+    [requestToolConfirmation]
   );
 
   const buildSkillRuntime = useCallback(
     (prompt: string) => {
-      const agentWorkspace = agentWorkspaceRef.current;
-      if (agentWorkspace) {
-        const toolSet = createAgentWorkspaceTools(agentWorkspaceRuntime);
-        return {
-          systemPrompt: [
-            renderAgentWorkspaceSystemPrompt(agentWorkspace),
-            renderAgentWorkspaceContextBlock(agentWorkspace),
-          ]
-            .filter(Boolean)
-            .join('\n\n'),
-          tools: toolSet.all,
-          skillSelection: {
-            activeSkills: [],
-            activeSkillNames: [],
-            toolGroups: [],
-            explicitSkillNames: [],
-          },
-        };
-      }
-
       const sidebarPageContext = isSidebarVariant
         ? buildAssistantSidebarPageContextSnapshot(sidebarRouteRef.current, { liveDashboardEditingAvailable })
         : undefined;
       const selection = selectGrafanaSkills(prompt, skills, sidebarPageContextSkillHints(sidebarPageContext));
-      const skillTools = createSkillTools(selection.activeSkills);
-      const toolOptions = {
+      const workspaceToolkit = createSessionWorkspaceToolkit({
+        workspace: workspaceRef.current,
+        broker: workspaceBroker,
+        approvals: workspaceApprovals,
+        artifacts: artifactRuntime,
+        skills,
+        python: pythonRunner,
+        getDashboardMutationAPI: liveDashboardEditingAvailable ? () => dashboardMutationAPI : undefined,
+      });
+      const tools = createGrafanaTools({
         ...jsonData,
-        runtime: {
-          model: llmModel,
-          streamFn,
-          thinkingLevel,
-          beforeToolCall: confirmToolCall,
-          afterToolCall,
-          emitToolUpdate: emitRuntimeToolUpdate,
-        },
-        virtualJsonnetFiles: virtualJsonnetRuntime,
-        dashboardSaveFolders: dashboardSaveFolderRuntime,
         investigationReport: investigationReportRuntime,
         artifacts: artifactRuntime,
         dashboardMutation: dashboardMutationAPI,
-        skillTools,
-      };
-      const tools =
-        prompt.trim() === '' || selection.supervisorOnly
-          ? createGrafanaSupervisorTools(toolOptions)
-          : createGrafanaToolsForSkillGroups(toolOptions, selection.toolGroups);
-      const systemPrompt = renderGrafanaSystemPrompt({
-        skills,
-        activeSkillNames: selection.activeSkillNames,
-        liveDashboardEditingAvailable,
+        workspaceTools: workspaceToolkit.tools,
       });
+      const systemPrompt = [
+        renderGrafanaSystemPrompt({
+          skills,
+          activeSkillNames: selection.activeSkillNames,
+          liveDashboardEditingAvailable,
+        }),
+        workspaceToolkit.promptSection,
+      ].join('\n\n');
       const dashboardLaunchContext = dashboardLaunchRef.current
         ? renderDashboardAssistantContextBlock(dashboardLaunchRef.current)
         : undefined;
@@ -710,21 +604,15 @@ export function ChatApp({
     },
     [
       investigationReportRuntime,
-      afterToolCall,
       artifactRuntime,
-      confirmToolCall,
-      emitRuntimeToolUpdate,
       dashboardMutationAPI,
-      dashboardSaveFolderRuntime,
-      agentWorkspaceRuntime,
       isSidebarVariant,
       liveDashboardEditingAvailable,
       jsonData,
-      llmModel,
       skills,
-      streamFn,
-      thinkingLevel,
-      virtualJsonnetRuntime,
+      workspaceApprovals,
+      workspaceBroker,
+      pythonRunner,
     ]
   );
 
@@ -755,10 +643,11 @@ export function ChatApp({
         messages,
         modelId: llmModel.id,
         thinkingLevel,
-        virtualJsonnetFiles: virtualJsonnetFilesRef.current,
         investigationReport: investigationReportRef.current,
         artifacts: artifactsRef.current,
         artifactCounter: artifactCounterRef.current,
+        workspace: workspaceRef.current.serialize(),
+        compaction: compactionRef.current.state,
       };
       const next = [indexItem, ...sessionsRef.current.filter((session) => session.id !== id)].slice(0, 50);
 
@@ -819,7 +708,32 @@ export function ChatApp({
     (messages: AgentMessage[] = []) => {
       stopCurrentAgentForSessionChange();
       const runtime = buildSkillRuntime('');
-      const nextAgent = new Agent({
+      const compaction = compactionRef.current;
+      let nextAgent: Agent;
+      const compactor = new ContextCompactor({
+        initialState: compaction.state,
+        getBudget: () => ({
+          contextWindow: nextAgent.state.model.contextWindow,
+          maxOutputTokens: nextAgent.state.model.maxTokens,
+          fixedTokens: estimateTextTokens(
+            nextAgent.state.systemPrompt +
+              JSON.stringify(
+                nextAgent.state.tools.map((tool) => ({
+                  name: tool.name,
+                  description: tool.description,
+                  parameters: tool.parameters,
+                }))
+              )
+          ),
+        }),
+        summarize: (input, signal) => summarizeWithModel(streamFn, nextAgent.state.model, input, signal),
+        onStateChange: (state) => {
+          compaction.state = state;
+        },
+        onEvent: (event) =>
+          recordSerializedBenchmarkEvent({ type: 'context_compaction', timestamp: Date.now(), ...event }),
+      });
+      nextAgent = new Agent({
         initialState: {
           systemPrompt: runtime.systemPrompt,
           model: llmModel,
@@ -828,6 +742,7 @@ export function ChatApp({
           tools: runtime.tools,
         },
         convertToLlm: convertChatMessagesToLlm,
+        transformContext: compactor.transform,
         streamFn,
         afterToolCall,
         beforeToolCall: confirmToolCall,
@@ -858,14 +773,13 @@ export function ChatApp({
     stopCurrentAgentForSessionChange();
     dashboardLaunchRef.current = undefined;
     externalLaunchRef.current = undefined;
-    agentWorkspaceRef.current = undefined;
     clearChatSessionParamFromLocation();
     sessionIdRef.current = id;
     titleRef.current = 'New chat';
     setSelectedModelId(undefined);
     setSelectedThinkingLevel(undefined);
-    virtualJsonnetFilesRef.current = {};
-    virtualJsonnetHydratedRef.current = {};
+    workspaceRef.current = new SessionWorkspace();
+    compactionRef.current = {};
     investigationReportRef.current = undefined;
     setRunStatusSnapshot(undefined);
     clearArtifacts();
@@ -888,11 +802,11 @@ export function ChatApp({
       stopCurrentAgentForSessionChange();
       dashboardLaunchRef.current = launch;
       externalLaunchRef.current = undefined;
-      agentWorkspaceRef.current = undefined;
       sessionIdRef.current = id;
       titleRef.current = title;
-      virtualJsonnetFilesRef.current = {};
-      virtualJsonnetHydratedRef.current = {};
+      workspaceRef.current = new SessionWorkspace();
+      compactionRef.current = {};
+      compactionRef.current = {};
       investigationReportRef.current = undefined;
       setRunStatusSnapshot(undefined);
       clearArtifacts();
@@ -917,11 +831,11 @@ export function ChatApp({
       stopCurrentAgentForSessionChange();
       dashboardLaunchRef.current = undefined;
       externalLaunchRef.current = launch;
-      agentWorkspaceRef.current = undefined;
       sessionIdRef.current = id;
       titleRef.current = title;
-      virtualJsonnetFilesRef.current = {};
-      virtualJsonnetHydratedRef.current = {};
+      workspaceRef.current = new SessionWorkspace();
+      compactionRef.current = {};
+      compactionRef.current = {};
       investigationReportRef.current = undefined;
       setRunStatusSnapshot(undefined);
       clearArtifacts();
@@ -931,35 +845,6 @@ export function ChatApp({
       setCurrentTitle(title);
       setError(undefined);
       setInput(launch.prompt);
-      setToolRuns({});
-      setInvestigationReport(undefined);
-      settleToolConfirmation(false);
-      buildAgent([]);
-    },
-    [buildAgent, clearArtifacts, setRunStatusSnapshot, settleToolConfirmation, stopCurrentAgentForSessionChange]
-  );
-
-  const startAgentWorkspaceLaunchSession = useCallback(
-    (state: AgentWorkspaceState) => {
-      const id = createSessionId();
-      const title = agentWorkspaceSessionTitle(state);
-      stopCurrentAgentForSessionChange();
-      dashboardLaunchRef.current = undefined;
-      externalLaunchRef.current = undefined;
-      agentWorkspaceRef.current = state;
-      sessionIdRef.current = id;
-      titleRef.current = title;
-      virtualJsonnetFilesRef.current = {};
-      virtualJsonnetHydratedRef.current = {};
-      investigationReportRef.current = undefined;
-      setRunStatusSnapshot(undefined);
-      clearArtifacts();
-      autoScrollRef.current = true;
-      setIsAutoScrollPaused(false);
-      setCurrentSessionId(id);
-      setCurrentTitle(title);
-      setError(undefined);
-      setInput(state.launch.initialPrompt ?? '');
       setToolRuns({});
       setInvestigationReport(undefined);
       settleToolConfirmation(false);
@@ -980,8 +865,8 @@ export function ChatApp({
       title: titleRef.current,
       agent: currentAgent,
       dashboardLaunch: dashboardLaunchRef.current,
-      virtualJsonnetFiles: { ...virtualJsonnetFilesRef.current },
-      virtualJsonnetHydrated: { ...virtualJsonnetHydratedRef.current },
+      workspace: workspaceRef.current,
+      compaction: compactionRef.current,
       investigationReport: investigationReportRef.current,
       artifacts: { ...artifactsRef.current },
       artifactCounter: artifactCounterRef.current,
@@ -998,13 +883,12 @@ export function ChatApp({
       setChatRunConfirmationHandler(run.id, requestToolConfirmation);
       dashboardLaunchRef.current = run.dashboardLaunch;
       externalLaunchRef.current = undefined;
-      agentWorkspaceRef.current = undefined;
       sessionIdRef.current = run.id;
       titleRef.current = run.title;
       setSelectedModelId(run.agent.state.model?.id || undefined);
       setSelectedThinkingLevel(parseStoredThinkingLevel(run.agent.state.thinkingLevel));
-      virtualJsonnetFilesRef.current = run.virtualJsonnetFiles;
-      virtualJsonnetHydratedRef.current = run.virtualJsonnetHydrated;
+      workspaceRef.current = run.workspace ?? new SessionWorkspace();
+      compactionRef.current = run.compaction ?? {};
       investigationReportRef.current = run.investigationReport;
       setRunStatusSnapshot(run.runStatus ?? (run.agent.state.isStreaming ? createInitialRunStatus() : undefined));
       setArtifactSnapshots(run.artifacts, run.artifactCounter);
@@ -1370,14 +1254,14 @@ export function ChatApp({
       stopCurrentAgentForSessionChange();
       dashboardLaunchRef.current = undefined;
       externalLaunchRef.current = undefined;
-      agentWorkspaceRef.current = undefined;
       sessionIdRef.current = id;
       titleRef.current = stored.title;
       setSelectedModelId(stored.modelId || undefined);
       setSelectedThinkingLevel(parseStoredThinkingLevel(stored.thinkingLevel));
       setChatSessionParamInLocation(id);
-      virtualJsonnetFilesRef.current = stored.virtualJsonnetFiles ?? {};
-      virtualJsonnetHydratedRef.current = {};
+      workspaceRef.current = SessionWorkspace.restore(stored.workspace);
+      compactionRef.current = { state: isCompactionState(stored.compaction) ? stored.compaction : undefined };
+      migrateLegacyJsonnetFiles(workspaceRef.current, stored.virtualJsonnetFiles);
       investigationReportRef.current = stored.investigationReport;
       setRunStatusSnapshot(undefined);
       setArtifactSnapshots(stored.artifacts ?? {}, stored.artifactCounter);
@@ -1406,7 +1290,6 @@ export function ChatApp({
   const initialLoadHandlersRef = useRef({
     attachLiveRun,
     loadSession,
-    startAgentWorkspaceLaunchSession,
     startDashboardLaunchSession,
     startExternalAssistantLaunchSession,
     startNewSession,
@@ -1414,7 +1297,6 @@ export function ChatApp({
     submitPromptText,
   });
   const initialLaunchPropsRef = useRef({
-    agentWorkspaceLaunch,
     launchContextId,
     sessionId,
     initialPrompt,
@@ -1428,7 +1310,6 @@ export function ChatApp({
     initialLoadHandlersRef.current = {
       attachLiveRun,
       loadSession,
-      startAgentWorkspaceLaunchSession,
       startDashboardLaunchSession,
       startExternalAssistantLaunchSession,
       startNewSession,
@@ -1436,7 +1317,6 @@ export function ChatApp({
       submitPromptText,
     };
     initialLaunchPropsRef.current = {
-      agentWorkspaceLaunch,
       launchContextId,
       sessionId,
       initialPrompt,
@@ -1445,7 +1325,6 @@ export function ChatApp({
       initialChatId,
     };
   }, [
-    agentWorkspaceLaunch,
     attachLiveRun,
     launchContextId,
     loadSession,
@@ -1454,7 +1333,6 @@ export function ChatApp({
     initialContext,
     initialAutoSend,
     initialChatId,
-    startAgentWorkspaceLaunchSession,
     startDashboardLaunchSession,
     startExternalAssistantLaunchSession,
     startNewSession,
@@ -1484,7 +1362,6 @@ export function ChatApp({
 
       const location = locationService.getLocation();
       const {
-        agentWorkspaceLaunch: initialAgentWorkspaceLaunch,
         launchContextId: initialLaunchContextId,
         sessionId: initialSessionProp,
         initialPrompt: externalPrompt,
@@ -1492,20 +1369,6 @@ export function ChatApp({
         initialAutoSend: externalAutoSend,
         initialChatId: externalChatId,
       } = initialLaunchPropsRef.current;
-      const launchFromSearch = agentWorkspaceLaunchFromSearch(location.search);
-      const workspaceLaunch = initialAgentWorkspaceLaunch ?? launchFromSearch;
-      if (workspaceLaunch) {
-        const state = await createAgentWorkspaceState(workspaceLaunch);
-        if (!mounted) {
-          return;
-        }
-        initialLoadHandlersRef.current.startAgentWorkspaceLaunchSession(state);
-        if (launchFromSearch) {
-          locationService.partial(removeAgentWorkspaceLaunchParams(), true);
-        }
-        return;
-      }
-
       // Launch from an external plugin via @grafana/assistant's openAssistant()
       // (see AssistantSidebar.tsx / ChatApp's initialPrompt props). autoSend
       // defaults to true per that package's contract.
@@ -1771,10 +1634,11 @@ export function ChatApp({
           modelId: llmModel.id,
           thinkingLevel,
           messages,
-          virtualJsonnetFiles: virtualJsonnetFilesRef.current,
           investigationReport: investigationReportRef.current,
           artifacts: artifactsRef.current,
           artifactCounter: artifactCounterRef.current,
+          workspace: workspaceRef.current.serialize(),
+          compaction: compactionRef.current.state,
         },
       };
 
@@ -1822,13 +1686,13 @@ export function ChatApp({
 
         stopCurrentAgentForSessionChange();
         dashboardLaunchRef.current = undefined;
-        agentWorkspaceRef.current = undefined;
         sessionIdRef.current = id;
         titleRef.current = title;
         setSelectedModelId(imported.modelId || undefined);
         setSelectedThinkingLevel(parseStoredThinkingLevel(imported.thinkingLevel));
-        virtualJsonnetFilesRef.current = imported.virtualJsonnetFiles ?? {};
-        virtualJsonnetHydratedRef.current = {};
+        workspaceRef.current = SessionWorkspace.restore(imported.workspace, { trusted: false });
+        compactionRef.current = { state: isCompactionState(imported.compaction) ? imported.compaction : undefined };
+        migrateLegacyJsonnetFiles(workspaceRef.current, imported.virtualJsonnetFiles);
         investigationReportRef.current = imported.investigationReport;
         setRunStatusSnapshot(undefined);
         setArtifactSnapshots(imported.artifacts ?? {}, imported.artifactCounter);
@@ -1925,7 +1789,6 @@ export function ChatApp({
     >
       <ToolConfirmationModal
         confirmation={pendingToolConfirmation}
-        onFolderChange={handleDashboardFolderChange}
         onApprove={() => settleToolConfirmation(true)}
         onDeny={() => settleToolConfirmation(false)}
       />
@@ -2275,12 +2138,10 @@ export function ChatApp({
 
 function ToolConfirmationModal({
   confirmation,
-  onFolderChange,
   onApprove,
   onDeny,
 }: {
   confirmation?: ToolConfirmationView;
-  onFolderChange: (folderUid: string | undefined, folderTitle: string | undefined) => void;
   onApprove: () => void;
   onDeny: () => void;
 }) {
@@ -2313,16 +2174,11 @@ function ToolConfirmationModal({
               </div>
             ))}
           </dl>
-          {confirmation.saveDashboardFolder && (
-            <div className={styles.toolConfirmationFolder}>
-              <Field noMargin label="Folder">
-                <FolderPicker
-                  value={confirmation.saveDashboardFolder.uid ?? ''}
-                  onChange={onFolderChange}
-                  showRootFolder
-                />
-              </Field>
-            </div>
+          {confirmation.diff && (
+            <details className={styles.toolConfirmationDetails} open data-testid="workspace-apply-diff">
+              <summary>Changes</summary>
+              <pre>{confirmation.diff}</pre>
+            </details>
           )}
           <details className={styles.toolConfirmationDetails}>
             <summary>Tool arguments</summary>
@@ -2587,69 +2443,36 @@ function buildToolConfirmation(toolCallId: string, toolName: string, args: unkno
   const record = isRecord(args) ? args : {};
   const id = `confirm-${toolCallId || toolName}-${Date.now()}`;
 
-  if (toolName === 'save_dashboard') {
-    const folderUid = stringValue(record.folderUid);
+  if (toolName === WORKSPACE_APPLY_APPROVAL) {
+    const operations = Array.isArray(record.operations) ? record.operations.filter(isRecord) : [];
     return {
       id,
       toolCallId,
-      toolName,
-      title: 'Approve dashboard save',
+      toolName: 'workspace apply',
+      title: stringValue(record.title) ?? 'Approve dashboard changes',
       description:
-        'The assistant wants to create or update an editable Grafana dashboard from Jsonnet. Approve only if this is the dashboard change you requested.',
+        'The assistant wants to write these staged workspace changes to Grafana as you. Each change is applied only if the dashboard has not changed since it was fetched. Approve only if the diff matches what you asked for.',
       fields: compactConfirmationFields([
-        confirmationField('UID', stringValue(record.uid) ?? 'compiled dashboard UID'),
-        confirmationField('Folder UID', folderUid),
-        confirmationField('Overwrite', booleanValue(record.overwrite, true)),
-        confirmationField('Source path', stringValue(record.path) ?? 'dashboard.jsonnet'),
-        confirmationField('Tags', stringArrayValue(record.tags)),
+        confirmationField('Plan', stringValue(record.planId)),
+        confirmationField(
+          'Changes',
+          operations
+            .map(
+              (operation) =>
+                `${stringValue(operation.operation) ?? '?'} ${stringValue(operation.uid) ?? '?'}${
+                  stringValue(operation.title) ? ` (${stringValue(operation.title)})` : ''
+                }`
+            )
+            .join('; ')
+        ),
+        confirmationField('Digest', stringValue(record.digest)?.slice(0, 16)),
       ]),
-      args,
-      saveDashboardFolder: folderUid ? undefined : { title: GENERAL_FOLDER_TITLE },
+      args: { planId: record.planId, digest: record.digest, operations },
+      diff: stringValue(record.diff),
     };
   }
 
-  if (toolName === 'save_changes' || toolName === 'submit_changes') {
-    return {
-      id,
-      toolCallId,
-      toolName,
-      title: toolName === 'save_changes' ? 'Approve workspace save' : 'Approve workspace submit',
-      description:
-        'The assistant wants to persist Coding Agent App Contract workspace changes through the provider backend. Approve only if the validation and diff match the change you requested.',
-      fields: compactConfirmationFields([
-        confirmationField('Action', toolName === 'save_changes' ? 'Save changes' : 'Submit changes'),
-      ]),
-      args,
-    };
-  }
-
-  if (toolName === 'upload_dashboard') {
-    const dashboard = parseConfirmationDashboard(record.dashboard_json);
-    return {
-      id,
-      toolCallId,
-      toolName,
-      title: 'Approve dashboard upload',
-      description: 'The assistant wants to create or update a raw Grafana dashboard JSON model as the current user.',
-      fields: compactConfirmationFields([
-        confirmationField('Title', dashboard.title),
-        confirmationField('UID', dashboard.uid),
-        confirmationField('Folder UID', stringValue(record.folderUid)),
-        confirmationField('Overwrite', booleanValue(record.overwrite, true)),
-      ]),
-      args,
-    };
-  }
-
-  return {
-    id,
-    toolCallId,
-    toolName,
-    title: 'Approve dashboard deletion',
-    description: 'The assistant wants to delete a Grafana dashboard. This removes the dashboard by UID.',
-    fields: compactConfirmationFields([confirmationField('UID', stringValue(record.uid))]),
-    args,
-  };
+  return undefined;
 }
 
 function hasActiveDashboardMutationCommands(dashboardMutationAPI: DashboardMutationAPI | undefined) {
@@ -2687,29 +2510,6 @@ function compactConfirmationFields(fields: Array<{ label: string; value: string 
 
 function stringValue(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function booleanValue(value: unknown, fallback: boolean) {
-  return typeof value === 'boolean' ? value : fallback;
-}
-
-function stringArrayValue(value: unknown) {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').join(', ') : undefined;
-}
-
-function parseConfirmationDashboard(value: unknown) {
-  try {
-    const dashboard = typeof value === 'string' ? JSON.parse(value) : value;
-    if (!isRecord(dashboard)) {
-      return {};
-    }
-    return {
-      title: stringValue(dashboard.title),
-      uid: stringValue(dashboard.uid),
-    };
-  } catch {
-    return {};
-  }
 }
 
 function formatConfirmationArgs(value: unknown) {
@@ -3428,13 +3228,15 @@ function parseChatSessionExport(value: unknown): StoredSession {
     modelId: typeof value.session.modelId === 'string' ? value.session.modelId : undefined,
     thinkingLevel: parseStoredThinkingLevel(value.session.thinkingLevel),
     messages,
-    virtualJsonnetFiles: parseVirtualJsonnetFiles(value.session.virtualJsonnetFiles),
+    virtualJsonnetFiles: isRecord(value.session.virtualJsonnetFiles) ? value.session.virtualJsonnetFiles : undefined,
     investigationReport: parseInvestigationReport(value.session.investigationReport),
     artifacts: parseArtifacts(value.session.artifacts),
     artifactCounter:
       typeof value.session.artifactCounter === 'number' && Number.isFinite(value.session.artifactCounter)
         ? Math.max(0, Math.floor(value.session.artifactCounter))
         : undefined,
+    workspace: isRecord(value.session.workspace) ? (value.session.workspace as PersistedWorkspace) : undefined,
+    compaction: isCompactionState(value.session.compaction) ? value.session.compaction : undefined,
   };
 }
 
@@ -3462,41 +3264,6 @@ function parseInvestigationReport(value: unknown): InvestigationReport | undefin
 
 function parseStringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
-}
-
-function parseVirtualJsonnetFiles(value: unknown): Record<string, VirtualJsonnetFileSnapshot> | undefined {
-  if (value === null || value === undefined) {
-    return undefined;
-  }
-  if (!isRecord(value)) {
-    throw new Error('Import file session.virtualJsonnetFiles must be an object when present.');
-  }
-
-  const files: Record<string, VirtualJsonnetFileSnapshot> = {};
-  for (const [key, file] of Object.entries(value)) {
-    if (!isRecord(file)) {
-      throw new Error(`Imported Jsonnet file ${key} must be an object.`);
-    }
-
-    const content = file.content;
-    const version = file.version;
-    if (typeof content !== 'string' || typeof version !== 'number') {
-      throw new Error(`Imported Jsonnet file ${key} must include string content and numeric version.`);
-    }
-
-    const path = normalizeJsonnetPath(typeof file.path === 'string' ? file.path : key);
-    files[path] = {
-      path,
-      content,
-      version,
-      checksum: typeof file.checksum === 'string' ? file.checksum : '',
-      lineCount: typeof file.lineCount === 'number' ? file.lineCount : countLines(content),
-      dashboardJsonnetSize: typeof file.dashboardJsonnetSize === 'number' ? file.dashboardJsonnetSize : content.length,
-      ...(typeof file.updatedAt === 'string' ? { updatedAt: file.updatedAt } : {}),
-    };
-  }
-
-  return files;
 }
 
 function parseArtifacts(value: unknown): Record<string, Artifact> | undefined {
@@ -3591,10 +3358,6 @@ function normalizeSessionTitle(value: unknown) {
 
 function normalizeDateString(value: unknown) {
   return typeof value === 'string' && value.trim() ? value : new Date().toISOString();
-}
-
-function countLines(value: string) {
-  return value.split('\n').length;
 }
 
 const getStyles = (theme: GrafanaTheme2) => ({
@@ -4144,3 +3907,30 @@ const getStyles = (theme: GrafanaTheme2) => ({
     color: theme.colors.text.primary,
   }),
 });
+
+type CompactionHolder = { state?: CompactionState };
+
+async function summarizeWithModel(
+  streamFn: StreamFn,
+  model: Agent['state']['model'],
+  input: { previousSummary?: string; transcript: string },
+  signal?: AbortSignal
+) {
+  const stream = await streamFn(
+    model,
+    {
+      systemPrompt: SUMMARIZER_SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: buildSummarizerPrompt(input), timestamp: Date.now() }],
+    },
+    { maxTokens: Math.min(4096, model.maxTokens || 4096), signal }
+  );
+  const message = await stream.result();
+  if (message.stopReason === 'error' || message.stopReason === 'aborted') {
+    throw new Error(message.errorMessage || `summarization ${message.stopReason}`);
+  }
+  return message.content
+    .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n')
+    .trim();
+}

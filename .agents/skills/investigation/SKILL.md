@@ -11,14 +11,14 @@ Use this skill when the user asks to investigate, diagnose, explain why somethin
 
 1. Define the scope: affected service, host, route, symptom, datasource UID, and time range when available.
 2. Use `update_report` early to create a report with the initial scope and open hypotheses.
-3. Gather evidence with metric discovery and PromQL validation. Call `run_investigation_agent` for full diagnostic or "what is wrong" analysis; use `run_query_agent` only for narrow follow-up reconnaissance.
+3. Gather evidence with metric discovery and PromQL validation in bash (`grafana-prom metrics`, `grafana-prom series`, `grafana-prom query --from ...`). Batch related queries in one bash call, and keep raw notes in /session/findings.md.
 4. Update the report after each material finding. Add evidence only when it came from a tool result or user-provided context.
 5. Keep hypotheses separate from evidence. Move invalidated ideas to ruled-out causes.
 6. End with current finding, confidence, remaining gaps, and next checks or remediation.
 
 For selector-recovery tasks, keep the loop bounded: validate the provided failing selector batch once, inspect labels/series once to identify the bad selector, validate the recovered query batch once, then retry only failed recovered queries once individually. After that, stop querying and summarize the best validated handoff plan with any remaining gaps.
 
-For dashboard handoffs, PromQL expressions plus datasource UID, totalSeries, validationError status, and key label names are sufficient evidence. Do not read artifacts to extract tenant values or full per-series detail unless the user explicitly requested raw data.
+When the investigation leads to a dashboard, PromQL expressions plus datasource UID, totalSeries, validationError status, and key label names are sufficient evidence. Do not read artifacts to extract tenant values or full per-series detail unless the user explicitly requested raw data.
 
 ## Report Rules
 

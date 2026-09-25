@@ -4,12 +4,8 @@ export type SkillToolGroup =
   | 'dashboardMetricContext'
   | 'dashboardRead'
   | 'liveDashboardEditing'
-  | 'jsonnetFiles'
-  | 'jsonnetDashboards'
   | 'investigation'
-  | 'subagents'
   | 'skillResources'
-  | 'jsonnetLibraries'
   | 'adHocDashboards';
 
 export type BundledSkillResource = {
@@ -43,7 +39,6 @@ export type GrafanaSkillSelection = {
   activeSkillNames: string[];
   toolGroups: SkillToolGroup[];
   explicitSkillNames: string[];
-  supervisorOnly: boolean;
 };
 
 export type GrafanaSkillContext = {

@@ -11,20 +11,14 @@ import {
   IconButton,
   InlineSwitch,
   Input,
-  MultiCombobox,
   Stack,
   TagsInput,
   TextArea,
   useStyles2,
-  type ComboboxOption,
 } from '@grafana/ui';
 
 import type { PiAppCustomSkill, PiAppCustomSkillActivation, PiAppCustomSkillResource } from '../../types';
-import {
-  CONFIGURABLE_SKILL_TOOL_GROUPS,
-  CUSTOM_SKILL_CONFIG_LIMITS,
-  parseCustomSkillsJson,
-} from '../../pages/Chat/skills/configured';
+import { CUSTOM_SKILL_CONFIG_LIMITS, parseCustomSkillsJson } from '../../pages/Chat/skills/configured';
 import { GRAFANA_SKILLS } from '../../pages/Chat/skills/catalog';
 import { testIds } from '../testIds';
 import {
@@ -160,9 +154,6 @@ export function CustomSkillsEditor({ value, issues, error, onChange }: Props) {
                   </Stack>
                   <div className={s.skillDescription}>{skill.description || 'No description yet.'}</div>
                   <div className={s.badgeList}>
-                    {serializeCustomSkills([skill])[0].toolGroups?.map((group) => (
-                      <Badge text={toolGroupLabels[group] ?? group} color="purple" key={group} />
-                    ))}
                     {skill.resources && skill.resources.length > 0 && (
                       <Badge
                         text={`${skill.resources.length} resource${skill.resources.length === 1 ? '' : 's'}`}
@@ -395,26 +386,9 @@ function SkillEditorDrawer({ skill, issues, onChange, onClose }: SkillEditorDraw
           </>
         )}
 
-        <Field
-          label="Tool groups"
-          description="Skill resources are always available. Add more tools only when the skill needs them."
-          invalid={hasFieldIssue(issues, 'toolGroups')}
-          error={firstFieldIssue(issues, 'toolGroups')}
-        >
-          <MultiCombobox
-            width={56}
-            options={toolGroupOptions}
-            value={serializeCustomSkills([skill])[0].toolGroups}
-            isClearable
-            data-testid={testIds.appConfig.customSkillToolGroups}
-            onChange={(options: Array<ComboboxOption<string>>) =>
-              onChange({
-                ...skill,
-                toolGroups: ensureSkillResources(options.map((option) => option.value)),
-              })
-            }
-          />
-        </Field>
+        <div className={s.helpText}>
+          The assistant always has the same tools; skills only add instructions and resources.
+        </div>
 
         <Field
           label="Do not send instructions to model"
@@ -432,7 +406,8 @@ function SkillEditorDrawer({ skill, issues, onChange, onClose }: SkillEditorDraw
           <div>
             <h4 className={s.sectionHeading}>Resources</h4>
             <div className={s.helpText}>
-              Optional text files available through read_skill_resource when this skill is active.
+              Optional text files the assistant can read under /.agents/skills/&lt;skill-name&gt;/ in its session
+              filesystem.
             </div>
           </div>
           <Button
@@ -583,10 +558,6 @@ function firstFieldIssue(issues: readonly CustomSkillValidationIssue[], field: C
   return issues.find((issue) => issue.field === field)?.message;
 }
 
-function ensureSkillResources(toolGroups: readonly string[]) {
-  return Array.from(new Set(['skillResources', ...toolGroups]));
-}
-
 function readSkillName(skill: PiAppCustomSkill, index?: number) {
   const name = skill.name?.trim();
   return name || (index === undefined ? 'New skill' : `Skill ${index + 1}`);
@@ -613,36 +584,6 @@ function createEmptyResource(resources: readonly PiAppCustomSkillResource[]): Pi
 function formatCustomSkillsJson(customSkills: readonly PiAppCustomSkill[]) {
   return JSON.stringify(serializeCustomSkills(customSkills), null, 2);
 }
-
-const toolGroupLabels: Record<string, string> = {
-  metrics: 'Metrics',
-  alerts: 'Alerting',
-  dashboardMetricContext: 'Dashboard metric context',
-  dashboardRead: 'Dashboard read',
-  jsonnetFiles: 'Jsonnet files',
-  jsonnetDashboards: 'Jsonnet dashboards',
-  investigation: 'Investigation report',
-  subagents: 'Subagents',
-  skillResources: 'Skill resources',
-};
-
-const toolGroupDescriptions: Record<string, string> = {
-  metrics: 'Discover and query Prometheus metrics.',
-  alerts: 'Inspect Grafana-managed alert rules with read-only App Platform APIs.',
-  dashboardMetricContext: 'Use metrics found in existing dashboards.',
-  dashboardRead: 'Read dashboards and dashboard metadata.',
-  jsonnetFiles: 'Read and edit the session Jsonnet dashboard file.',
-  jsonnetDashboards: 'Render and sync managed Jsonnet dashboards.',
-  investigation: 'Maintain the structured investigation report.',
-  subagents: 'Run narrow query or dashboard subagents.',
-  skillResources: 'Read resources attached to active skills.',
-};
-
-const toolGroupOptions: Array<ComboboxOption<string>> = CONFIGURABLE_SKILL_TOOL_GROUPS.map((group) => ({
-  label: toolGroupLabels[group] ?? group,
-  value: group,
-  description: toolGroupDescriptions[group] ?? group,
-}));
 
 const getStyles = (theme: GrafanaTheme2) => ({
   toolbar: css`

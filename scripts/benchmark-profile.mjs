@@ -32,6 +32,7 @@ async function main() {
 Reads the same Pi models.json as dev:model. Generates one benchmark profile.
 Model options: --models-file PATH, --thinking off|low|medium|high,
                --thinking-format openai|qwen|qwen-chat-template,
+               --context-window N, --max-output-tokens N (default: Pi's contextWindow/maxTokens),
                --base-url URL (also disables Docker loopback rewriting).
 Profile options: --label TEXT, --hosting-label TEXT, --region TEXT, --service-tier TEXT,
                  --repetitions N (default 1), --suites agent,analysis, --notes TEXT.

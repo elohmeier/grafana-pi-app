@@ -3,68 +3,27 @@ import path from 'node:path';
 import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { testIds } from '../src/components/testIds';
+import {
+  alertRulesFingerprint,
+  dashboardWriteAttempts,
+  findBudgetError,
+  findFinalAssistantError,
+  findFinalAssistantText,
+  formatDuration,
+  formatLiveEvent,
+  formatToolTimeline,
+  hasSuccessfulPromEvidence,
+  readPositiveInteger,
+  stagedGrafanaPaths,
+  summarizeToolCalls,
+  summarizeUsage,
+  type BenchmarkEvent,
+} from './benchmarkOutcomes';
 
 const DEFAULT_TIMEOUT_MS = 240_000;
+const DEFAULT_MAX_TOOL_CALLS = 14;
 const OUTPUT_DIR = path.join(process.cwd(), 'test-results', 'alert-troubleshooting-benchmark');
-const FORBIDDEN_WRITE_TOOLS = new Set([
-  'write_jsonnet',
-  'edit_jsonnet',
-  'fix_jsonnet',
-  'render_dashboard',
-  'save_dashboard',
-  'upload_dashboard',
-  'delete_dashboard',
-  'apply_live_dashboard_mutation',
-  'rename_live_dashboard_panel',
-  'update_live_dashboard_panel_query',
-  'add_live_dashboard_panel',
-  'move_or_resize_live_dashboard_panel',
-  'update_live_dashboard_settings',
-  'add_live_dashboard_variable',
-  'update_live_dashboard_variable',
-]);
-
-type BenchmarkEvent = {
-  type: string;
-  timestamp: number;
-  toolCallId?: string;
-  toolName?: string;
-  args?: unknown;
-  partialResult?: unknown;
-  result?: unknown;
-  isError?: boolean;
-  message?: {
-    role?: unknown;
-    errorMessage?: unknown;
-    content?: unknown;
-  };
-};
-
-type ToolCallSummary = {
-  id: string;
-  name: string;
-  status: 'running' | 'completed' | 'failed';
-  startedAt: number;
-  endedAt?: number;
-  durationMs?: number;
-  args?: unknown;
-  isError?: boolean;
-  nestedToolCalls?: NestedToolCallSummary[];
-  resultText?: string;
-  errorText?: string;
-};
-
-type NestedToolCallSummary = {
-  name: string;
-  status?: string;
-  isError?: boolean;
-  args?: unknown;
-};
-
-type LiveBenchmarkState = {
-  toolStarts: Map<string, BenchmarkEvent>;
-  toolUpdates: Map<string, string>;
-};
+const ALERT_LOOKUP_TOOLS = new Set(['find_panel_alert_rules', 'get_alert_rule']);
 
 test.describe.configure({ mode: 'serial' });
 test.setTimeout(readPositiveInteger(process.env.BENCH_TEST_TIMEOUT_MS, DEFAULT_TIMEOUT_MS + 90_000));
@@ -94,6 +53,7 @@ test.describe('alert troubleshooting benchmark', () => {
           return response.ok();
         })
         .toBe(true);
+      const alertRulesBefore = await alertRulesFingerprint(page.request);
 
       await page.goto(`/d/${dashboardUid}/alert-troubleshooting?orgId=1&viewPanel=1&from=now-1h&to=now`);
       await expect(page.getByText(panelTitle)).toBeVisible();
@@ -102,13 +62,11 @@ test.describe('alert troubleshooting benchmark', () => {
       await expect(page.getByTestId(testIds.chat.composer)).toBeVisible();
 
       const prompt = [
-        'This benchmark validates read-only alert troubleshooting for a dashboard panel.',
-        'Use exactly one top-level run_alert_agent call.',
-        'Do not call find_panel_alert_rules, get_alert_rule, inspect_dashboard_context, query_prometheus, or dashboard tools directly at top level.',
-        `Call run_alert_agent with dashboardUid "${dashboardUid}", panelId "1", and this task:`,
-        `"Find the alert rule linked to dashboard UID ${dashboardUid} panel ID 1. Use namespace ${namespace}. Call find_panel_alert_rules, inspect_dashboard_context, and query_prometheus for the alert rule prometheusChecks. Compare the panel visual threshold with the alert threshold and explain why the panel can look below warning while the alert can still fire. Mention the rule title ${ruleTitle}, the query metric http_requests_total, the alert threshold, and the panel threshold. Do not edit alerts or dashboards."`,
-        'After the alert agent returns, do not call more tools.',
-        'Answer with a concise explanation and end with ALERT_TROUBLESHOOTING_DONE.',
+        `The "${panelTitle}" panel on this dashboard looks below its warning threshold, but its linked alert keeps firing.`,
+        'Find the alert rule linked to this panel, compare its query, threshold, and evaluation settings with the panel,',
+        'check the current data, and explain why the panel can look fine while the alert still fires.',
+        'Name the rule, the metric it queries, the alert threshold, and the panel threshold.',
+        'Do not change any alert rules or dashboards.',
       ].join(' ');
 
       const promptStartedAt = Date.now();
@@ -118,17 +76,26 @@ test.describe('alert troubleshooting benchmark', () => {
       await expect(send).toBeEnabled();
       await send.click();
 
-      const completion = await waitForBenchmarkCompletion(page, streamedEvents, timeoutMs);
+      const timedOut = !(await waitForAgentEnd(page, streamedEvents, timeoutMs));
+      if (timedOut) {
+        await page
+          .getByRole('button', { name: /Stop/i })
+          .click({ timeout: 1000 })
+          .catch(() => undefined);
+      }
       const events = await readBenchmarkEvents(page, streamedEvents);
       const finalAnswer = findFinalAssistantText(events);
+      const alertRulesAfter = await alertRulesFingerprint(page.request).catch((error: unknown) => String(error));
+      const alertRulesChanged = alertRulesAfter !== alertRulesBefore;
       const report = formatBenchmarkReport(events, {
+        prompt,
         dashboardUid,
         ruleName,
         ruleTitle,
         promptStartedAt,
         timeoutMs,
-        timedOut: completion.timedOut,
-        completedBy: completion.completedBy,
+        timedOut,
+        alertRulesChanged,
         finalAnswer,
       });
       await testInfo.attach('alert-troubleshooting-benchmark-report.txt', {
@@ -142,7 +109,7 @@ test.describe('alert troubleshooting benchmark', () => {
       await writeBenchmarkArtifacts(events, report, finalAnswer);
       console.log(report);
 
-      if (completion.timedOut) {
+      if (timedOut) {
         throw new Error(`Alert troubleshooting benchmark timed out after ${timeoutMs}ms.`);
       }
 
@@ -151,7 +118,7 @@ test.describe('alert troubleshooting benchmark', () => {
         throw new Error(`Alert troubleshooting benchmark ended with assistant error: ${finalAssistantError}`);
       }
 
-      const qualityError = findQualityError(events, finalAnswer, ruleTitle);
+      const qualityError = findQualityError(events, { finalAnswer, ruleTitle, alertRulesChanged });
       if (qualityError) {
         throw new Error(`Alert troubleshooting benchmark failed quality gate: ${qualityError}`);
       }
@@ -314,14 +281,10 @@ async function openAssistantSidebar(page: Page, dashboardUid: string) {
 
 async function installBenchmarkRecorder(page: Page) {
   const streamedEvents: BenchmarkEvent[] = [];
-  const liveState: LiveBenchmarkState = {
-    toolStarts: new Map(),
-    toolUpdates: new Map(),
-  };
 
   await page.exposeFunction('__PI_AGENT_BENCHMARK_STREAM_EVENT__', (event: BenchmarkEvent) => {
     streamedEvents.push(event);
-    const line = formatLiveBenchmarkEvent(event, liveState);
+    const line = formatLiveEvent('alert-troubleshooting-benchmark', event);
     if (line) {
       console.log(line);
     }
@@ -367,280 +330,71 @@ async function readBenchmarkEvents(page: Page, streamedEvents: BenchmarkEvent[])
   return bestFrameEvents.length > 0 ? bestFrameEvents : streamedEvents;
 }
 
-async function waitForBenchmarkCompletion(page: Page, streamedEvents: BenchmarkEvent[], timeoutMs: number) {
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < timeoutMs) {
+async function waitForAgentEnd(page: Page, streamedEvents: BenchmarkEvent[], timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     const events = await readBenchmarkEvents(page, streamedEvents);
     if (events.some((event) => event.type === 'agent_end')) {
-      return { timedOut: false, completedBy: 'agent_end' as const };
-    }
-    if (hasCompletedAlertAgentEvidence(events)) {
-      return { timedOut: false, completedBy: 'tool_evidence' as const };
+      return true;
     }
     await page.waitForTimeout(500);
   }
-
-  return { timedOut: true, completedBy: 'timeout' as const };
+  return false;
 }
 
-function hasCompletedAlertAgentEvidence(events: BenchmarkEvent[]) {
-  return summarizeToolCalls(events).some((call) => {
-    if (call.name !== 'run_alert_agent' || call.status !== 'completed') {
-      return false;
-    }
-    const nestedNames = new Set((call.nestedToolCalls ?? []).map((nested) => nested.name));
-    return (
-      nestedNames.has('find_panel_alert_rules') &&
-      nestedNames.has('inspect_dashboard_context') &&
-      nestedNames.has('query_prometheus')
-    );
-  });
-}
-
-function findQualityError(events: BenchmarkEvent[], finalAnswer: string, ruleTitle: string) {
+/**
+ * Outcome gate: the linked rule was looked up, its data was checked with PromQL,
+ * no alerting resources or dashboards changed, the run stayed within budget, and
+ * the answer explains the alert-vs-panel threshold mismatch.
+ */
+function findQualityError(
+  events: BenchmarkEvent[],
+  options: { finalAnswer: string; ruleTitle: string; alertRulesChanged: boolean }
+) {
   if (events.length === 0) {
     return 'benchmark recorder captured no events';
   }
-
-  const toolCalls = summarizeToolCalls(events);
-  const alertAgentCalls = toolCalls.filter((call) => call.name === 'run_alert_agent');
-  if (alertAgentCalls.length !== 1) {
-    return `expected exactly one top-level run_alert_agent call, got ${alertAgentCalls.length}`;
+  if (options.alertRulesChanged) {
+    return 'Grafana alert rules changed during a read-only troubleshooting run';
   }
 
-  const unexpectedTopLevelCall = toolCalls.find((call) => call.name !== 'run_alert_agent');
-  if (unexpectedTopLevelCall) {
-    return `unexpected top-level tool call: ${unexpectedTopLevelCall.name}`;
+  const writes = dashboardWriteAttempts(events);
+  if (writes.length > 0) {
+    return `read-only benchmark attempted dashboard writes: ${writes.join(', ')}`;
+  }
+  const staged = stagedGrafanaPaths(events);
+  if (staged.length > 0) {
+    return `read-only benchmark staged Grafana resource changes: ${staged.join(', ')}`;
   }
 
-  const alertAgent = alertAgentCalls[0];
-  if (alertAgent.status !== 'completed' || alertAgent.isError) {
-    return 'run_alert_agent did not complete successfully';
+  const budgetError = findBudgetError(events, {
+    maxToolCalls: readPositiveInteger(process.env.BENCH_ALERT_MAX_TOOL_CALLS, DEFAULT_MAX_TOOL_CALLS),
+  });
+  if (budgetError) {
+    return budgetError;
   }
 
-  const nestedCalls = alertAgent.nestedToolCalls ?? [];
-  if (nestedCalls.length === 0) {
-    return 'run_alert_agent did not report nested tool calls';
+  const alertLookup = summarizeToolCalls(events).some(
+    (call) => ALERT_LOOKUP_TOOLS.has(call.name) && call.status === 'completed' && !call.isError
+  );
+  if (!alertLookup) {
+    return 'the linked alert rule was never looked up (find_panel_alert_rules or get_alert_rule)';
+  }
+  if (!hasSuccessfulPromEvidence(events)) {
+    return 'no successful `grafana-prom query` evidence was found';
   }
 
-  const nestedError = nestedCalls.find((call) => call.isError || call.status === 'failed');
-  if (nestedError) {
-    return `nested tool call failed: ${nestedError.name}`;
-  }
-
-  const nestedNames = new Set(nestedCalls.map((call) => call.name));
-  for (const required of ['find_panel_alert_rules', 'inspect_dashboard_context', 'query_prometheus']) {
-    if (!nestedNames.has(required)) {
-      return `run_alert_agent did not use ${required}`;
-    }
-  }
-
-  const forbidden = findForbiddenToolCall(toolCalls);
-  if (forbidden) {
-    return `read-only benchmark used write tool: ${forbidden}`;
-  }
-
-  const evidenceText = `${alertAgent.resultText ?? ''}\n${finalAnswer}`;
   const expectations = [
-    { label: 'rule title', pattern: new RegExp(escapeRegExp(ruleTitle), 'i') },
+    { label: 'rule title', pattern: new RegExp(escapeRegExp(options.ruleTitle), 'i') },
     { label: 'http_requests_total', pattern: /\bhttp_requests_total\b/i },
     { label: 'panel threshold', pattern: /panel.{0,80}threshold|threshold.{0,80}panel/i },
-    { label: 'alert threshold', pattern: /alert.{0,80}threshold|threshold.{0,80}alert|gt|greater/i },
-    { label: 'linked panel evidence', pattern: /panelRef|linked|panel ID|dashboard UID/i },
-    { label: 'Prometheus query evidence', pattern: /query_prometheus|Prometheus|PromQL|rate\(/i },
+    { label: 'panel threshold value 100', pattern: /\b100\b/ },
+    { label: 'alert threshold', pattern: /alert.{0,80}threshold|threshold.{0,80}alert|gt|greater|> ?0\b|above 0/i },
+    { label: 'linked panel evidence', pattern: /linked|panelRef|panel ID|dashboard UID/i },
   ];
-  const missing = expectations.filter((expectation) => !expectation.pattern.test(evidenceText));
+  const missing = expectations.filter((expectation) => !expectation.pattern.test(options.finalAnswer));
   if (missing.length > 0) {
-    return `evidence is missing ${missing.map((item) => item.label).join(', ')}`;
-  }
-
-  return undefined;
-}
-
-function summarizeToolCalls(events: BenchmarkEvent[]): ToolCallSummary[] {
-  const calls = new Map<string, ToolCallSummary>();
-
-  for (const event of events) {
-    if (!event.toolCallId || !event.toolName) {
-      continue;
-    }
-
-    if (event.type === 'tool_execution_start') {
-      calls.set(event.toolCallId, {
-        id: event.toolCallId,
-        name: event.toolName,
-        status: 'running',
-        startedAt: event.timestamp,
-        args: event.args,
-      });
-      continue;
-    }
-
-    const existing =
-      calls.get(event.toolCallId) ??
-      ({
-        id: event.toolCallId,
-        name: event.toolName,
-        status: 'running',
-        startedAt: event.timestamp,
-        args: event.args,
-      } satisfies ToolCallSummary);
-
-    if (event.type === 'tool_execution_update') {
-      calls.set(event.toolCallId, {
-        ...existing,
-        args: event.args ?? existing.args,
-        nestedToolCalls: extractNestedToolCalls(event.partialResult) ?? existing.nestedToolCalls,
-      });
-      continue;
-    }
-
-    if (event.type === 'tool_execution_end') {
-      const resultText = extractResultText(event.result);
-      calls.set(event.toolCallId, {
-        ...existing,
-        status: event.isError ? 'failed' : 'completed',
-        endedAt: event.timestamp,
-        durationMs: event.timestamp - existing.startedAt,
-        isError: event.isError,
-        nestedToolCalls: extractNestedToolCalls(event.result) ?? existing.nestedToolCalls,
-        resultText,
-        errorText: event.isError ? resultText : undefined,
-      });
-    }
-  }
-
-  return [...calls.values()].sort((left, right) => left.startedAt - right.startedAt);
-}
-
-function extractNestedToolCalls(result: unknown): NestedToolCallSummary[] | undefined {
-  const details = getRecord(getRecord(result)?.details);
-  const toolCalls = details?.toolCalls;
-  if (!Array.isArray(toolCalls)) {
-    return undefined;
-  }
-
-  return toolCalls.map((call) => {
-    const record = getRecord(call);
-    return {
-      name: stringField(record, 'name') ?? 'unknown',
-      status: stringField(record, 'status'),
-      isError: booleanField(record, 'isError'),
-      args: record?.args,
-    };
-  });
-}
-
-function extractNestedToolCallCount(result: unknown) {
-  return extractNestedToolCalls(result)?.length;
-}
-
-function findForbiddenToolCall(toolCalls: ToolCallSummary[]) {
-  for (const call of toolCalls) {
-    if (FORBIDDEN_WRITE_TOOLS.has(call.name)) {
-      return call.name;
-    }
-    for (const nested of call.nestedToolCalls ?? []) {
-      if (FORBIDDEN_WRITE_TOOLS.has(nested.name)) {
-        return `${call.name} -> ${nested.name}`;
-      }
-    }
-  }
-  return undefined;
-}
-
-function findFinalAssistantError(events: BenchmarkEvent[]) {
-  const finalAssistantMessage = [...events]
-    .reverse()
-    .find((event) => event.type === 'message_end' && event.message?.role === 'assistant')?.message;
-  return typeof finalAssistantMessage?.errorMessage === 'string' ? finalAssistantMessage.errorMessage : undefined;
-}
-
-function findFinalAssistantText(events: BenchmarkEvent[]) {
-  const finalAssistantMessage = [...events]
-    .reverse()
-    .find((event) => event.type === 'message_end' && event.message?.role === 'assistant')?.message;
-  return extractContentText(finalAssistantMessage?.content);
-}
-
-function extractContentText(content: unknown) {
-  if (typeof content === 'string') {
-    return content;
-  }
-  if (!Array.isArray(content)) {
-    return '';
-  }
-
-  return content
-    .map((block) => {
-      const record = getRecord(block);
-      return record?.type === 'text' && typeof record.text === 'string' ? record.text : '';
-    })
-    .filter(Boolean)
-    .join('\n')
-    .trim();
-}
-
-function extractResultText(result: unknown) {
-  const content = getRecord(result)?.content;
-  if (!Array.isArray(content)) {
-    return undefined;
-  }
-
-  return content
-    .map((block) => getRecord(block))
-    .filter((block): block is Record<string, unknown> => Boolean(block) && block.type === 'text')
-    .map((block) => block.text)
-    .filter((value): value is string => typeof value === 'string')
-    .join(' ');
-}
-
-function formatLiveBenchmarkEvent(event: BenchmarkEvent, state: LiveBenchmarkState) {
-  if (event.type === 'tool_execution_start' && event.toolCallId && event.toolName) {
-    state.toolStarts.set(event.toolCallId, event);
-    return `[alert-troubleshooting-benchmark:live] tool_start ${event.toolName} args=${summarizeJson(event.args)}`;
-  }
-
-  if (event.type === 'tool_execution_update' && event.toolCallId && event.toolName) {
-    const nestedCalls = extractNestedToolCallCount(event.partialResult);
-    const resultText = truncateOneLine(extractResultText(event.partialResult) ?? '', 240);
-    if (nestedCalls === undefined && !resultText) {
-      return undefined;
-    }
-
-    const updateKey = `${nestedCalls ?? ''}|${resultText}`;
-    if (state.toolUpdates.get(event.toolCallId) === updateKey) {
-      return undefined;
-    }
-    state.toolUpdates.set(event.toolCallId, updateKey);
-
-    return [
-      `[alert-troubleshooting-benchmark:live] tool_update ${event.toolName}`,
-      nestedCalls === undefined ? undefined : `nested=${nestedCalls}`,
-      resultText ? `text=${resultText}` : undefined,
-    ]
-      .filter(Boolean)
-      .join(' ');
-  }
-
-  if (event.type === 'tool_execution_end' && event.toolCallId && event.toolName) {
-    const start = state.toolStarts.get(event.toolCallId);
-    const duration = start ? formatDuration(event.timestamp - start.timestamp) : 'unknown';
-    const status = event.isError ? 'failed' : 'completed';
-    const nestedCalls = extractNestedToolCallCount(event.result);
-    const resultText = truncateOneLine(extractResultText(event.result) ?? '', event.isError ? 600 : 240);
-    return [
-      `[alert-troubleshooting-benchmark:live] tool_end ${event.toolName} ${status} duration=${duration}`,
-      nestedCalls === undefined ? undefined : `nested=${nestedCalls}`,
-      resultText ? (event.isError ? `error=${resultText}` : `text=${resultText}`) : undefined,
-    ]
-      .filter(Boolean)
-      .join(' ');
-  }
-
-  if (event.type === 'agent_end') {
-    return '[alert-troubleshooting-benchmark:live] agent_end';
+    return `final answer is missing ${missing.map((item) => item.label).join(', ')}`;
   }
 
   return undefined;
@@ -649,54 +403,39 @@ function formatLiveBenchmarkEvent(event: BenchmarkEvent, state: LiveBenchmarkSta
 function formatBenchmarkReport(
   events: BenchmarkEvent[],
   options: {
+    prompt: string;
     dashboardUid: string;
     ruleName: string;
     ruleTitle: string;
     promptStartedAt: number;
     timeoutMs: number;
     timedOut: boolean;
-    completedBy: 'agent_end' | 'tool_evidence' | 'timeout';
+    alertRulesChanged: boolean;
     finalAnswer: string;
   }
 ) {
   const agentStart = events.find((event) => event.type === 'agent_start')?.timestamp ?? options.promptStartedAt;
   const agentEnd = [...events].reverse().find((event) => event.type === 'agent_end')?.timestamp;
   const elapsedMs = (agentEnd ?? Date.now()) - agentStart;
-  const toolCalls = summarizeToolCalls(events);
-  const qualityError = findQualityError(events, options.finalAnswer, options.ruleTitle);
+  const usage = summarizeUsage(events);
+  const qualityError = options.timedOut ? undefined : findQualityError(events, options);
   const lines = [
     'Alert troubleshooting benchmark',
+    `Prompt: ${options.prompt}`,
     `Dashboard UID: ${options.dashboardUid}`,
     `Alert rule: ${options.ruleName}`,
     `Alert title: ${options.ruleTitle}`,
     `Timed out: ${options.timedOut ? 'yes' : 'no'}`,
-    `Completed by: ${options.completedBy}`,
     `Agent elapsed: ${formatDuration(elapsedMs)}`,
     `Timeout: ${formatDuration(options.timeoutMs)}`,
-    `Quality gate: ${qualityError ?? 'passed'}`,
+    `Token usage: input=${usage.input}, output=${usage.output}, total=${usage.totalTokens}`,
+    `Tool calls: ${summarizeToolCalls(events).length}`,
+    `Alert rules changed: ${options.alertRulesChanged ? 'yes' : 'no'}`,
+    `Quality gate: ${options.timedOut ? 'not run' : (qualityError ?? 'passed')}`,
     '',
     'Tool calls',
+    ...formatToolTimeline(events),
   ];
-
-  for (const call of toolCalls) {
-    lines.push(
-      [
-        call.name,
-        call.status,
-        call.durationMs === undefined ? undefined : formatDuration(call.durationMs),
-        call.nestedToolCalls?.length ? `${call.nestedToolCalls.length} nested calls` : undefined,
-        call.isError ? 'error' : undefined,
-      ]
-        .filter(Boolean)
-        .join(' | ')
-    );
-    if (call.nestedToolCalls?.length) {
-      lines.push(`  nested=${call.nestedToolCalls.map(formatNestedToolCall).join(', ')}`);
-    }
-    if (call.errorText) {
-      lines.push(`  error=${truncateOneLine(call.errorText, 800)}`);
-    }
-  }
 
   if (options.finalAnswer.trim()) {
     lines.push('', 'Final answer', truncateReportText(options.finalAnswer, 2000));
@@ -718,56 +457,10 @@ async function writeBenchmarkArtifacts(events: BenchmarkEvent[], report: string,
   ]);
 }
 
-function readPositiveInteger(value: string | undefined, fallback: number) {
-  const parsed = value ? Number(value) : NaN;
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function stringField(record: Record<string, unknown> | undefined, field: string) {
-  const value = record?.[field];
-  return typeof value === 'string' ? value : undefined;
-}
-
-function booleanField(record: Record<string, unknown> | undefined, field: string) {
-  const value = record?.[field];
-  return typeof value === 'boolean' ? value : undefined;
-}
-
-function formatDuration(ms: number) {
-  if (ms < 1000) {
-    return `${ms}ms`;
-  }
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-function truncateOneLine(value: string, maxLength: number) {
-  const oneLine = value.replace(/\s+/g, ' ').trim();
-  return oneLine.length > maxLength ? `${oneLine.slice(0, maxLength)}...` : oneLine;
-}
-
 function truncateReportText(value: string, maxLength: number) {
   return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
 }
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function formatNestedToolCall(call: NestedToolCallSummary) {
-  return `${call.name}${call.status ? `:${call.status}` : ''}${call.isError ? ':error' : ''}`;
-}
-
-function summarizeJson(value: unknown) {
-  if (value === undefined) {
-    return 'undefined';
-  }
-  const json = JSON.stringify(value);
-  if (!json) {
-    return String(value);
-  }
-  return json.length > 500 ? `${json.slice(0, 500)}...` : json;
-}
-
-function getRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === 'object' ? (value as Record<string, unknown>) : undefined;
 }

@@ -1,12 +1,9 @@
 import type { Agent, BeforeToolCallResult } from '@earendil-works/pi-agent-core';
 import type { DashboardAssistantLaunch } from './dashboardLaunch';
-import type {
-  Artifact,
-  DashboardSaveFolderSelection,
-  InvestigationReport,
-  VirtualJsonnetFileSnapshot,
-} from './grafanaTools';
+import type { Artifact, InvestigationReport } from './grafanaTools';
 import type { ChatRunStatus } from './streamingStatus';
+import type { CompactionState } from './compaction';
+import type { SessionWorkspace } from './workspace';
 import type { ToolRunView } from './ToolRenderer';
 
 export type ChatToolConfirmationHandler = (
@@ -21,8 +18,8 @@ export type ChatRunSnapshot = {
   title: string;
   agent: Agent;
   dashboardLaunch?: DashboardAssistantLaunch;
-  virtualJsonnetFiles: Record<string, VirtualJsonnetFileSnapshot>;
-  virtualJsonnetHydrated: Record<string, number>;
+  workspace?: SessionWorkspace;
+  compaction?: { state?: CompactionState };
   investigationReport?: InvestigationReport;
   artifacts: Record<string, Artifact>;
   artifactCounter: number;
@@ -33,7 +30,6 @@ export type ChatRunSnapshot = {
 };
 
 const liveRuns = new Map<string, ChatRunSnapshot>();
-const dashboardSaveFolderOverrides = new Map<string, DashboardSaveFolderSelection>();
 
 export function storeChatRun(snapshot: Omit<ChatRunSnapshot, 'updatedAt'>): ChatRunSnapshot {
   const stored = {
@@ -53,7 +49,6 @@ export function removeChatRun(id: string | undefined) {
     return;
   }
   liveRuns.delete(id);
-  clearDashboardSaveFolderOverridesForSession(id);
 }
 
 export function isStoredChatRunAgent(id: string | undefined, agent: Agent | undefined) {
@@ -66,36 +61,4 @@ export function setChatRunConfirmationHandler(id: string | undefined, handler: C
     run.requestToolConfirmation = handler;
     run.updatedAt = Date.now();
   }
-}
-
-export function setDashboardSaveFolderOverride(
-  sessionId: string,
-  toolCallId: string,
-  selection: DashboardSaveFolderSelection
-) {
-  dashboardSaveFolderOverrides.set(dashboardSaveFolderKey(sessionId, toolCallId), selection);
-}
-
-export function getDashboardSaveFolderOverride(sessionId: string | undefined, toolCallId: string) {
-  return sessionId ? dashboardSaveFolderOverrides.get(dashboardSaveFolderKey(sessionId, toolCallId)) : undefined;
-}
-
-export function clearDashboardSaveFolderOverride(sessionId: string | undefined, toolCallId: string) {
-  if (!sessionId) {
-    return;
-  }
-  dashboardSaveFolderOverrides.delete(dashboardSaveFolderKey(sessionId, toolCallId));
-}
-
-function clearDashboardSaveFolderOverridesForSession(sessionId: string) {
-  const prefix = `${sessionId}:`;
-  for (const key of dashboardSaveFolderOverrides.keys()) {
-    if (key.startsWith(prefix)) {
-      dashboardSaveFolderOverrides.delete(key);
-    }
-  }
-}
-
-function dashboardSaveFolderKey(sessionId: string, toolCallId: string) {
-  return `${sessionId}:${toolCallId}`;
 }

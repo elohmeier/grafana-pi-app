@@ -63,6 +63,8 @@ Object.assign(env, {
   PI_OPENAI_PROTOCOL: config.model.protocol,
   PI_THINKING_LEVEL: config.model.thinkingLevel,
   PI_THINKING_FORMAT: config.model.thinkingFormat,
+  PI_CONTEXT_WINDOW: String(config.model.contextWindow ?? ''),
+  PI_MAX_OUTPUT_TOKENS: String(config.model.maxOutputTokens ?? ''),
   BENCH_LLM_BASE_URL: config.model.baseUrl,
   BENCH_EXPECTED_MODEL: JSON.stringify(config.model),
 });
@@ -120,8 +122,7 @@ const run = {
     independentBrowserPerCase: true,
     cachePolicy: 'uncontrolled; provider/server caches are not reset',
     latencyScope: 'browser to Grafana LLM proxy, including upstream inference and transport',
-    usageScope:
-      'all captured proxy calls, including specialists; backend-internal retries are not individually visible',
+    usageScope: 'all captured proxy calls; backend-internal retries are not individually visible',
     percentileMethod: 'nearest rank',
   },
   cases: [],

@@ -1,16 +1,28 @@
 import { BASE_SYSTEM_PROMPT } from './systemPrompt';
 
 describe('chat system prompt', () => {
-  it('routes dashboard handoffs directly to the dashboard agent', () => {
-    expect(BASE_SYSTEM_PROMPT).toContain(
-      'when a dashboard task already has validated evidence, requires validation before dashboard creation, follows an investigation, or the user explicitly asks for run_dashboard_agent'
-    );
-    expect(BASE_SYSTEM_PROMPT).toContain(
-      'Persistent dashboard create/update tasks must go through run_dashboard_agent'
-    );
-    expect(BASE_SYSTEM_PROMPT).toContain('write_dashboard_plan');
-    expect(BASE_SYSTEM_PROMPT).toContain('treat that as a hard routing constraint');
-    expect(BASE_SYSTEM_PROMPT).toContain('do not add extra top-level specialists');
-    expect(BASE_SYSTEM_PROMPT).toContain('After the requested sequence has completed, stop calling tools');
+  it('describes a single agent working through the session filesystem tools', () => {
+    expect(BASE_SYSTEM_PROMPT).toContain('Your main tools are read, write, edit, and bash');
+    expect(BASE_SYSTEM_PROMPT).toContain('`workspace plan`, and `workspace apply <plan-id>`');
+    expect(BASE_SYSTEM_PROMPT).toContain('Alerting is read-only for you');
+  });
+
+  it('does not reference specialists or removed tools', () => {
+    for (const removed of [
+      'run_query_agent',
+      'run_dashboard_agent',
+      'run_investigation_agent',
+      'run_alert_agent',
+      'run_support_agent',
+      'run_navigation_agent',
+      'specialist',
+      'write_dashboard_plan',
+      'query_prometheus',
+      'list_metrics',
+      'list_datasources',
+      'upload_dashboard',
+    ]) {
+      expect(BASE_SYSTEM_PROMPT).not.toContain(removed);
+    }
   });
 });

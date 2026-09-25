@@ -2,13 +2,13 @@
 
 Use this sequence for Jsonnet dashboards:
 
-1. `read_skill_resource` for `references/example.md` or `templates/prometheus.md` when you need a concrete helper example
-2. `write_dashboard_plan` with a typed dashboard plan when each panel can reference validated query evidence
-3. `render_dashboard`
-4. Repair material validation warnings from render output
-5. `save_dashboard` for create or update requests unless the user asked for a draft or preview only
+1. Read `/.agents/skills/grafana-dashboard/references/example.md` or `/.agents/skills/grafana-dashboard/templates/prometheus.md` when you need a concrete helper example.
+2. `write` the source to `/workspace/<name>.jsonnet`.
+3. `mkdir -p /grafana/dashboards/<uid> && jsonnet /workspace/<name>.jsonnet --resource <uid> -o /grafana/dashboards/<uid>/dashboard.json`
+4. `grafana-dashboard fix /grafana/dashboards/<uid>/dashboard.json` and `grafana-dashboard validate /grafana/dashboards/<uid>/dashboard.json`; repair errors in the Jsonnet with `edit` and re-run step 3.
+5. `workspace plan`, then `workspace apply <plan-id>` for create or update requests unless the user asked for a draft or preview only.
 
-Use raw `write_jsonnet` instead of `write_dashboard_plan` only when the dashboard needs constructs that are outside the plan contract, such as variables, mixed datasources, custom transformations, or heavily customized panel options.
+`jsonnet FILE` without `-o` prints the evaluated JSON, which is useful with `jq` to inspect panels before rendering into the working copy.
 
 For new dashboards, prefer the bundled helper library:
 
@@ -53,7 +53,7 @@ If variables are needed, use a plain Grafana templating object:
 
 For tables, pass explicit `columns=[...]` and `rename={...}` to `d.panel.table` so the generated panel filters and organizes visible columns.
 
-Before writing dashboard panels, validate candidate rate/trend PromQL with `query_prometheus` using `type="range"` plus `start`/`end` matching the dashboard time range. Treat `validationError` or zero-series candidates as unusable evidence. If the supervisor task already provides explicit panel queries and says they were validated from tool evidence with non-zero series and no `validationError`, trust that handoff and move directly to `write_dashboard_plan` when the plan contract is sufficient.
+Before writing dashboard panels, validate candidate rate/trend PromQL with a range query (`grafana-prom query EXPR --from ... --to ...`) matching the dashboard time range. Treat `validationError` or zero-series candidates as unusable evidence. If the supervisor task already provides explicit panel queries and says they were validated from tool evidence with non-zero series and no `validationError`, trust that handoff and move directly to writing the Jsonnet.
 
 Prefer short file names that match the dashboard subject, for example `node-overview.jsonnet` or `service-latency.jsonnet`.
 

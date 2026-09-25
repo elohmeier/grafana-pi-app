@@ -180,7 +180,7 @@ test('CLI configures Azure v1 deployment IDs with inherited Responses and per-mo
   const apiKey = 'azure-test-key-not-a-credential';
   const fixture = {
     providers: {
-      'azure': {
+      azure: {
         baseUrl,
         apiKey,
         api: 'openai-responses',
@@ -250,4 +250,24 @@ test('CLI configures Azure v1 deployment IDs with inherited Responses and per-mo
   }
   assert.equal(updates.length, 3);
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), fixture);
+});
+
+test('modelConfiguration preserves Pi model limits within half the context window', () => {
+  const configuration = modelConfiguration({
+    provider: 'local',
+    settings: { api: 'openai-completions', baseUrl: 'http://example.test/v1' },
+    model: { id: 'big', contextWindow: 262144, maxTokens: 200000 },
+  });
+  assert.equal(configuration.models[0].contextWindow, 262144);
+  assert.equal(configuration.models[0].maxOutputTokens, 131072);
+  const overridden = modelConfiguration(
+    {
+      provider: 'local',
+      settings: { api: 'openai-completions', baseUrl: 'http://example.test/v1' },
+      model: { id: 'big', contextWindow: 262144, maxTokens: 8192 },
+    },
+    { 'context-window': '65536' }
+  );
+  assert.equal(overridden.models[0].contextWindow, 65536);
+  assert.equal(overridden.models[0].maxOutputTokens, 8192);
 });

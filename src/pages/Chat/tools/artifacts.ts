@@ -82,10 +82,6 @@ const ARTIFACT_MAX_SLICE_LIMIT = 500;
 const JQ_OUTPUT_LIMIT = 80000;
 
 const ARTIFACT_TOOL_NAMES = new Set([
-  'query_prometheus',
-  'query_prometheus_raw',
-  'get_dashboard',
-  'grafana_get_dashboard',
   'inspect_dashboard_context',
   'inspect_dashboard_metric_usage',
   'search_dashboard_metric_usage',
@@ -96,16 +92,11 @@ const ARTIFACT_TOOL_NAMES = new Set([
   'list_live_dashboard_variables',
   'add_live_dashboard_panel',
   'move_or_resize_live_dashboard_panel',
-  'render_dashboard',
-  'save_dashboard',
   'screenshot_dashboard',
   'grafana_screenshot',
 ]);
 
 const ALWAYS_ARTIFACT_TOOL_NAMES = new Set([
-  'query_prometheus_raw',
-  'get_dashboard',
-  'grafana_get_dashboard',
   'inspect_dashboard_context',
   'list_live_dashboard_panels',
   'get_live_dashboard_layout',
@@ -113,8 +104,6 @@ const ALWAYS_ARTIFACT_TOOL_NAMES = new Set([
   'list_live_dashboard_variables',
   'add_live_dashboard_panel',
   'move_or_resize_live_dashboard_panel',
-  'render_dashboard',
-  'save_dashboard',
   'screenshot_dashboard',
   'grafana_screenshot',
 ]);
@@ -560,16 +549,12 @@ function compactLiveDashboardGrid(spec: Record<string, unknown> | undefined) {
 
 function artifactKind(toolName: string, data: unknown, details: unknown): ArtifactKind {
   if (
-    toolName === 'get_dashboard' ||
-    toolName === 'grafana_get_dashboard' ||
     toolName === 'inspect_dashboard_context' ||
     toolName === 'inspect_dashboard_metric_usage' ||
     toolName === 'search_dashboard_metric_usage' ||
     toolName === 'get_metric_neighborhood' ||
     toolName === 'list_live_dashboard_panels' ||
-    toolName === 'get_live_dashboard_layout' ||
-    toolName === 'render_dashboard' ||
-    toolName === 'save_dashboard'
+    toolName === 'get_live_dashboard_layout'
   ) {
     return 'dashboard';
   }
@@ -594,17 +579,6 @@ function artifactTitle(toolName: string, details: unknown, data?: unknown) {
 }
 
 function artifactSummaryLine(toolName: string, data: unknown, details: unknown) {
-  if (toolName === 'query_prometheus' && isRecord(data)) {
-    const query = stringField(data, 'query');
-    const queryCount = numberField(data, 'queryCount');
-    if (queryCount !== undefined) {
-      return `${queryCount} Prometheus queries summarized.`;
-    }
-    if (query) {
-      return `Prometheus query summary for ${query}.`;
-    }
-  }
-
   const dashboard = isRecord(data) ? (recordField(data, 'dashboard') ?? data) : undefined;
   const panels = dashboard ? recordsField(dashboard, 'panels').length : undefined;
   const title = stringField(dashboard, 'title');

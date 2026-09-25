@@ -1,11 +1,9 @@
 import React from 'react';
 import { ChatApp } from './ChatSceneObject';
 import type { DashboardAssistantAction } from './dashboardLaunch';
-import type { AgentWorkspaceLaunchPayload } from './agentWorkspace/types';
 
 export type AssistantSidebarProps = {
   action?: DashboardAssistantAction;
-  agentWorkspaceLaunch?: AgentWorkspaceLaunchPayload;
   contextId?: string;
   path?: string;
   sessionId?: string;
@@ -27,7 +25,6 @@ export type AssistantSidebarProps = {
 
 export default function AssistantSidebar({
   action,
-  agentWorkspaceLaunch,
   contextId,
   path,
   sessionId,
@@ -40,9 +37,8 @@ export default function AssistantSidebar({
 }: AssistantSidebarProps) {
   return (
     <ChatApp
-      key={sidebarKey({ action, agentWorkspaceLaunch, contextId, sessionId, chatId, initialPrompt })}
+      key={sidebarKey({ action, contextId, sessionId, chatId, initialPrompt })}
       variant="sidebar"
-      agentWorkspaceLaunch={agentWorkspaceLaunch}
       launchContextId={contextId}
       sidebarRoute={path}
       sessionId={sessionId}
@@ -58,22 +54,13 @@ export default function AssistantSidebar({
 
 function sidebarKey({
   action,
-  agentWorkspaceLaunch,
   contextId,
   sessionId,
   chatId,
   initialPrompt,
-}: Pick<AssistantSidebarProps, 'action' | 'agentWorkspaceLaunch' | 'contextId' | 'sessionId' | 'chatId' | 'initialPrompt'>) {
+}: Pick<AssistantSidebarProps, 'action' | 'contextId' | 'sessionId' | 'chatId' | 'initialPrompt'>) {
   if (sessionId) {
     return sessionId;
-  }
-  if (agentWorkspaceLaunch) {
-    return JSON.stringify({
-      sourcePluginId: agentWorkspaceLaunch.sourcePluginId,
-      workspaceKind: agentWorkspaceLaunch.workspaceKind,
-      workspaceRef: agentWorkspaceLaunch.workspaceRef,
-      contextId: agentWorkspaceLaunch.contextId,
-    });
   }
   // Each distinct external launch (e.g. a different alert's "Investigate"
   // click) must remount ChatApp so its one-shot initial-load effect reruns -

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { selectModel } from '../configure-pi-model.mjs';
-import { validateConfig } from './core.mjs';
+import { suites, validateConfig } from './core.mjs';
 import { createProfile, resolveBenchmarkApiKey } from './profile.mjs';
 
 const exec = promisify(execFile);
@@ -41,7 +41,7 @@ test('creates runnable profiles from inherited and overridden Pi settings withou
     assert.equal(profile.apiKeyPi, '~/.pi/agent/models.json');
     assert.deepEqual(profile.hosting, { label: 'azure', region: 'unknown', serviceTier: 'unknown' });
     assert.equal(profile.repetitions, 1);
-    assert.equal(validateConfig(profile).suites.length, 12);
+    assert.equal(validateConfig(profile).suites.length, suites.length);
     assert.ok(!JSON.stringify(profile).includes('touch'));
   }
   const profile = createProfile(selectModel(config, { model: 'sol' }), {

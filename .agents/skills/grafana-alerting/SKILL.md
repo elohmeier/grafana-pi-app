@@ -10,7 +10,6 @@ Use this skill when the user asks why an alert is firing, pending, warning, norm
 ## Operating Rules
 
 - Alert support is read-only. Do not create, edit, pause, silence, delete, or persist alerting resources.
-- For alert troubleshooting, call `run_alert_agent`; it owns the alert workflow.
 - Use only the App Platform AlertRule tools for Grafana-managed alert rules.
 - Compare the alert rule with the panel instead of assuming the panel state and alert state use the same query.
 
@@ -20,7 +19,7 @@ Use this skill when the user asks why an alert is firing, pending, warning, norm
 2. Use `find_panel_alert_rules` to find linked rules by `spec.panelRef.dashboardUID`/`spec.panelRef.panelID` and by Grafana's dashboard link annotations `__dashboardUid__`/`__panelId__`.
 3. If needed, call `get_alert_rule` for the exact rule.
 4. Inspect dashboard context when the panel query, field thresholds, transformations, or time range matter.
-5. Run the alert rule `prometheusChecks` with `query_prometheus`.
+5. Run the alert rule `prometheusChecks` with `grafana-prom query` (use `--from` matching the rule's relative time range).
 6. Compare alert evidence against panel evidence:
    - datasource UID
    - PromQL expression

@@ -21,6 +21,12 @@ type jsonnetDashboardExpression struct {
 	panelsNode    ast.Node
 }
 
+const defaultVirtualJsonnetPath = "dashboard.jsonnet"
+
+func normalizeSourceLineEndings(source string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(source, "\r\n", "\n"), "\r", "\n")
+}
+
 func repairJsonnetDashboardSource(source string) (string, []string, error) {
 	content := normalizeSourceLineEndings(source)
 	root, _, err := formatter.SnippetToRawAST(defaultVirtualJsonnetPath, content)

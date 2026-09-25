@@ -27,7 +27,6 @@ export const testIds = {
     customSkillContent: 'data-testid ac-custom-skill-content',
     customSkillKeywords: 'data-testid ac-custom-skill-keywords',
     customSkillRegex: 'data-testid ac-custom-skill-regex',
-    customSkillToolGroups: 'data-testid ac-custom-skill-tool-groups',
     customSkillResourceAdd: 'data-testid ac-custom-skill-resource-add',
     customSkillResourcePath: 'data-testid ac-custom-skill-resource-path',
     customSkillResourceContent: 'data-testid ac-custom-skill-resource-content',

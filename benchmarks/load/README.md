@@ -1,6 +1,6 @@
 # Concurrent assistant load testing
 
-`npm run benchmark:load` measures simultaneous assistant conversations through the actual browser agent, specialists, Grafana tools, and streaming proxy. It is separate from `benchmark:run`, its suite catalog, and ordinary Playwright discovery. Running the comparison benchmarks never starts a load test.
+`npm run benchmark:load` measures simultaneous assistant conversations through the actual browser agent, its session shell and Grafana tools, and the streaming proxy. It is separate from `benchmark:run`, its suite catalog, and ordinary Playwright discovery. Running the comparison benchmarks never starts a load test.
 
 ## Run
 
@@ -26,7 +26,7 @@ The model server is externally managed by default. `--start-model-server` explic
 
 ## Workload and scheduling
 
-The two workload IDs are `explore-metrics` and `analysis`. They reuse the serial benchmarks' prompts and check successful specialist execution, PromQL evidence, expected metric/incident findings, and a nonempty final answer. Load quality gates omit the serial suites' tool-duration limits; latency is evaluated separately. Persistent write approvals are never accepted by the driver.
+The two workload IDs are `explore-metrics` and `analysis`. They reuse the serial benchmarks' prompts and check successful PromQL evidence (a `grafana-prom query` bash call with exit code 0), expected metric/incident findings, a tool-call budget, no dashboard writes, and a nonempty final answer. Load quality gates omit the serial suites' tool-duration limits; latency is evaluated separately. Persistent write approvals are never accepted by the driver.
 
 Each virtual user owns a browser context and page. Authentication cookies are copied from the plugin-e2e login; browser storage is independent. Users share Grafana's authenticated account and server-side services, so this measures concurrent conversations rather than account-level authorization or login throughput. Each iteration starts a fresh chat. `followUp: true` adds a second turn using the collected evidence, preserving the conversation's history. These workloads run separately, in repetition → workload → increasing-concurrency order.
 
@@ -54,7 +54,7 @@ Latency and success use conversations **admitted during the measurement window**
 
 Successful conversations/minute counts **completions inside the measurement window**, including warmup admissions. Aggregate output tokens/second similarly accounts for provider usage at terminal request events inside that window. This is a wall-clock aggregate, not a sum of individual token rates or a server decode-speed measurement. Missing usage is disclosed in `throughputUsage` and `llm`; partial observed totals are not complete billing totals.
 
-Request latency starts at browser fetch. First content means the first nonempty text, reasoning or tool-argument delta; first bytes can be only a proxy start event. First text includes generated text from specialists and does not measure DOM paint. Mean/peak requests in flight are calculated from overlapping request intervals, clipped to the measurement window, including warmup and unfinished requests. Session occupancy uses the same interval method. Tools and specialists can make the model-request population differ from the conversation population.
+Request latency starts at browser fetch. First content means the first nonempty text, reasoning or tool-argument delta; first bytes can be only a proxy start event. First text does not measure DOM paint. Mean/peak requests in flight are calculated from overlapping request intervals, clipped to the measurement window, including warmup and unfinished requests. Session occupancy uses the same interval method. Tool calls make the model-request population differ from the conversation population.
 
 Dispatch delay measures conversation admission to its first observed LLM fetch, including browser scheduling and prompt preparation. It is unavailable when no request was dispatched.
 
@@ -97,4 +97,4 @@ GRAFANA_URL=http://localhost:3001 E2E_PLUGIN_ID=grafana-assistant-app \
   npx playwright test tests/loadBrowserSession.spec.ts --project=chromium --retries=0
 ```
 
-The browser regression test intercepts every model request and verifies overlapping sessions, specialist calls, reset, rate-limit classification and cancellation/recovery through the actual frontend. It does not establish endpoint capacity. The ordinary benchmark catalog and Playwright config exclude `agentLoadBenchmark.spec.ts`; only the separate load config plus `RUN_LOAD_BENCHMARKS=1` can execute it.
+The browser regression test intercepts every model request and verifies overlapping sessions, shell tool calls, reset, rate-limit classification and cancellation/recovery through the actual frontend. It does not establish endpoint capacity. The ordinary benchmark catalog and Playwright config exclude `agentLoadBenchmark.spec.ts`; only the separate load config plus `RUN_LOAD_BENCHMARKS=1` can execute it.

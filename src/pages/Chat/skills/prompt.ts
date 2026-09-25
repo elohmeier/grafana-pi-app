@@ -2,6 +2,9 @@ import { BASE_SYSTEM_PROMPT } from '../systemPrompt';
 import { GRAFANA_SKILLS } from './catalog';
 import type { GrafanaSkill } from './types';
 
+/** Virtual directory where the session filesystem mounts skills (see workspace/mounts.ts). */
+export const SKILLS_ROOT = '/.agents/skills';
+
 type RenderGrafanaSystemPromptOptions = {
   basePrompt?: string;
   skills?: readonly GrafanaSkill[];
@@ -45,13 +48,13 @@ Live dashboard editing is available for the currently loaded dashboard.
 - Verify the changed panel, layout, dashboard settings, or variable list after the requested mutation sequence.
 - add_live_dashboard_panel and move_or_resize_live_dashboard_panel automatically attach screenshot verification when Grafana image rendering is configured.
 - Use apply_live_dashboard_mutation only for advanced commands that do not have a typed tool.
-- Use Jsonnet render/save for durable generated dashboards, not for small live edits to the current dashboard unless the user asks for that path.`;
+- Use the session filesystem (dashboard.json working copies, the jsonnet command, workspace plan/apply) for durable saved changes, not for small live edits to the current dashboard unless the user asks for that path.`;
   }
 
   return `## Dashboard Editing Capability
 Live dashboard editing is not available in this plugin/runtime context.
 - Do not claim that you can directly edit the currently open dashboard.
-- For dashboard changes, offer Jsonnet dashboard generation, raw dashboard upload when available, or clear manual edit guidance.`;
+- For dashboard changes, stage them in /grafana/dashboards/<uid>/dashboard.json and apply them with workspace plan/apply after user approval, or give clear manual edit guidance.`;
 }
 
 function renderAvailableSkills(skills: readonly GrafanaSkill[]) {
@@ -59,9 +62,9 @@ function renderAvailableSkills(skills: readonly GrafanaSkill[]) {
     return '';
   }
 
-  const rows = skills.map((skill) => `- ${skill.name}: ${skill.description} (${skill.filePath})`).join('\n');
+  const rows = skills.map((skill) => `- ${skill.name}: ${skill.description} (${skillFilePath(skill)})`).join('\n');
 
-  return `## Available Skills\n${rows}\n\nUse a skill when the user's request matches its description or when the user names it with $skill-name. Active skill reference files can be opened with read_skill_resource.`;
+  return `## Available Skills\n${rows}\n\nUse a skill when the user's request matches its description or when the user names it with $skill-name. Skills live in the session filesystem under ${SKILLS_ROOT}/<skill-name>/: read SKILL.md before applying a skill that is not active below, and read its references/templates with the read tool when needed.`;
 }
 
 function renderActiveSkills(skills: readonly GrafanaSkill[]) {
@@ -75,7 +78,13 @@ function renderActiveSkills(skills: readonly GrafanaSkill[]) {
 function renderSkill(skill: GrafanaSkill) {
   const resources = Object.keys(skill.resources);
   const resourceList =
-    resources.length > 0 ? resources.map((resourcePath) => `- ${resourcePath}`).join('\n') : '- No bundled resources';
+    resources.length > 0
+      ? resources.map((resourcePath) => `- ${SKILLS_ROOT}/${skill.name}/${resourcePath}`).join('\n')
+      : '- No bundled resources';
 
-  return [`### ${skill.name}`, `Source: ${skill.filePath}`, 'Resources:', resourceList, skill.content].join('\n');
+  return [`### ${skill.name}`, `Source: ${skillFilePath(skill)}`, 'Resources:', resourceList, skill.content].join('\n');
+}
+
+function skillFilePath(skill: GrafanaSkill) {
+  return `${SKILLS_ROOT}/${skill.name}/SKILL.md`;
 }

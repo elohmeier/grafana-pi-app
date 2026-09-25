@@ -4,27 +4,35 @@ import { test, expect } from './fixtures';
 import { ROUTES } from '../src/constants';
 import { testIds } from '../src/components/testIds';
 import type { Page } from '@playwright/test';
+import {
+  appliedDashboardUids,
+  bashCalls,
+  dashboardExpressions,
+  fetchSavedDashboard,
+  findBudgetError,
+  findFinalAssistantError,
+  findFinalAssistantText,
+  formatDuration,
+  formatLiveEvent,
+  formatToolTimeline,
+  getRecord,
+  hasSuccessfulPromEvidence,
+  nonRowPanels,
+  numericField,
+  promEvidenceText,
+  readPositiveInteger,
+  stringField,
+  summarizeToolCalls,
+  summarizeUsage,
+  truncateOneLine,
+  type BenchmarkEvent,
+  type SavedDashboard,
+} from './benchmarkOutcomes';
 
 const DEFAULT_TIMEOUT_MS = 240_000;
 const OUTPUT_DIR = path.join(process.cwd(), 'test-results', 'dashboard-context-benchmark');
-
-type BenchmarkEvent = {
-  type: string;
-  timestamp: number;
-  toolCallId?: string;
-  toolName?: string;
-  args?: unknown;
-  partialResult?: unknown;
-  result?: unknown;
-  isError?: boolean;
-  message?: {
-    role?: unknown;
-    stopReason?: unknown;
-    errorMessage?: unknown;
-    content?: unknown;
-  };
-  messageCount?: number;
-};
+const LOG_PREFIX = 'dashboard-context-benchmark';
+const BUDGET = { maxToolCalls: 30 };
 
 type BenchmarkRun = {
   name: 'rich';
@@ -36,31 +44,9 @@ type BenchmarkRun = {
   timedOut: boolean;
 };
 
-type ToolCallSummary = {
-  id: string;
-  name: string;
-  status: 'running' | 'completed' | 'failed';
-  startedAt: number;
-  endedAt?: number;
-  durationMs?: number;
-  args?: unknown;
-  isError?: boolean;
-  nestedToolCalls?: NestedToolCallSummary[];
-  result?: unknown;
-  errorText?: string;
-};
-
-type NestedToolCallSummary = {
-  name: string;
-  status?: string;
-  isError?: boolean;
-  args?: unknown;
-  result?: unknown;
-};
-
-type LiveBenchmarkState = {
-  toolStarts: Map<string, BenchmarkEvent>;
-  toolUpdates: Map<string, string>;
+type Outcome = {
+  fixed?: SavedDashboard;
+  source?: SavedDashboard;
 };
 
 test.describe.configure({ mode: 'serial' });
@@ -83,13 +69,9 @@ test.describe('dashboard context benchmark', () => {
       await installBenchmarkRecorder(page);
 
       const richPrompt = [
-        'This benchmark validates the rich dashboard context repair path.',
-        'Use exactly one run_dashboard_agent top-level tool call.',
-        `Ask the dashboard agent to repair existing dashboard UID ${sourceUid} into an editable Jsonnet dashboard titled "${fixedTitle}" with UID ${fixedUid}.`,
-        'The dashboard agent must inspect the existing dashboard with inspect_dashboard_context using validateQueries=true before writing the replacement.',
-        'It should use the validation evidence to replace stale metric and label names with the demo Prometheus schema: http_requests_total, route, status, vm, and http_request_duration_seconds_bucket.',
-        'It must write Jsonnet, render_dashboard, then save_dashboard with overwrite=true.',
-        'The repaired dashboard should include request rate, HTTP 5xx/error signal, and p95 latency panels for /render/report over the last 6 hours.',
+        `The dashboard with UID ${sourceUid} shows no data anymore; its queries seem to use outdated metric and label names.`,
+        `Check its panels against the demo Prometheus data and save a repaired copy titled "${fixedTitle}" with UID ${fixedUid}. Leave the original dashboard unchanged.`,
+        'The repaired copy should show request rate, the HTTP 5xx/error signal, and p95 latency for /render/report over the last 6 hours, using the metric and label names that actually exist.',
       ].join(' ');
 
       const richRun = await runPrompt({
@@ -98,8 +80,12 @@ test.describe('dashboard context benchmark', () => {
         name: 'rich',
         timeoutMs,
       });
+      const outcome: Outcome = {
+        fixed: await fetchSavedDashboard(page.request, fixedUid),
+        source: await fetchSavedDashboard(page.request, sourceUid),
+      };
 
-      const report = formatBenchmarkReport(richRun, { sourceUid, fixedUid });
+      const report = formatBenchmarkReport(richRun, { sourceUid, fixedUid }, outcome);
       await testInfo.attach('dashboard-context-benchmark-report.txt', {
         body: report,
         contentType: 'text/plain',
@@ -121,7 +107,7 @@ test.describe('dashboard context benchmark', () => {
         throw new Error(`Rich dashboard context benchmark ended with assistant error: ${finalAssistantError}`);
       }
 
-      const qualityError = findRichQualityError(richRun, fixedUid);
+      const qualityError = findRichQualityError(richRun, { sourceUid, fixedUid }, outcome);
       if (qualityError) {
         throw new Error(`Rich dashboard context benchmark failed quality gate: ${qualityError}`);
       }
@@ -217,13 +203,8 @@ async function seedStaleDashboard(page: Page, uid: string, title: string) {
 }
 
 async function installBenchmarkRecorder(page: Page) {
-  const liveState: LiveBenchmarkState = {
-    toolStarts: new Map(),
-    toolUpdates: new Map(),
-  };
-
   await page.exposeFunction('__PI_AGENT_BENCHMARK_STREAM_EVENT__', (event: BenchmarkEvent) => {
-    const line = formatLiveBenchmarkEvent(event, liveState);
+    const line = formatLiveEvent(LOG_PREFIX, event);
     if (line) {
       console.log(line);
     }
@@ -275,7 +256,7 @@ async function runPrompt({
   try {
     await page.waitForFunction(
       () => {
-        const benchmarkWindow = window as typeof window & { __PI_AGENT_BENCHMARK_EVENTS__?: BenchmarkEvent[] };
+        const benchmarkWindow = window as typeof window & { __PI_AGENT_BENCHMARK_EVENTS__?: Array<{ type: string }> };
         return benchmarkWindow.__PI_AGENT_BENCHMARK_EVENTS__?.some((event) => event.type === 'agent_end') ?? false;
       },
       undefined,
@@ -306,15 +287,15 @@ async function runPrompt({
 
 async function resetBenchmarkEvents(page: Page) {
   await page.evaluate(() => {
-    const benchmarkWindow = window as typeof window & { __PI_AGENT_BENCHMARK_EVENTS__?: BenchmarkEvent[] };
+    const benchmarkWindow = window as typeof window & { __PI_AGENT_BENCHMARK_EVENTS__?: unknown[] };
     benchmarkWindow.__PI_AGENT_BENCHMARK_EVENTS__ = [];
   });
 }
 
 async function readBenchmarkEvents(page: Page): Promise<BenchmarkEvent[]> {
   return page.evaluate(() => {
-    const benchmarkWindow = window as typeof window & { __PI_AGENT_BENCHMARK_EVENTS__?: BenchmarkEvent[] };
-    return benchmarkWindow.__PI_AGENT_BENCHMARK_EVENTS__ ?? [];
+    const benchmarkWindow = window as typeof window & { __PI_AGENT_BENCHMARK_EVENTS__?: unknown[] };
+    return (benchmarkWindow.__PI_AGENT_BENCHMARK_EVENTS__ ?? []) as BenchmarkEvent[];
   });
 }
 
@@ -335,8 +316,12 @@ async function autoApproveToolConfirmations(page: Page, isDone: () => boolean) {
   }
 }
 
-function formatBenchmarkReport(run: BenchmarkRun, ids: { sourceUid: string; fixedUid: string }) {
-  const report = summarizeRun(run);
+function formatBenchmarkReport(run: BenchmarkRun, ids: { sourceUid: string; fixedUid: string }, outcome: Outcome) {
+  const toolCalls = summarizeToolCalls(run.events);
+  const agentStart = run.events.find((event) => event.type === 'agent_start')?.timestamp ?? run.promptStartedAt;
+  const agentEnd = [...run.events].reverse().find((event) => event.type === 'agent_end')?.timestamp;
+  const usage = summarizeUsage(run.events);
+  const quality = run.timedOut ? 'not run' : (findRichQualityError(run, ids, outcome) ?? 'passed');
   const lines = [
     '',
     'Dashboard context benchmark report',
@@ -348,26 +333,23 @@ function formatBenchmarkReport(run: BenchmarkRun, ids: { sourceUid: string; fixe
     'Rich context repair',
     `Prompt: ${run.prompt}`,
     `Status: ${run.timedOut ? 'timed out' : findFinalAssistantError(run.events) ? 'failed' : 'completed'}`,
-    `Elapsed: ${formatDuration(report.elapsedMs)}`,
-    `Time to first tool: ${report.firstToolStart ? formatDuration(report.firstToolStart - report.agentStart) : 'none'}`,
-    `Tool calls: ${report.toolCalls.length}`,
+    `Elapsed: ${formatDuration((agentEnd ?? Date.now()) - agentStart)}`,
+    `Time to first tool: ${toolCalls[0] ? formatDuration(toolCalls[0].startedAt - agentStart) : 'none'}`,
+    `Tool calls: ${toolCalls.length} (budget ${BUDGET.maxToolCalls})`,
+    `Token usage: input=${usage.input}, output=${usage.output}, total=${usage.totalTokens}`,
+    `Repaired dashboard: ${outcome.fixed ? `${nonRowPanels(outcome.fixed.dashboard).length} panels` : 'missing'}`,
     `Assistant error: ${findFinalAssistantError(run.events) ?? 'none'}`,
-    `Quality: ${findRichQualityError(run, ids.fixedUid) ?? 'passed'}`,
+    `Quality: ${quality}`,
     '',
     'Tool call timeline',
+    ...formatToolTimeline(run.events),
   ];
-
-  for (const [index, call] of report.toolCalls.entries()) {
-    const nested = call.nestedToolCalls?.length ? ` | ${call.nestedToolCalls.length} nested calls` : '';
+  if (outcome.fixed) {
     lines.push(
-      `${index + 1}. ${call.name} | ${call.status} | ${
-        call.durationMs === undefined ? 'duration pending' : formatDuration(call.durationMs)
-      }${nested}`,
-      `   args=${summarizeJson(call.args)}`
+      '',
+      'Repaired dashboard queries',
+      ...dashboardExpressions(outcome.fixed.dashboard).map((expr) => `- ${expr}`)
     );
-    if (call.nestedToolCalls?.length) {
-      lines.push(`   nested=${call.nestedToolCalls.map((nestedCall) => nestedCall.name).join(', ')}`);
-    }
   }
 
   lines.push('', 'Final answer preview', truncateOneLine(run.finalAnswer, 1600));
@@ -375,219 +357,83 @@ function formatBenchmarkReport(run: BenchmarkRun, ids: { sourceUid: string; fixe
   return lines.join('\n');
 }
 
-function summarizeRun(run: BenchmarkRun) {
-  const agentStart = run.events.find((event) => event.type === 'agent_start')?.timestamp ?? run.promptStartedAt;
-  const agentEnd = [...run.events].reverse().find((event) => event.type === 'agent_end')?.timestamp;
-  const toolCalls = summarizeToolCalls(run.events);
-  return {
-    agentStart,
-    elapsedMs: (agentEnd ?? Date.now()) - agentStart,
-    firstToolStart: toolCalls[0]?.startedAt,
-    toolCalls,
-  };
+/** The agent inspected the stale source dashboard: typed context, or hydrating/inspecting its working copy. */
+function inspectedSourceDashboard(events: BenchmarkEvent[], sourceUid: string) {
+  const typed = summarizeToolCalls(events).some(
+    (call) => call.name === 'inspect_dashboard_context' && call.status === 'completed' && !call.isError
+  );
+  const sourcePath = `/grafana/dashboards/${sourceUid}`;
+  const read = summarizeToolCalls(events).some(
+    (call) => call.name === 'read' && (stringField(getRecord(call.args), 'path') ?? '').startsWith(sourcePath)
+  );
+  const shell = bashCalls(events).some(
+    (call) =>
+      call.command.includes(sourceUid) &&
+      /\b(grafana\s+fetch|grafana-dashboard\s+inspect|cat|jq|rg|grep)\b/.test(call.command)
+  );
+  return typed || read || shell;
 }
 
-function findRichQualityError(run: BenchmarkRun, expectedUid: string) {
-  const nested = dashboardNestedCalls(run);
-  if (nested.length === 0) {
-    return 'run_dashboard_agent did not complete with nested tool calls';
-  }
-
-  const context = nested.find((call) => call.name === 'inspect_dashboard_context' && call.status === 'completed');
-  if (!context) {
-    return 'dashboard agent did not complete inspect_dashboard_context';
-  }
-  if (!richContextHadStaleEvidence(nested)) {
-    return 'inspect_dashboard_context did not report failed or zero-series stale query evidence';
-  }
-
-  const rendered = [...nested]
-    .reverse()
-    .find((call) => call.name === 'render_dashboard' && call.status === 'completed' && !call.isError);
-  if (!rendered) {
-    return 'dashboard agent did not complete render_dashboard';
-  }
-
-  const saved = [...nested]
-    .reverse()
-    .find((call) => call.name === 'save_dashboard' && call.status === 'completed' && !call.isError);
-  if (!saved) {
-    return 'dashboard agent did not complete save_dashboard';
-  }
-
-  const saveDetails = getRecord(getRecord(saved.result)?.details);
-  if (stringField(saveDetails, 'uid') !== expectedUid) {
-    return `save_dashboard wrote UID ${stringField(saveDetails, 'uid') ?? 'unknown'} instead of ${expectedUid}`;
-  }
-
-  const dashboard = getRecord(getRecord(getRecord(rendered.result)?.details)?.dashboard);
-  const panels = recordsField(dashboard, 'panels');
-  const panelCount = numericField(dashboard, 'panelCount') ?? panels.length;
-  if (panelCount < 3) {
-    return `expected at least 3 rendered panels, got ${panelCount}`;
-  }
-
-  const panelText = [
-    JSON.stringify(panels),
-    extractResultText(rendered.result) ?? '',
-    dashboardMutationEvidenceText(nested),
-  ].join('\n');
-  if (panelText.includes('http_request_total')) {
-    return 'rendered dashboard still references stale http_request_total metric';
-  }
-  if (panelText.includes('path=') || panelText.includes('status_code')) {
-    return 'rendered dashboard still references stale path/status_code labels';
-  }
-  if (!panelText.includes('http_requests_total') || !panelText.includes('route') || !panelText.includes('status')) {
-    return 'rendered dashboard does not include corrected HTTP request metric and labels';
-  }
-  if (!panelText.includes('http_request_duration_seconds_bucket') || !panelText.includes('histogram_quantile')) {
-    return 'rendered dashboard does not include p95 latency histogram query';
-  }
-
-  return undefined;
-}
-
-function richContextHadStaleEvidence(nested: NestedToolCallSummary[]) {
-  const context = nested.find((call) => call.name === 'inspect_dashboard_context');
-  const details = getRecord(getRecord(context?.result)?.details);
-  const validation = getRecord(details?.validation);
-  return numericField(validation, 'failedQueries') > 0 || numericField(validation, 'zeroSeriesQueries') > 0;
-}
-
-function dashboardMutationEvidenceText(nested: NestedToolCallSummary[]) {
-  return nested
-    .filter((call) => ['write_dashboard_plan', 'write_jsonnet', 'edit_jsonnet'].includes(call.name))
-    .map((call) => {
-      const args = getRecord(call.args);
-      if (call.name === 'write_dashboard_plan') {
-        const detailsPlan = getRecord(getRecord(getRecord(call.result)?.details)?.dashboardPlan);
-        return JSON.stringify([args, detailsPlan]);
-      }
-      return [JSON.stringify(args), extractResultText(call.result) ?? ''].join('\n');
-    })
-    .join('\n');
-}
-
-function dashboardNestedCalls(run: BenchmarkRun) {
-  const dashboardCall = summarizeToolCalls(run.events)
-    .reverse()
-    .find((call) => call.name === 'run_dashboard_agent' && call.status === 'completed' && !call.isError);
-  return dashboardCall?.nestedToolCalls ?? [];
-}
-
-function summarizeToolCalls(events: BenchmarkEvent[]): ToolCallSummary[] {
-  const calls = new Map<string, ToolCallSummary>();
-
-  for (const event of events) {
-    if (!event.toolCallId || !event.toolName) {
-      continue;
+/** Stale queries were recognised: typed context reported failed/zero-series queries, or stale PromQL was run. */
+function observedStaleEvidence(events: BenchmarkEvent[]) {
+  const typed = summarizeToolCalls(events).some((call) => {
+    if (call.name !== 'inspect_dashboard_context') {
+      return false;
     }
-
-    if (event.type === 'tool_execution_start') {
-      calls.set(event.toolCallId, {
-        id: event.toolCallId,
-        name: event.toolName,
-        status: 'running',
-        startedAt: event.timestamp,
-        args: event.args,
-      });
-      continue;
-    }
-
-    const existing =
-      calls.get(event.toolCallId) ??
-      ({
-        id: event.toolCallId,
-        name: event.toolName,
-        status: 'running',
-        startedAt: event.timestamp,
-        args: event.args,
-      } satisfies ToolCallSummary);
-
-    if (event.type === 'tool_execution_update') {
-      calls.set(event.toolCallId, {
-        ...existing,
-        args: event.args ?? existing.args,
-        nestedToolCalls: extractNestedToolCalls(event.partialResult) ?? existing.nestedToolCalls,
-      });
-      continue;
-    }
-
-    if (event.type === 'tool_execution_end') {
-      calls.set(event.toolCallId, {
-        ...existing,
-        status: event.isError ? 'failed' : 'completed',
-        endedAt: event.timestamp,
-        durationMs: event.timestamp - existing.startedAt,
-        isError: event.isError,
-        nestedToolCalls: extractNestedToolCalls(event.result) ?? existing.nestedToolCalls,
-        result: event.result,
-        errorText: event.isError ? extractResultText(event.result) : undefined,
-      });
-    }
-  }
-
-  return [...calls.values()].sort((left, right) => left.startedAt - right.startedAt);
-}
-
-function extractNestedToolCalls(result: unknown): NestedToolCallSummary[] | undefined {
-  const details = getRecord(getRecord(result)?.details);
-  const toolCalls = details?.toolCalls;
-  if (!Array.isArray(toolCalls)) {
-    return undefined;
-  }
-
-  return toolCalls.map((call) => {
-    const record = getRecord(call);
-    return {
-      name: stringField(record, 'name') ?? 'unknown',
-      status: stringField(record, 'status'),
-      isError: booleanField(record, 'isError'),
-      args: record?.args,
-      result: record?.result,
-    };
+    const validation = getRecord(getRecord(getRecord(call.result)?.details)?.validation);
+    return numericField(validation, 'failedQueries') > 0 || numericField(validation, 'zeroSeriesQueries') > 0;
   });
+  return typed || promEvidenceText(events).includes('http_request_total');
 }
 
-function extractResultText(result: unknown) {
-  const content = getRecord(result)?.content;
-  if (!Array.isArray(content)) {
-    return undefined;
+function findRichQualityError(run: BenchmarkRun, ids: { sourceUid: string; fixedUid: string }, outcome: Outcome) {
+  if (!inspectedSourceDashboard(run.events, ids.sourceUid)) {
+    return `agent never inspected source dashboard ${ids.sourceUid}`;
+  }
+  if (!observedStaleEvidence(run.events)) {
+    return 'agent did not gather evidence that the stale queries fail or return no series';
+  }
+  if (!hasSuccessfulPromEvidence(run.events)) {
+    return 'agent did not validate replacement PromQL with grafana-prom query';
+  }
+  if (!promEvidenceText(run.events).includes('http_requests_total')) {
+    return 'agent did not validate the corrected http_requests_total metric';
+  }
+  if (!appliedDashboardUids(run.events).includes(ids.fixedUid)) {
+    return `workspace apply did not report ${ids.fixedUid} as applied`;
+  }
+  if (!outcome.fixed) {
+    return `repaired dashboard ${ids.fixedUid} does not exist in Grafana`;
   }
 
-  return content
-    .map((block) => getRecord(block))
-    .filter((block): block is Record<string, unknown> => Boolean(block) && block.type === 'text')
-    .map((block) => block.text)
-    .filter((value): value is string => typeof value === 'string')
-    .join(' ');
-}
-
-function findFinalAssistantError(events: BenchmarkEvent[]) {
-  const finalAssistantMessage = [...events]
-    .reverse()
-    .find((event) => event.type === 'message_end' && event.message?.role === 'assistant')?.message;
-  return typeof finalAssistantMessage?.errorMessage === 'string' ? finalAssistantMessage.errorMessage : undefined;
-}
-
-function findFinalAssistantText(events: BenchmarkEvent[]) {
-  const finalAssistantMessage = [...events]
-    .reverse()
-    .find((event) => event.type === 'message_end' && event.message?.role === 'assistant')?.message;
-  const content = finalAssistantMessage?.content;
-  if (typeof content === 'string') {
-    return content;
+  const panels = nonRowPanels(outcome.fixed.dashboard);
+  if (panels.length < 3) {
+    return `expected at least 3 repaired panels, got ${panels.length}`;
   }
-  if (!Array.isArray(content)) {
-    return '';
+  const expressions = dashboardExpressions(outcome.fixed.dashboard).join('\n');
+  if (expressions.includes('http_request_total')) {
+    return 'repaired dashboard still references stale http_request_total metric';
   }
-  return content
-    .map((block) => getRecord(block))
-    .filter((block): block is Record<string, unknown> => Boolean(block) && block.type === 'text')
-    .map((block) => block.text)
-    .filter((value): value is string => typeof value === 'string')
-    .join('\n');
+  if (/\bpath\s*=|status_code/.test(expressions)) {
+    return 'repaired dashboard still references stale path/status_code labels';
+  }
+  if (
+    !expressions.includes('http_requests_total') ||
+    !expressions.includes('route') ||
+    !expressions.includes('status')
+  ) {
+    return 'repaired dashboard does not include corrected HTTP request metric and labels';
+  }
+  if (!expressions.includes('http_request_duration_seconds_bucket') || !expressions.includes('histogram_quantile')) {
+    return 'repaired dashboard does not include p95 latency histogram query';
+  }
+
+  const sourceExpressions = outcome.source ? dashboardExpressions(outcome.source.dashboard).join('\n') : '';
+  if (!sourceExpressions.includes('http_request_total')) {
+    return `original dashboard ${ids.sourceUid} was changed or removed`;
+  }
+
+  return findBudgetError(run.events, BUDGET);
 }
 
 async function writeBenchmarkArtifacts(run: BenchmarkRun, report: string) {
@@ -600,116 +446,4 @@ async function writeBenchmarkArtifacts(run: BenchmarkRun, report: string) {
     writeFile(path.join(OUTPUT_DIR, `report${runSuffix}.txt`), report),
     writeFile(path.join(OUTPUT_DIR, `rich-events${runSuffix}.json`), JSON.stringify(run.events, null, 2)),
   ]);
-}
-
-function formatLiveBenchmarkEvent(event: BenchmarkEvent, state: LiveBenchmarkState) {
-  if (event.type === 'tool_execution_start' && event.toolCallId && event.toolName) {
-    state.toolStarts.set(event.toolCallId, event);
-    return `[dashboard-context-benchmark:live] tool_start ${event.toolName} args=${summarizeJson(event.args)}`;
-  }
-
-  if (event.type === 'tool_execution_update' && event.toolCallId && event.toolName) {
-    const nestedCalls = extractNestedToolCalls(event.partialResult)?.length;
-    const resultText = truncateOneLine(extractResultText(event.partialResult) ?? '', 240);
-    if (nestedCalls === undefined && !resultText) {
-      return undefined;
-    }
-
-    const updateKey = `${nestedCalls ?? ''}|${resultText}`;
-    if (state.toolUpdates.get(event.toolCallId) === updateKey) {
-      return undefined;
-    }
-    state.toolUpdates.set(event.toolCallId, updateKey);
-
-    return [
-      `[dashboard-context-benchmark:live] tool_update ${event.toolName}`,
-      nestedCalls === undefined ? undefined : `nested=${nestedCalls}`,
-      resultText ? `text=${resultText}` : undefined,
-    ]
-      .filter(Boolean)
-      .join(' ');
-  }
-
-  if (event.type === 'tool_execution_end' && event.toolCallId && event.toolName) {
-    const start = state.toolStarts.get(event.toolCallId);
-    const duration = start ? formatDuration(event.timestamp - start.timestamp) : 'unknown';
-    const status = event.isError ? 'failed' : 'completed';
-    const nestedCalls = extractNestedToolCalls(event.result)?.length;
-    const resultText = truncateOneLine(extractResultText(event.result) ?? '', event.isError ? 600 : 240);
-    return [
-      `[dashboard-context-benchmark:live] tool_end ${event.toolName} ${status} duration=${duration}`,
-      nestedCalls === undefined ? undefined : `nested=${nestedCalls}`,
-      resultText ? (event.isError ? `error=${resultText}` : `text=${resultText}`) : undefined,
-    ]
-      .filter(Boolean)
-      .join(' ');
-  }
-
-  if (event.type === 'message_end' && event.message?.role === 'assistant') {
-    const error = event.message.errorMessage;
-    if (typeof error === 'string' && error) {
-      return `[dashboard-context-benchmark:live] assistant_error ${truncateOneLine(error, 600)}`;
-    }
-  }
-
-  if (event.type === 'agent_end') {
-    return '[dashboard-context-benchmark:live] agent_end';
-  }
-
-  return undefined;
-}
-
-function readPositiveInteger(value: string | undefined, fallback: number) {
-  const parsed = value ? Number(value) : NaN;
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function numericField(record: Record<string, unknown> | undefined, field: string) {
-  const value = record?.[field];
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
-}
-
-function stringField(record: Record<string, unknown> | undefined, field: string) {
-  const value = record?.[field];
-  return typeof value === 'string' ? value : undefined;
-}
-
-function booleanField(record: Record<string, unknown> | undefined, field: string) {
-  const value = record?.[field];
-  return typeof value === 'boolean' ? value : undefined;
-}
-
-function recordsField(record: Record<string, unknown> | undefined, field: string) {
-  const value = record?.[field];
-  return Array.isArray(value)
-    ? value.map(getRecord).filter((item): item is Record<string, unknown> => Boolean(item))
-    : [];
-}
-
-function getRecord(value: unknown): Record<string, unknown> | undefined {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
-}
-
-function formatDuration(ms: number) {
-  if (ms < 1000) {
-    return `${ms}ms`;
-  }
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-function truncateOneLine(value: string, maxLength: number) {
-  const oneLine = value.replace(/\s+/g, ' ').trim();
-  return oneLine.length > maxLength ? `${oneLine.slice(0, maxLength)}...` : oneLine;
-}
-
-function summarizeJson(value: unknown) {
-  if (value === undefined) {
-    return 'undefined';
-  }
-
-  const json = JSON.stringify(value);
-  if (!json) {
-    return String(value);
-  }
-  return json.length > 800 ? `${json.slice(0, 800)}...` : json;
 }

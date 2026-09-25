@@ -32,7 +32,6 @@
     "benchmark:dashboard-batch-editing": "node scripts/benchmark-dashboard-batch-editing.mjs",
     "benchmark:alert-troubleshooting": "node scripts/benchmark-alert-troubleshooting.mjs",
     "benchmark:dashboard-metric-discovery": "node scripts/benchmark-dashboard-metric-discovery.mjs",
-    "benchmark:agent-contract-sample": "node scripts/benchmark-agent-contract-sample.mjs",
     "benchmark:explore-metrics": "node scripts/benchmark-explore-metrics.mjs",
     "dev:import:skills": "node scripts/sync-dev-plugin-provisioning.mjs",
     "dev:model": "node scripts/configure-pi-model.mjs",

@@ -131,7 +131,7 @@ export class LoadBrowserSession {
     this.current = session;
     this.events = [];
     try {
-      await this.turn(workloadPrompts[session.workload], signal);
+      await this.turn(workloadPrompts[session.workload as keyof typeof workloadPrompts], signal);
       let quality = workloadQualityError(session.workload, this.events);
       if (!quality && this.followUp) {
         const boundary = this.events.length;

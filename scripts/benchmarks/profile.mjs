@@ -3,7 +3,7 @@ import { validateConfig } from './core.mjs';
 
 export function createProfile(selected, options = {}, env = process.env) {
   const configuration = modelConfiguration(selected, options);
-  const { id, protocol, thinkingLevel, thinkingFormat } = configuration.models[0];
+  const { id, protocol, thinkingLevel, thinkingFormat, contextWindow, maxOutputTokens } = configuration.models[0];
   const profile = {
     label: options.label ?? `${selected.provider}-${id}-${thinkingLevel}`,
     model: {
@@ -13,6 +13,8 @@ export function createProfile(selected, options = {}, env = process.env) {
       protocol,
       thinkingLevel,
       thinkingFormat,
+      ...(contextWindow ? { contextWindow } : {}),
+      ...(maxOutputTokens ? { maxOutputTokens } : {}),
     },
     hosting: {
       label: options['hosting-label'] ?? selected.provider,

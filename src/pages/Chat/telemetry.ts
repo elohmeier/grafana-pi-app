@@ -23,8 +23,6 @@ export type AssistantTelemetryEvent = {
   toolCount?: number;
   messageCount?: number;
   toolResultCount?: number;
-  nestedToolCallCount?: number;
-  nestedToolCalls?: Array<{ name: string; status?: string }>;
   phase?: string;
   skills?: AssistantTelemetrySkill[];
   usage?: AssistantTelemetryUsage;
@@ -252,7 +250,6 @@ export function createAssistantTelemetryReporter(send: TelemetrySender = sendAss
         const start = toolStarts.get(event.toolCallId);
         const durationMs = start ? timestamp - start.startedAt : undefined;
         const status = event.isError ? 'failed' : 'completed';
-        const nestedToolCalls = extractNestedToolCalls(event.result);
         completedToolCallIds.add(event.toolCallId);
         if (!firstToolResultRecorded) {
           firstToolResultRecorded = true;
@@ -265,8 +262,6 @@ export function createAssistantTelemetryReporter(send: TelemetrySender = sendAss
           durationMs,
           argsBytes: start?.argsBytes,
           resultBytes: jsonBytes(event.result),
-          nestedToolCallCount: nestedToolCalls?.length,
-          nestedToolCalls,
         });
         return;
       }
@@ -311,7 +306,6 @@ export function createAssistantTelemetryReporter(send: TelemetrySender = sendAss
           details: record.details,
           isError: record.isError,
         };
-        const nestedToolCalls = extractNestedToolCalls(result);
         completedToolCallIds.add(toolCallId);
         syntheticToolResults += 1;
         enqueue({
@@ -320,8 +314,6 @@ export function createAssistantTelemetryReporter(send: TelemetrySender = sendAss
           status: record.isError === true ? 'failed' : 'completed',
           argsBytes: jsonBytes(toolCall?.args),
           resultBytes: jsonBytes(result),
-          nestedToolCallCount: nestedToolCalls?.length,
-          nestedToolCalls,
         });
       }
 
@@ -423,27 +415,6 @@ function usageFromMessage(message: Record<string, unknown> | undefined): Assista
     totalTokens: numberField(usage, 'totalTokens'),
   };
   return Object.values(result).some((value) => value !== undefined && value > 0) ? result : undefined;
-}
-
-function extractNestedToolCalls(result: unknown): Array<{ name: string; status?: string }> | undefined {
-  const details = recordField(recordValue(result), 'details');
-  const toolCalls = details?.toolCalls;
-  if (!Array.isArray(toolCalls)) {
-    return undefined;
-  }
-  const nestedCalls: Array<{ name: string; status?: string }> = [];
-  for (const call of toolCalls) {
-    const record = recordValue(call);
-    const name = stringField(record, 'name');
-    if (!name) {
-      continue;
-    }
-    nestedCalls.push({
-      name,
-      status: stringField(record, 'status') ?? (record?.isError === true ? 'failed' : undefined),
-    });
-  }
-  return nestedCalls;
 }
 
 function hasVisibleAssistantContent(message: Record<string, unknown>) {

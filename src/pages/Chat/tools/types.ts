@@ -8,7 +8,7 @@ import type {
   StreamFn,
 } from '@earendil-works/pi-agent-core';
 import type { Model } from '@earendil-works/pi-ai';
-import type { DashboardMutationAPI, DataSourceApi, DataSourceInstanceSettings } from '@grafana/data';
+import type { DashboardMutationAPI, DataSourceApi } from '@grafana/data';
 import type { PiAppJsonData, PiAppThinkingLevel } from '../../../types';
 import type { SkillToolGroup } from '../skills/types';
 import type { ArtifactRuntime } from './artifacts';
@@ -57,45 +57,13 @@ export type InvestigationReportRuntime = {
   setReport: (report: InvestigationReport) => void;
 };
 
-export type VirtualJsonnetFileSnapshot = {
-  path: string;
-  content: string;
-  version: number;
-  checksum: string;
-  lineCount: number;
-  dashboardJsonnetSize: number;
-  updatedAt?: string;
-};
-
-export type VirtualJsonnetFileRuntime = {
-  getSessionId: () => string | undefined;
-  getFile: (path: string) => VirtualJsonnetFileSnapshot | undefined;
-  setFile: (file: VirtualJsonnetFileSnapshot, options?: { hydrated?: boolean }) => void;
-  isHydrated?: (path: string, version: number) => boolean;
-  markHydrated?: (path: string, version: number) => void;
-};
-
-export type DashboardSaveFolderSelection = {
-  uid?: string;
-  title?: string;
-};
-
-export type DashboardSaveFolderRuntime = {
-  getFolderOverride: (toolCallId: string) => DashboardSaveFolderSelection | undefined;
-  clearFolderOverride: (toolCallId: string) => void;
-};
-
 export type CreateGrafanaToolsOptions = GrafanaToolConfig & {
   runtime?: GrafanaToolRuntime;
   dashboardMutation?: DashboardMutationAPI;
-  virtualJsonnetFiles?: VirtualJsonnetFileRuntime;
-  dashboardSaveFolders?: DashboardSaveFolderRuntime;
+  /** Session filesystem tools (read/write/edit/bash). */
+  workspaceTools?: AgentTool[];
   investigationReport?: InvestigationReportRuntime;
   artifacts?: ArtifactRuntime;
-  skillTools?: AgentTool[];
-  includeAdHocDashboardTools?: boolean;
-  includeJsonnetLibraryTools?: boolean;
-  includeRawPrometheusQueryTool?: boolean;
 };
 
 export type ResourceCapableDataSource = DataSourceApi & {
@@ -116,26 +84,6 @@ export type DashboardSearchResult = {
   folderUid?: string;
 };
 
-export type DatasourceParams = {
-  datasourceUid?: string;
-};
-
-export type ListMetricsParams = DatasourceParams & {
-  prefix?: string;
-  prefixes?: string[];
-};
-
-export type ListLabelValuesParams = DatasourceParams & {
-  label: string;
-  match?: string;
-};
-
-export type InspectMetricSeriesParams = DatasourceParams & {
-  match?: string;
-  matches?: string[];
-  limit?: number;
-};
-
 export type PrometheusQuerySpec = {
   query: string;
   type?: 'instant' | 'range';
@@ -143,34 +91,8 @@ export type PrometheusQuerySpec = {
   end?: string;
 };
 
-export type QueryPrometheusParams = DatasourceParams &
-  Partial<PrometheusQuerySpec> & {
-    queries?: PrometheusQuerySpec[];
-  };
-
-export type UploadDashboardParams = {
-  dashboard_json: string;
-  overwrite?: boolean;
-  folderUid?: string;
-};
-
-export type JsonnetDashboardParams = {
-  dashboard_jsonnet?: string;
-  path?: string;
-  sessionId?: string;
-  uid?: string;
-  folderUid?: string;
-  tags?: string[];
-  overwrite?: boolean;
-};
-
 export type DashboardUidParams = {
   uid: string;
-};
-
-export type ListDashboardsParams = {
-  query?: string;
-  tag?: string;
 };
 
 export type ScreenshotParams = DashboardUidParams & {
@@ -182,98 +104,4 @@ export type ScreenshotParams = DashboardUidParams & {
   theme?: 'dark' | 'light';
 };
 
-export type JsonnetLibSearchParams = {
-  pattern: string;
-  path?: string;
-};
-
-export type JsonnetLibReadParams = {
-  path: string;
-  offset?: number;
-  limit?: number;
-};
-
-export type JsonnetLibListParams = {
-  path?: string;
-};
-
-export type SkillResourceReadParams = {
-  skill: string;
-  path: string;
-};
-
-export type JsonnetFileWriteParams = {
-  path?: string;
-  content: string;
-};
-
-export type JsonnetFileEditParams = {
-  path?: string;
-  baseVersion?: number;
-  edits: JsonnetLineEdit[];
-};
-
-export type JsonnetFileRepairParams = {
-  path?: string;
-  baseVersion?: number;
-  error?: string;
-};
-
-export type JsonnetLineEdit = {
-  startLine: number;
-  endLine: number;
-  replacement: string;
-  expectedText?: string;
-};
-
-export type JsonnetFileReadParams = {
-  path?: string;
-  offset?: number;
-  limit?: number;
-};
-
-export type JsonnetDashboardToolSet = {
-  all: AgentTool[];
-  render: AgentTool;
-  save: AgentTool;
-};
-
-export type DashboardPlanToolSet = {
-  all: AgentTool[];
-  write: AgentTool;
-};
-
-export type JsonnetFileToolSet = {
-  all: AgentTool[];
-  write: AgentTool;
-  edit: AgentTool;
-  fix: AgentTool;
-  read: AgentTool;
-};
-
-export type JsonnetLibToolSet = {
-  all: AgentTool[];
-  search: AgentTool;
-  read: AgentTool;
-  list: AgentTool;
-};
-
-export type GrafanaToolRegistry = {
-  metrics: AgentTool[];
-  alerts: AgentTool[];
-  dashboardMetricContext: AgentTool[];
-  dashboards: AgentTool[];
-  liveDashboardEditing: AgentTool[];
-  dashboardPlans: DashboardPlanToolSet;
-  jsonnetDashboards: JsonnetDashboardToolSet;
-  jsonnetFiles: JsonnetFileToolSet;
-  investigation: AgentTool[];
-  jsonnet: JsonnetLibToolSet;
-  artifacts: AgentTool[];
-  subagents: AgentTool[];
-  skills: AgentTool[];
-  all: AgentTool[];
-};
-
-export type DatasourceSettings = DataSourceInstanceSettings[];
 export type { SkillToolGroup };

@@ -2,7 +2,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFile, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 
@@ -21,6 +21,8 @@ const sidebarExtensionPoint = 'grafana/extension-sidebar/v0-alpha';
 const sidebarTitle = variantPluginId === officialAssistantPluginId ? 'Grafana Assistant' : 'Assistant';
 const pluginJsonPath = path.join(repoRoot, 'src', 'plugin.json');
 const distDir = path.join(repoRoot, 'dist');
+// Same keep rule as the webpack output.clean config: preserve built backend binaries.
+const BACKEND_ARTIFACT = /(.*?_(amd64|arm(64)?)(.exe)?|go_plugin_build_manifest)$/;
 const packageDir = path.join(repoRoot, variantPluginId);
 
 function fail(message) {
@@ -121,7 +123,13 @@ async function main() {
   let packageDirActive = false;
 
   try {
-    await rm(distDir, { recursive: true, force: true });
+    if (options.buildOnly) {
+      // Keep the directory itself: the local Compose stack bind-mounts dist, and
+      // replacing the directory would leave the container serving a deleted inode.
+      await emptyDir(distDir);
+    } else {
+      await rm(distDir, { recursive: true, force: true });
+    }
     if (!options.buildOnly) {
       await rm(packageDir, { recursive: true, force: true });
     }
@@ -182,3 +190,12 @@ async function main() {
 }
 
 await main();
+
+async function emptyDir(dir) {
+  const entries = await readdir(dir).catch((error) => (error.code === 'ENOENT' ? [] : Promise.reject(error)));
+  await Promise.all(
+    entries
+      .filter((entry) => !BACKEND_ARTIFACT.test(entry))
+      .map((entry) => rm(path.join(dir, entry), { recursive: true, force: true }))
+  );
+}

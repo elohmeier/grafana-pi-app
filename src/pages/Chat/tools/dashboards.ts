@@ -2,142 +2,13 @@ import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { config } from '@grafana/runtime';
 import { Type } from 'typebox';
 import { backendFetch } from './client';
-import { createDashboardContextTools } from './dashboardContext';
-import { getUnavailableDashboardDatasourceUids } from './dashboardPolicy';
-import { textResult, throwIfAborted, truncateText } from './result';
-import type {
-  DashboardSearchResult,
-  DashboardUidParams,
-  GrafanaToolConfig,
-  ListDashboardsParams,
-  ScreenshotParams,
-  UploadDashboardParams,
-} from './types';
+import { throwIfAborted } from './result';
+import type { ScreenshotParams } from './types';
 
-const REQUIRED_DASHBOARD_TAG = 'genai';
-
-export function createDashboardTools(toolConfig: GrafanaToolConfig, includeAdHocWrites = false): AgentTool[] {
-  const readTools = [
-    ...createDashboardContextTools(toolConfig),
-    grafanaGetDashboardTool,
-    grafanaListDashboardsTool,
-    grafanaScreenshotTool,
-  ];
-  if (!includeAdHocWrites) {
-    return readTools;
-  }
-  return [makeGrafanaUploadDashboardTool(toolConfig), ...readTools, grafanaDeleteDashboardTool];
+/** Screenshots through Grafana image rendering; dashboard reads and writes go through the session filesystem. */
+export function createDashboardScreenshotTools(): AgentTool[] {
+  return [grafanaScreenshotTool];
 }
-
-function makeGrafanaUploadDashboardTool(toolConfig: GrafanaToolConfig): AgentTool {
-  return {
-    name: 'upload_dashboard',
-    label: 'Upload dashboard',
-    description: 'Create or update a Grafana dashboard JSON model as the current user.',
-    parameters: Type.Object({
-      dashboard_json: Type.String({ description: 'Grafana dashboard JSON object as a string.' }),
-      overwrite: Type.Optional(
-        Type.Boolean({ description: 'Whether to overwrite an existing dashboard UID. Defaults to true.' })
-      ),
-      folderUid: Type.Optional(Type.String({ description: 'Optional target folder UID.' })),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const args = params as UploadDashboardParams;
-      throwIfAborted(signal);
-      const dashboard = parseDashboard(args.dashboard_json);
-      if (!dashboard.title) {
-        throw new Error('Dashboard JSON must include a title');
-      }
-      const unavailableDatasourceUids = getUnavailableDashboardDatasourceUids(dashboard, toolConfig);
-      if (unavailableDatasourceUids.length > 0) {
-        throw new Error(
-          `Dashboard references datasource UIDs not available to the assistant: ${unavailableDatasourceUids.join(', ')}`
-        );
-      }
-
-      dashboard.uid = normalizeDashboardUid(dashboard.uid, String(dashboard.title));
-      dashboard.tags = ensureRequiredTag(dashboard.tags);
-      delete dashboard.id;
-
-      const result = await backendFetch<{ uid: string; url: string; status: string }>('/api/dashboards/db', {
-        method: 'POST',
-        data: {
-          dashboard,
-          folderUid: args.folderUid,
-          overwrite: args.overwrite ?? true,
-        },
-      });
-
-      const absoluteUrl = new URL(result.url, window.location.origin).toString();
-      return textResult(`Dashboard uploaded: ${absoluteUrl}\nUID: ${result.uid}\nStatus: ${result.status}`, {
-        uid: result.uid,
-        url: absoluteUrl,
-        status: result.status,
-      });
-    },
-  };
-}
-
-const grafanaGetDashboardTool: AgentTool = {
-  name: 'get_dashboard',
-  label: 'Get dashboard',
-  description: 'Fetch a dashboard by UID as the current user.',
-  parameters: Type.Object({
-    uid: Type.String({ description: 'Dashboard UID.' }),
-  }),
-  async execute(_toolCallId, params, signal) {
-    const args = params as DashboardUidParams;
-    throwIfAborted(signal);
-    const result = await backendFetch<unknown>(`/api/dashboards/uid/${encodeURIComponent(args.uid)}`);
-    return textResult(truncateText(JSON.stringify(result, null, 2), 120000), { uid: args.uid });
-  },
-};
-
-const grafanaListDashboardsTool: AgentTool = {
-  name: 'list_dashboards',
-  label: 'List dashboards',
-  description: 'Search dashboards visible to the current user.',
-  parameters: Type.Object({
-    query: Type.Optional(Type.String({ description: 'Optional dashboard title search text.' })),
-    tag: Type.Optional(Type.String({ description: 'Optional dashboard tag filter.' })),
-  }),
-  async execute(_toolCallId, params, signal) {
-    const args = params as ListDashboardsParams;
-    throwIfAborted(signal);
-    const result = await backendFetch<DashboardSearchResult[]>('/api/search', {
-      params: {
-        type: 'dash-db',
-        query: args.query,
-        tag: args.tag,
-        limit: 100,
-      },
-    });
-
-    const dashboards = result.map((dash) => ({
-      ...dash,
-      url: new URL(dash.url, window.location.origin).toString(),
-    }));
-
-    return textResult(JSON.stringify(dashboards, null, 2), { count: dashboards.length });
-  },
-};
-
-const grafanaDeleteDashboardTool: AgentTool = {
-  name: 'delete_dashboard',
-  label: 'Delete dashboard',
-  description: 'Delete a dashboard by UID as the current user.',
-  parameters: Type.Object({
-    uid: Type.String({ description: 'Dashboard UID.' }),
-  }),
-  async execute(_toolCallId, params, signal) {
-    const args = params as DashboardUidParams;
-    throwIfAborted(signal);
-    const result = await backendFetch<unknown>(`/api/dashboards/uid/${encodeURIComponent(args.uid)}`, {
-      method: 'DELETE',
-    });
-    return textResult(`Dashboard ${args.uid} deleted`, { uid: args.uid, result });
-  },
-};
 
 const grafanaScreenshotTool: AgentTool = {
   name: 'screenshot_dashboard',
@@ -203,39 +74,6 @@ export async function renderDashboardScreenshot(
       height,
     },
   };
-}
-
-function parseDashboard(source: string): Record<string, any> {
-  const parsed = JSON.parse(source) as unknown;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Dashboard JSON must be an object');
-  }
-  return parsed as Record<string, any>;
-}
-
-function normalizeDashboardUid(uid: unknown, title: string): string {
-  const raw =
-    typeof uid === 'string' && uid.trim()
-      ? uid.trim()
-      : title
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, '-')
-          .replace(/^-|-$/g, '');
-
-  return raw
-    .toLowerCase()
-    .replace(/[^a-z0-9-]/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 40);
-}
-
-function ensureRequiredTag(tags: unknown): string[] {
-  const next = Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === 'string') : [];
-  if (!next.includes(REQUIRED_DASHBOARD_TAG)) {
-    next.push(REQUIRED_DASHBOARD_TAG);
-  }
-  return next;
 }
 
 function clamp(value: number, min: number, max: number): number {

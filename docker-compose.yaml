@@ -77,11 +77,12 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-local-dev-key}
       PI_OPENAI_BASE_URL: ${PI_OPENAI_BASE_URL:-http://host.docker.internal:8080/v1}
       PI_OPENAI_PROTOCOL: ${PI_OPENAI_PROTOCOL:-auto}
-      PI_DEFAULT_MODEL: ${PI_DEFAULT_MODEL:-unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL}
+      PI_DEFAULT_MODEL: ${PI_DEFAULT_MODEL:-ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M}
       PI_THINKING_LEVEL: ${PI_THINKING_LEVEL:-medium}
       PI_THINKING_FORMAT: ${PI_THINKING_FORMAT:-qwen-chat-template}
+      PI_CONTEXT_WINDOW: ${PI_CONTEXT_WINDOW:-131072}
+      PI_MAX_OUTPUT_TOKENS: ${PI_MAX_OUTPUT_TOKENS:-16384}
       PI_PROMETHEUS_URL: ${PI_PROMETHEUS_URL:-http://prometheus:9090}
-      PI_AGENT_CONTRACT_SAMPLE: ${PI_AGENT_CONTRACT_SAMPLE:-1}
 
   grafana-assistant-variant:
     profiles:
@@ -129,11 +130,12 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-local-dev-key}
       PI_OPENAI_BASE_URL: ${PI_OPENAI_BASE_URL:-http://host.docker.internal:8080/v1}
       PI_OPENAI_PROTOCOL: ${PI_OPENAI_PROTOCOL:-auto}
-      PI_DEFAULT_MODEL: ${PI_DEFAULT_MODEL:-unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL}
+      PI_DEFAULT_MODEL: ${PI_DEFAULT_MODEL:-ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M}
       PI_THINKING_LEVEL: ${PI_THINKING_LEVEL:-medium}
       PI_THINKING_FORMAT: ${PI_THINKING_FORMAT:-qwen-chat-template}
+      PI_CONTEXT_WINDOW: ${PI_CONTEXT_WINDOW:-131072}
+      PI_MAX_OUTPUT_TOKENS: ${PI_MAX_OUTPUT_TOKENS:-16384}
       PI_PROMETHEUS_URL: ${PI_PROMETHEUS_URL:-http://prometheus:9090}
-      PI_AGENT_CONTRACT_SAMPLE: ${PI_AGENT_CONTRACT_SAMPLE:-1}
 
   renderer:
     image: grafana/grafana-image-renderer:${GRAFANA_IMAGE_RENDERER_VERSION:-latest}

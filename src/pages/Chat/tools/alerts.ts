@@ -239,7 +239,7 @@ function makeFindPanelAlertRulesTool(toolConfig: GrafanaToolConfig): AgentTool {
         exactPanelMatchCount: exactPanelMatches.length,
         matches,
         guidance: [
-          'Use prometheusChecks with query_prometheus to compare the alert data query against the panel query and time range.',
+          'Run prometheusChecks with `grafana-prom query` to compare the alert data query against the panel query and time range.',
           `Grafana's dashboard alert-state overlay uses ${DASHBOARD_UID_ANNOTATION}/${PANEL_ID_ANNOTATION} annotations; App Platform panelRef alone can be enough for API lookup but not for the panel indicator.`,
           'Check alertCondition, reducer, relativeTimeRange, for, noDataState, and execErrState before concluding from the panel visualization alone.',
         ],
@@ -281,7 +281,7 @@ function makeGetAlertRuleTool(toolConfig: GrafanaToolConfig): AgentTool {
         rule: summarizeAlertRule(rule, namespace, toolConfig),
         rawStatus: compactValue(rule.status, 3),
         guidance: [
-          'Run prometheusChecks with query_prometheus for current evidence.',
+          'Run prometheusChecks with `grafana-prom query` for current evidence.',
           'Compare the alert condition with any panel thresholds; panel color and alert state can differ when queries, reducers, windows, no-data handling, or pending periods differ.',
         ],
       };

@@ -20,7 +20,7 @@ test('scenario event attachments retain timing and errors without retaining tran
   const events = compactEvents([
     { type: 'agent_start', timestamp: 100 },
     { type: 'message_update', timestamp: 120, message: { content: 'private text' } },
-    { type: 'tool_execution_start', timestamp: 150, toolCallId: 't', toolName: 'run_query_agent', args: {} },
+    { type: 'tool_execution_start', timestamp: 150, toolCallId: 't', toolName: 'bash', args: {} },
     { type: 'tool_execution_end', timestamp: 250, toolCallId: 't', isError: true, result: { usage: 123 } },
     { type: 'agent_end', timestamp: 300, messages: ['private text'] },
   ]);
@@ -36,7 +36,7 @@ test('scenario event attachments retain timing and errors without retaining tran
 
 test('validates profiles without silently normalizing unsupported reasoning levels', () => {
   const config = validateConfig(example);
-  assert.equal(config.suites.length, 12);
+  assert.equal(config.suites.length, suites.length);
   assert.equal(
     validateConfig({ ...example, model: { ...example.model, thinkingLevel: 'xhigh' } }).model.thinkingLevel,
     'xhigh'

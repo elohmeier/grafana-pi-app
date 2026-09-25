@@ -21,7 +21,7 @@ describe('artifact tools', () => {
   it('stores bulky tool results behind an artifact handle', () => {
     const { runtime, artifacts } = createTestArtifactRuntime();
     const rows = Array.from({ length: 400 }, (_, index) => ({ id: index, value: `row-${index}` }));
-    const result = artifactizeToolResult(runtime, 'query_prometheus', {
+    const result = artifactizeToolResult(runtime, 'search_dashboard_metric_usage', {
       content: [{ type: 'text', text: JSON.stringify({ rows }, null, 2) }],
       details: { rows: rows.length },
     });
@@ -36,8 +36,8 @@ describe('artifact tools', () => {
       rows: rows.length,
       artifactRef: {
         id: 'artifact_1',
-        kind: 'json',
-        toolName: 'query_prometheus',
+        kind: 'dashboard',
+        toolName: 'search_dashboard_metric_usage',
       },
     });
     expect(artifacts.artifact_1.data).toMatchObject({ rows: expect.any(Array) });
@@ -62,8 +62,8 @@ describe('artifact tools', () => {
     const { runtime } = createTestArtifactRuntime();
     const stored = runtime.register({
       kind: 'json',
-      title: 'query_prometheus',
-      toolName: 'query_prometheus',
+      title: 'search_dashboard_metric_usage',
+      toolName: 'search_dashboard_metric_usage',
       summary: 'Prometheus batch result.',
       data: {
         results: [

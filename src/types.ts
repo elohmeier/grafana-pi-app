@@ -32,6 +32,10 @@ export type PiAppModelConfig = {
   protocol?: PiAppOpenAIProtocol;
   thinkingLevel?: PiAppThinkingLevel;
   thinkingFormat?: PiAppThinkingFormat;
+  /** Endpoint input-plus-output token capacity. Numeric strings are accepted from provisioning. */
+  contextWindow?: number | string;
+  /** Output tokens requested per model call; the backend clamps requests to this value. */
+  maxOutputTokens?: number | string;
 };
 
 export type PiAppJsonData = {

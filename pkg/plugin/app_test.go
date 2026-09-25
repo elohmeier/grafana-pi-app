@@ -153,3 +153,42 @@ func TestLoadSettingsDefaultsToAllAccess(t *testing.T) {
 		t.Fatalf("expected all access mode, got %q", settings.AccessMode)
 	}
 }
+
+func TestNormalizeModelLimits(t *testing.T) {
+	var models []modelSettings
+	if err := json.Unmarshal([]byte(`[
+		{"id": "a"},
+		{"id": "b", "contextWindow": "262144", "maxOutputTokens": 32768},
+		{"id": "c", "contextWindow": 1000, "maxOutputTokens": 999999}
+	]`), &models); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	normalized := normalizeModels(models)
+	cases := []struct {
+		window, output flexibleInt
+	}{
+		{defaultContextWindow, defaultMaxOutputTokens},
+		{262144, 32768},
+		{minContextWindow, minContextWindow / 2},
+	}
+	for index, expected := range cases {
+		if normalized[index].ContextWindow != expected.window || normalized[index].MaxOutputTokens != expected.output {
+			t.Fatalf("model %d: got %d/%d, want %d/%d", index, normalized[index].ContextWindow, normalized[index].MaxOutputTokens, expected.window, expected.output)
+		}
+	}
+}
+
+func TestClampRequestMaxTokens(t *testing.T) {
+	model := modelSettings{MaxOutputTokens: 1000}
+	if got := *clampRequestMaxTokens(nil, model); got != 1000 {
+		t.Fatalf("nil request: got %d", got)
+	}
+	tooMany := 5000
+	if got := *clampRequestMaxTokens(&tooMany, model); got != 1000 {
+		t.Fatalf("over limit: got %d", got)
+	}
+	few := 200
+	if got := *clampRequestMaxTokens(&few, model); got != 200 {
+		t.Fatalf("under limit: got %d", got)
+	}
+}

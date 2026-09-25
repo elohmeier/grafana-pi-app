@@ -21,6 +21,8 @@ export const piModelOptions = {
   'api-key-env': { type: 'string' },
   thinking: { type: 'string' },
   'thinking-format': { type: 'string' },
+  'context-window': { type: 'string' },
+  'max-output-tokens': { type: 'string' },
 };
 
 export function piModelsFile(modelsFile, env = process.env) {
@@ -120,9 +122,21 @@ export function modelConfiguration({ settings, model }, options = {}) {
       `Pi thinking level ${thinkingLevel} is disabled or remapped; choose a directly supported --thinking level.`
     );
   }
+  // Preserve Pi's model limits: contextWindow is the endpoint capacity and
+  // maxTokens the output limit. The request budget stays within half the window.
+  const contextWindow = positiveInteger(options['context-window'] ?? model.contextWindow, '--context-window');
+  const outputLimit = positiveInteger(options['max-output-tokens'] ?? model.maxTokens, '--max-output-tokens');
+  const limits = {
+    ...(contextWindow ? { contextWindow } : {}),
+    ...(outputLimit
+      ? { maxOutputTokens: contextWindow ? Math.min(outputLimit, Math.floor(contextWindow / 2)) : outputLimit }
+      : {}),
+  };
   return {
     openAIBaseUrl: url.toString().replace(/\/+$/, ''),
-    models: [{ id: model.id, name: model.name ?? model.id, default: true, protocol, thinkingLevel, thinkingFormat }],
+    models: [
+      { id: model.id, name: model.name ?? model.id, default: true, protocol, thinkingLevel, thinkingFormat, ...limits },
+    ],
     isOpenAIAPIKeySet: true,
   };
 }
@@ -233,6 +247,7 @@ Reads ~/.pi/agent/models.json (or PI_CODING_AGENT_DIR/models.json).
 Selects one default model, replacing Grafana's model list and shared endpoint/key.
 Options: --models-file PATH, --thinking off|low|medium|high|xhigh,
          --thinking-format openai|qwen|qwen-chat-template,
+         --context-window N, --max-output-tokens N (default: Pi's contextWindow/maxTokens),
          --base-url URL (also disables Docker loopback rewriting), --api-key-env NAME.
 Create a benchmark JSON profile with npm run benchmark:profile -- --provider NAME --model ID.
 Target: GRAFANA_URL=http://localhost:3001, E2E_PLUGIN_ID=grafana-assistant-app.
@@ -282,4 +297,15 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     console.error(error.message);
     process.exitCode = 1;
   });
+}
+
+function positiveInteger(value, label) {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+  const number = Number(value);
+  if (!Number.isInteger(number) || number <= 0) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
+  return number;
 }

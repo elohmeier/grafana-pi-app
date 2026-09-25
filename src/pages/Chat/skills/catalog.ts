@@ -4,17 +4,9 @@ import type { PiAppJsonData } from '../../../types';
 import type { GrafanaSkill, SkillToolGroup } from './types';
 
 const TOOL_GROUPS_BY_SKILL: Record<string, readonly SkillToolGroup[]> = {
-  'grafana-alerting': ['alerts', 'dashboardRead', 'dashboardMetricContext', 'metrics', 'subagents', 'skillResources'],
-  'grafana-dashboard': [
-    'dashboardMetricContext',
-    'dashboardRead',
-    'liveDashboardEditing',
-    'jsonnetFiles',
-    'jsonnetDashboards',
-    'jsonnetLibraries',
-    'skillResources',
-  ],
-  investigation: ['metrics', 'dashboardMetricContext', 'subagents', 'investigation', 'skillResources'],
+  'grafana-alerting': ['alerts', 'dashboardRead', 'dashboardMetricContext', 'metrics', 'skillResources'],
+  'grafana-dashboard': ['dashboardMetricContext', 'dashboardRead', 'liveDashboardEditing', 'skillResources'],
+  investigation: ['metrics', 'dashboardMetricContext', 'investigation', 'skillResources'],
 };
 
 export const GRAFANA_SKILLS: readonly GrafanaSkill[] = BUNDLED_GRAFANA_SKILLS.map((skill) => ({

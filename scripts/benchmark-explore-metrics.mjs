@@ -7,7 +7,7 @@ const child = spawn(process.execPath, ['scripts/benchmark-agent.mjs'], {
   stdio: 'inherit',
   env: {
     ...process.env,
-    BENCH_LABEL: process.env.BENCH_LABEL ?? 'run_query_agent benchmark',
+    BENCH_LABEL: process.env.BENCH_LABEL ?? 'explore metrics benchmark',
     BENCH_LOG_PREFIX: process.env.BENCH_LOG_PREFIX ?? 'query-benchmark',
     BENCH_TEST_FILE: process.env.BENCH_TEST_FILE ?? 'tests/agentExploreMetricsBenchmark.spec.ts',
     BENCH_TIMEOUT_MS: process.env.BENCH_TIMEOUT_MS ?? '150000',

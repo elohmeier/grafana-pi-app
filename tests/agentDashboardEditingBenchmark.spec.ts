@@ -3,6 +3,13 @@ import path from 'node:path';
 import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { testIds } from '../src/components/testIds';
+import {
+  fetchSavedDashboard,
+  findBudgetError,
+  findFinalAssistantError,
+  findFinalAssistantText,
+  workspaceApplyCalls,
+} from './benchmarkOutcomes';
 
 const DEFAULT_TIMEOUT_MS = 240_000;
 const OUTPUT_DIR = path.join(process.cwd(), 'test-results', 'dashboard-editing-benchmark');
@@ -36,6 +43,7 @@ type BenchmarkRun = {
 };
 
 type BenchmarkQuality = {
+  maxToolCalls: number;
   requiredTools?: string[];
   forbiddenTools?: string[];
   requiredTranscript?: string[];
@@ -70,17 +78,15 @@ test.describe('dashboard live editing benchmark', () => {
       await openAssistantSidebar(page, uid);
       await expect(page.getByTestId(testIds.chat.composer)).toBeVisible();
 
+      const savedVersion = await savedDashboardVersion(page, uid);
       const prompt = [
-        'This benchmark validates multi-panel live dashboard editing on a larger dashboard.',
-        `The current dashboard has exactly ${panelCount} Prometheus panels titled Batch panel 01 through Batch panel ${String(
+        `This open dashboard has ${panelCount} Prometheus panels (Batch panel 01 through Batch panel ${String(
           panelCount
-        ).padStart(2, '0')}.`,
-        'Use the typed dashboard-wide batch operation, not individual panel edits.',
-        'Call apply_live_dashboard_prometheus_label_filter exactly once with variableName env, variableLabel Environment, variableQueryExpression label_values(http_requests_total, env), matcherLabel env, matcherOperator =~, includeAll=true, multi=true, current prod, allValue .*, existingMatcher replace, and dryRun=false.',
-        `The tool must report a successful verification with the env variable present, ${panelCount} matching queries, and no mismatches.`,
-        'Do not call list_live_dashboard_panels, list_live_dashboard_variables, add_live_dashboard_variable, update_live_dashboard_variable, update_live_dashboard_panel_query, update_live_dashboard_panel_queries, apply_live_dashboard_mutation, write_jsonnet, render_dashboard, save_dashboard, upload_dashboard, or delete_dashboard.',
-        'Do not answer until the dashboard-wide operation has succeeded.',
-        'After verification succeeds, answer exactly: BATCH_LIVE_EDIT_DONE.',
+        ).padStart(2, '0')}).`,
+        'Add a multi-value "Environment" variable named env from label_values(http_requests_total, env) with an All option (all value .*) and prod selected,',
+        'then filter every panel query by env=~"$env", replacing any existing env matcher.',
+        'Change all panels in one dashboard-wide operation instead of editing panels one by one, and keep the change unsaved.',
+        'When the change is verified, answer exactly: BATCH_LIVE_EDIT_DONE.',
       ].join(' ');
 
       const run = await runPrompt({
@@ -94,24 +100,14 @@ test.describe('dashboard live editing benchmark', () => {
         testInfo,
         reportIds: { uid },
         quality: {
+          maxToolCalls: 8,
+          // The expressions verified below come from the dashboard-wide operation's result.
           requiredTools: ['apply_live_dashboard_prometheus_label_filter'],
-          forbiddenTools: [
-            'list_live_dashboard_panels',
-            'list_live_dashboard_variables',
-            'add_live_dashboard_variable',
-            'update_live_dashboard_variable',
-            'update_live_dashboard_panel_query',
-            'update_live_dashboard_panel_queries',
-            'apply_live_dashboard_mutation',
-            'write_jsonnet',
-            'render_dashboard',
-            'save_dashboard',
-            'upload_dashboard',
-            'delete_dashboard',
-          ],
+          forbiddenTools: ['update_live_dashboard_panel_query', 'update_live_dashboard_panel_queries'],
           requiredTranscript: ['BATCH_LIVE_EDIT_DONE'],
         },
       });
+      await expectSavedDashboardUnchanged(page, uid, savedVersion);
 
       const panelExpressions = readPrometheusLabelFilterExpressions(run);
       const missingEnvFilter = panelExpressions.filter((expr) => !expr.includes('env=~"$env"'));
@@ -144,20 +140,12 @@ test.describe('dashboard live editing benchmark', () => {
       await openAssistantSidebar(page, uid);
       await expect(page.getByTestId(testIds.chat.composer)).toBeVisible();
 
+      const savedVersion = await savedDashboardVersion(page, uid);
       const prompt = [
-        'This benchmark validates typed live dashboard editing from the assistant sidebar.',
-        'Use typed live dashboard editing tools only.',
-        'Complete this exact tool checklist before answering:',
-        '1. Call list_live_dashboard_panels.',
-        '2. Call get_live_dashboard_layout.',
-        `3. Call rename_live_dashboard_panel to rename the existing panel to "${editedPanelTitle}".`,
-        '4. Call move_or_resize_live_dashboard_panel on the same panel element with x=0 y=8 width=12 height=8.',
-        `5. Call add_live_dashboard_panel to add a timeseries panel titled "${addedPanelTitle}" with query sum(rate(http_requests_total{status=~"5.."}[$__rate_interval])) at x=12 y=8 width=12 height=8.`,
-        '6. Call list_live_dashboard_panels again.',
-        '7. Call get_live_dashboard_layout again.',
-        'Do not call apply_live_dashboard_mutation, write_jsonnet, render_dashboard, save_dashboard, upload_dashboard, or delete_dashboard.',
-        'Do not answer until all seven checklist items have completed successfully.',
-        'After verification succeeds, answer exactly: LIVE_EDIT_BENCHMARK_DONE.',
+        'Edit the open dashboard live, without saving it:',
+        `rename the existing panel to "${editedPanelTitle}" and move it to x=0 y=8 with width 12 and height 8,`,
+        `then add a timeseries panel titled "${addedPanelTitle}" with query sum(rate(http_requests_total{status=~"5.."}[$__rate_interval])) at x=12 y=8, width 12, height 8.`,
+        'Check the resulting panels and layout, then answer exactly: LIVE_EDIT_BENCHMARK_DONE.',
       ].join(' ');
 
       const run = await runPrompt({
@@ -171,27 +159,15 @@ test.describe('dashboard live editing benchmark', () => {
         testInfo,
         reportIds: { uid, originalPanelTitle, editedPanelTitle, addedPanelTitle },
         quality: {
-          requiredTools: [
-            'list_live_dashboard_panels',
-            'get_live_dashboard_layout',
-            'rename_live_dashboard_panel',
-            'move_or_resize_live_dashboard_panel',
-            'add_live_dashboard_panel',
-          ],
-          forbiddenTools: [
-            'apply_live_dashboard_mutation',
-            'write_jsonnet',
-            'render_dashboard',
-            'save_dashboard',
-            'upload_dashboard',
-            'delete_dashboard',
-          ],
+          maxToolCalls: 14,
           requiredTranscript: [editedPanelTitle, addedPanelTitle, 'LIVE_EDIT_BENCHMARK_DONE'],
         },
       });
 
+      // Outcome: both panels are visible in the live dashboard, while the saved version is untouched.
       await expect(page.getByText(editedPanelTitle).first()).toBeVisible();
       await expect(page.getByText(addedPanelTitle).first()).toBeVisible();
+      await expectSavedDashboardUnchanged(page, uid, savedVersion);
     } finally {
       await page.request.delete(`/api/dashboards/uid/${encodeURIComponent(uid)}`).catch(() => undefined);
     }
@@ -213,15 +189,11 @@ test.describe('dashboard live editing benchmark', () => {
       await installBenchmarkRecorder(page);
       await openAssistantSidebar(page, uid);
 
+      const savedVersion = await savedDashboardVersion(page, uid);
       const prompt = [
         'This benchmark validates recovery after a failed live dashboard edit.',
-        'Use typed live dashboard editing tools only.',
-        'Complete this exact recovery checklist before answering:',
-        '1. Intentionally call rename_live_dashboard_panel with elementName "panel-does-not-exist" and title "Should fail".',
-        '2. After that fails, call list_live_dashboard_panels to find the correct element.',
-        `3. Call rename_live_dashboard_panel again to rename the existing panel to "${editedPanelTitle}".`,
-        'Do not call apply_live_dashboard_mutation, write_jsonnet, render_dashboard, save_dashboard, upload_dashboard, or delete_dashboard.',
-        'Do not answer until all three checklist items have completed.',
+        'First, deliberately try to rename the live panel with element name "panel-does-not-exist" to "Should fail"; that edit is expected to fail.',
+        `Then find the correct panel on the open dashboard and rename it to "${editedPanelTitle}" without saving the dashboard.`,
         'After the successful retry, answer exactly: LIVE_EDIT_RECOVERY_DONE.',
       ].join(' ');
 
@@ -236,21 +208,14 @@ test.describe('dashboard live editing benchmark', () => {
         testInfo,
         reportIds: { uid, originalPanelTitle, editedPanelTitle },
         quality: {
-          requiredTools: ['rename_live_dashboard_panel', 'list_live_dashboard_panels'],
-          forbiddenTools: [
-            'apply_live_dashboard_mutation',
-            'write_jsonnet',
-            'render_dashboard',
-            'save_dashboard',
-            'upload_dashboard',
-            'delete_dashboard',
-          ],
-          requiredTranscript: ['Live dashboard mutation succeeded', 'UPDATE_PANEL', 'LIVE_EDIT_RECOVERY_DONE'],
+          maxToolCalls: 10,
+          requiredTranscript: ['LIVE_EDIT_RECOVERY_DONE'],
           requireFailedTool: 'rename_live_dashboard_panel',
         },
       });
 
       await expect(page.getByText(editedPanelTitle).first()).toBeVisible();
+      await expectSavedDashboardUnchanged(page, uid, savedVersion);
     } finally {
       await page.request.delete(`/api/dashboards/uid/${encodeURIComponent(uid)}`).catch(() => undefined);
     }
@@ -265,7 +230,7 @@ test.describe('dashboard live editing benchmark', () => {
     const prompt = [
       'This benchmark validates the fallback path when no dashboard is currently loaded.',
       'Can you directly rename the currently open dashboard panel to "Unavailable edit"?',
-      'Answer with one short sentence that starts with "I cannot directly rename" and do not call any dashboard editing tool.',
+      'If you cannot, answer with one short sentence that starts with "I cannot directly rename".',
     ].join(' ');
 
     const run = await runPrompt({
@@ -292,12 +257,8 @@ test.describe('dashboard live editing benchmark', () => {
           'add_live_dashboard_variable',
           'update_live_dashboard_variable',
           'apply_live_dashboard_mutation',
-          'write_jsonnet',
-          'render_dashboard',
-          'save_dashboard',
-          'upload_dashboard',
-          'delete_dashboard',
         ],
+        maxToolCalls: 6,
         requiredTranscriptAny: [
           'I cannot directly rename',
           'not available',
@@ -410,6 +371,18 @@ function batchPanelExpression(index: number, metric: string) {
     return `avg by (method) (rate(${metric}{method="${method}"}[${window}]))`;
   }
   return `max(rate(${metric}[${window}]))`;
+}
+
+async function savedDashboardVersion(page: Page, uid: string) {
+  const saved = await fetchSavedDashboard(page.request, uid);
+  expect(saved, `seeded dashboard ${uid} must exist`).toBeTruthy();
+  return saved?.dashboard.version;
+}
+
+/** Live edits change the browser state only; the saved dashboard must keep its version. */
+async function expectSavedDashboardUnchanged(page: Page, uid: string, version: unknown) {
+  const saved = await fetchSavedDashboard(page.request, uid);
+  expect(saved?.dashboard.version, `saved dashboard ${uid} changed during a live edit`).toBe(version);
 }
 
 async function openAssistantSidebar(page: Page, dashboardUid: string) {
@@ -666,6 +639,17 @@ function findQualityError(run: BenchmarkRun, quality: BenchmarkQuality) {
     return `assistant used forbidden tool ${forbidden}`;
   }
 
+  // Live edits must stay unsaved: no durable write through the session workspace.
+  const durableWrite = workspaceApplyCalls(run.events)[0];
+  if (durableWrite) {
+    return `assistant attempted a durable dashboard write: ${truncateOneLine(durableWrite.command, 200)}`;
+  }
+
+  const budgetError = findBudgetError(run.events, { maxToolCalls: quality.maxToolCalls });
+  if (budgetError) {
+    return budgetError;
+  }
+
   if (quality.requireFailedTool) {
     const failed = hasFailedTool(run, quality.requireFailedTool);
     const transcriptFailure =
@@ -787,31 +771,6 @@ function formatLiveBenchmarkEvent(event: BenchmarkEvent) {
     return '[benchmark] agent end';
   }
   return undefined;
-}
-
-function findFinalAssistantError(events: BenchmarkEvent[]) {
-  const finalMessage = [...events].reverse().find((event) => event.type === 'agent_end')?.message;
-  return typeof finalMessage?.errorMessage === 'string' ? finalMessage.errorMessage : undefined;
-}
-
-function findFinalAssistantText(events: BenchmarkEvent[]) {
-  const message = [...events]
-    .reverse()
-    .find((event) => event.type === 'agent_end' && event.message?.role === 'assistant')?.message;
-  return summarizeContent(message?.content);
-}
-
-function summarizeContent(content: unknown): string {
-  if (typeof content === 'string') {
-    return content;
-  }
-  if (!Array.isArray(content)) {
-    return '';
-  }
-  return content
-    .map((item) => (isRecord(item) && item.type === 'text' && typeof item.text === 'string' ? item.text : ''))
-    .filter(Boolean)
-    .join('\n');
 }
 
 function summarizeJson(value: unknown) {

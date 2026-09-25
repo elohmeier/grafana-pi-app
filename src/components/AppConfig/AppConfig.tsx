@@ -77,6 +77,8 @@ const initialModelRows = (models?: PiAppModelConfig[]): PiAppModelConfig[] => {
     protocol: normalizeOpenAIProtocol(model.protocol),
     thinkingLevel: normalizeThinkingLevel(model.thinkingLevel),
     thinkingFormat: normalizeThinkingFormat(model.thinkingFormat),
+    contextWindow: model.contextWindow,
+    maxOutputTokens: model.maxOutputTokens,
   }));
 };
 
@@ -99,12 +101,20 @@ const serializeModels = (rows: PiAppModelConfig[]): PiAppModelConfig[] => {
       protocol: normalizeOpenAIProtocol(row.protocol),
       thinkingLevel: normalizeThinkingLevel(row.thinkingLevel),
       thinkingFormat: normalizeThinkingFormat(row.thinkingFormat),
+      ...optionalTokenLimit('contextWindow', row.contextWindow),
+      ...optionalTokenLimit('maxOutputTokens', row.maxOutputTokens),
     });
   }
   if (models.length > 0 && !models.some((model) => model.default)) {
     models[0] = { ...models[0], default: true };
   }
   return models;
+};
+
+// Empty limits are omitted so the backend defaults apply.
+const optionalTokenLimit = (key: 'contextWindow' | 'maxOutputTokens', value: number | string | undefined) => {
+  const parsed = typeof value === 'string' ? Number(value.trim()) : value;
+  return typeof parsed === 'number' && Number.isFinite(parsed) && parsed > 0 ? { [key]: Math.floor(parsed) } : {};
 };
 
 const validateModelRows = (rows: PiAppModelConfig[]): string | undefined => {
@@ -421,6 +431,34 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
                       />
                     </Field>
                   )}
+                  <Field
+                    className={s.modelRowField}
+                    label="Context window"
+                    description="Tokens the endpoint accepts (input + output). Default 131072."
+                  >
+                    <Input
+                      type="number"
+                      min={4096}
+                      width={16}
+                      placeholder="131072"
+                      value={model.contextWindow ?? ''}
+                      onChange={(event) => onChangeModelRow(index, { contextWindow: event.currentTarget.value })}
+                    />
+                  </Field>
+                  <Field
+                    className={s.modelRowField}
+                    label="Max output tokens"
+                    description="Per model call. Default 16384."
+                  >
+                    <Input
+                      type="number"
+                      min={256}
+                      width={16}
+                      placeholder="16384"
+                      value={model.maxOutputTokens ?? ''}
+                      onChange={(event) => onChangeModelRow(index, { maxOutputTokens: event.currentTarget.value })}
+                    />
+                  </Field>
                 </div>
               </div>
             ))}
