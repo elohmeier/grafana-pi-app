@@ -164,6 +164,7 @@ export async function runWorkspaceBash(
   }
   signal?.addEventListener('abort', forwardAbort, { once: true });
 
+  await deps.workspace.prepareMounts(controller.signal);
   const tx = deps.workspace.begin({ signal: controller.signal });
   try {
     const { Bash, defineCommand } = await import('just-bash/browser');

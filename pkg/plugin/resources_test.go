@@ -69,7 +69,7 @@ func TestResourceAccessDefaultsToAll(t *testing.T) {
 	var sender mockCallResourceResponseSender
 	err = app.CallResource(context.Background(), &backend.CallResourceRequest{
 		Method: http.MethodPost,
-		Path:   "jsonnet-libs/list",
+		Path:   "jsonnet-libs/files",
 		Body:   []byte(`{}`),
 	}, &sender)
 	if err != nil {
@@ -83,66 +83,64 @@ func TestResourceAccessDefaultsToAll(t *testing.T) {
 	}
 }
 
-func TestJsonnetLibEndpointsExposeBundledDashboardHelpers(t *testing.T) {
+func TestJsonnetLibFilesEndpointListsAndLoadsPackages(t *testing.T) {
 	inst, err := NewApp(context.Background(), backend.AppInstanceSettings{})
 	if err != nil {
 		t.Fatalf("new app: %s", err)
 	}
 	app := inst.(*App)
-
-	var listSender mockCallResourceResponseSender
-	listBody := []byte(`{}`)
-	err = app.CallResource(context.Background(), &backend.CallResourceRequest{
-		PluginContext: adminPluginContext(),
-		Method:        http.MethodPost,
-		Path:          "jsonnet-libs/list",
-		Body:          listBody,
-	}, &listSender)
-	if err != nil {
-		t.Fatalf("CallResource list error: %s", err)
+	call := func(body string) (int, []byte) {
+		var sender mockCallResourceResponseSender
+		if err := app.CallResource(context.Background(), &backend.CallResourceRequest{
+			PluginContext: adminPluginContext(),
+			Method:        http.MethodPost,
+			Path:          "jsonnet-libs/files",
+			Body:          []byte(body),
+		}, &sender); err != nil {
+			t.Fatalf("CallResource error: %s", err)
+		}
+		return sender.responses[0].Status, sender.responses[0].Body
 	}
-	if listSender.responses[0].Status != http.StatusOK {
-		t.Fatalf("expected list 200, got %d: %s", listSender.responses[0].Status, string(listSender.responses[0].Body))
-	}
-	var listResponse struct {
-		BasePath string   `json:"basePath"`
-		Result   []string `json:"result"`
-	}
-	if err := json.Unmarshal(listSender.responses[0].Body, &listResponse); err != nil {
-		t.Fatalf("decode list response: %s", err)
-	}
-	if listResponse.BasePath != "github.com/g42/pi-dashboard" || !containsString(listResponse.Result, "main.libsonnet") {
-		t.Fatalf("helper library not listed: %#v", listResponse)
+	type response struct {
+		Files []jsonnetLibFile `json:"files"`
 	}
 
-	readBody, _ := json.Marshal(jsonnetLibReadRequest{Path: "github.com/g42/pi-dashboard/main.libsonnet", Offset: 1, Limit: 20})
-	var readSender mockCallResourceResponseSender
-	err = app.CallResource(context.Background(), &backend.CallResourceRequest{
-		PluginContext: adminPluginContext(),
-		Method:        http.MethodPost,
-		Path:          "jsonnet-libs/read",
-		Body:          readBody,
-	}, &readSender)
-	if err != nil {
-		t.Fatalf("CallResource read error: %s", err)
+	status, body := call(`{}`)
+	var listing response
+	if status != http.StatusOK || json.Unmarshal(body, &listing) != nil {
+		t.Fatalf("list failed: %d %s", status, body)
 	}
-	if readSender.responses[0].Status != http.StatusOK || !strings.Contains(string(readSender.responses[0].Body), "refIds") {
-		t.Fatalf("helper library not readable, got %d: %s", readSender.responses[0].Status, string(readSender.responses[0].Body))
+	found := false
+	for _, file := range listing.Files {
+		if file.Content != nil {
+			t.Fatalf("listing must not include contents: %s", file.Path)
+		}
+		found = found || (file.Path == "github.com/g42/pi-dashboard/main.libsonnet" && file.Size > 0)
+	}
+	if !found || len(listing.Files) < 100 {
+		t.Fatalf("helper library not listed (%d files)", len(listing.Files))
 	}
 
-	searchBody, _ := json.Marshal(jsonnetLibSearchRequest{Pattern: "statStrip"})
-	var searchSender mockCallResourceResponseSender
-	err = app.CallResource(context.Background(), &backend.CallResourceRequest{
-		PluginContext: adminPluginContext(),
-		Method:        http.MethodPost,
-		Path:          "jsonnet-libs/search",
-		Body:          searchBody,
-	}, &searchSender)
-	if err != nil {
-		t.Fatalf("CallResource search error: %s", err)
+	status, body = call(`{"package":"github.com/g42/pi-dashboard"}`)
+	var pkg response
+	if status != http.StatusOK || json.Unmarshal(body, &pkg) != nil {
+		t.Fatalf("package load failed: %d", status)
 	}
-	if searchSender.responses[0].Status != http.StatusOK || !strings.Contains(string(searchSender.responses[0].Body), "main.libsonnet") {
-		t.Fatalf("helper library not searchable, got %d: %s", searchSender.responses[0].Status, string(searchSender.responses[0].Body))
+	var helper *jsonnetLibFile
+	for index := range pkg.Files {
+		if !strings.HasPrefix(pkg.Files[index].Path, "github.com/g42/pi-dashboard/") {
+			t.Fatalf("file outside the requested package: %s", pkg.Files[index].Path)
+		}
+		if pkg.Files[index].Path == "github.com/g42/pi-dashboard/main.libsonnet" {
+			helper = &pkg.Files[index]
+		}
+	}
+	if helper == nil || helper.Content == nil || !strings.Contains(*helper.Content, "statStrip") {
+		t.Fatal("helper library content missing")
+	}
+
+	if status, _ := call(`{"package":"../../etc"}`); status != http.StatusBadRequest {
+		t.Fatalf("expected unknown package to be rejected, got %d", status)
 	}
 }
 
@@ -158,7 +156,7 @@ func TestResourceAccessAdminsModeDeniesViewer(t *testing.T) {
 	err = app.CallResource(context.Background(), &backend.CallResourceRequest{
 		PluginContext: viewerPluginContext("viewer", "viewer@example.com"),
 		Method:        http.MethodPost,
-		Path:          "jsonnet-libs/list",
+		Path:          "jsonnet-libs/files",
 		Body:          []byte(`{}`),
 	}, &sender)
 	if err != nil {
@@ -187,7 +185,7 @@ func TestResourceAccessAllowsConfiguredUser(t *testing.T) {
 	err = app.CallResource(context.Background(), &backend.CallResourceRequest{
 		PluginContext: viewerPluginContext("viewer", "viewer@example.com"),
 		Method:        http.MethodPost,
-		Path:          "jsonnet-libs/list",
+		Path:          "jsonnet-libs/files",
 		Body:          []byte(`{}`),
 	}, &sender)
 	if err != nil {
@@ -212,7 +210,7 @@ func TestResourceAccessAllModeHasNoAppGate(t *testing.T) {
 	var sender mockCallResourceResponseSender
 	err = app.CallResource(context.Background(), &backend.CallResourceRequest{
 		Method: http.MethodPost,
-		Path:   "jsonnet-libs/list",
+		Path:   "jsonnet-libs/files",
 		Body:   []byte(`{}`),
 	}, &sender)
 	if err != nil {
@@ -238,7 +236,7 @@ func TestResourceAccessRBACModeDeniesViewerWithoutForwardedIdentity(t *testing.T
 	err = app.CallResource(context.Background(), &backend.CallResourceRequest{
 		PluginContext: viewerPluginContext("viewer", "viewer@example.com"),
 		Method:        http.MethodPost,
-		Path:          "jsonnet-libs/list",
+		Path:          "jsonnet-libs/files",
 		Body:          []byte(`{}`),
 	}, &sender)
 	if err != nil {
@@ -270,7 +268,7 @@ func TestResourceAccessRBACModeAllowsViewerWithPermission(t *testing.T) {
 	err = app.CallResource(ctx, &backend.CallResourceRequest{
 		PluginContext: viewerPluginContext("viewer", "viewer@example.com"),
 		Method:        http.MethodPost,
-		Path:          "jsonnet-libs/list",
+		Path:          "jsonnet-libs/files",
 		Headers:       map[string][]string{grafanaIDHeader: []string{"id-token"}},
 		Body:          []byte(`{}`),
 	}, &sender)
@@ -848,15 +846,6 @@ func TestOpenAIRequestPrefixesFailedToolResults(t *testing.T) {
 	if payload.Messages[0].Content != expected {
 		t.Fatalf("unexpected failed tool content:\nwant: %q\n got: %q", expected, payload.Messages[0].Content)
 	}
-}
-
-func containsString(values []string, expected string) bool {
-	for _, value := range values {
-		if value == expected {
-			return true
-		}
-	}
-	return false
 }
 
 func joinBodies(responses []*backend.CallResourceResponse) string {

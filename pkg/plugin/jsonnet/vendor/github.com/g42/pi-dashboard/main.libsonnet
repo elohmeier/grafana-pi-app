@@ -58,6 +58,11 @@ local rowContentPanels(groups) = std.flattenArrays([
 ]);
 
 local shiftRowPanel(panel, dy) = panel + { gridPos: panel.gridPos + { y: panel.gridPos.y + dy } };
+// A d.row(...) result has a title; anything else (a d.layout.* group or a bare panel) is a section without a row header.
+local isRow(value) = std.isObject(value) && has(value, 'title') && has(value, 'panels') && has(value, 'height') && !has(value, 'type');
+local section(value) =
+  if isRow(value) then value + { header: true, collapsed: if has(value, 'collapsed') then value.collapsed else false }
+  else asGroup(value) + { header: false, collapsed: false };
 local expandedRowPanels(row, rowY) =
   local rowPanel = {
     title: row.title,
@@ -65,7 +70,8 @@ local expandedRowPanels(row, rowY) =
     collapsed: row.collapsed,
     gridPos: { x: 0, y: rowY, w: 24, h: 1 },
   };
-  if row.collapsed then [rowPanel + { panels: [shiftRowPanel(panel, rowY) for panel in row.panels] }]
+  if !row.header then [shiftRowPanel(panel, rowY) for panel in row.panels]
+  else if row.collapsed then [rowPanel + { panels: [shiftRowPanel(panel, rowY) for panel in row.panels] }]
   else [rowPanel] + [shiftRowPanel(panel, rowY) for panel in row.panels];
 
 local rowY(rows, index) = sum([rows[rowIndex].height for rowIndex in range(index)]);
@@ -92,27 +98,69 @@ local slugifyTitle(title) =
     lower
   );
   std.strReplace(std.strReplace(replaced, '--', '-'), '--', '-');
-local queryVariable(name, query='', datasourceUid=null, label=null, includeAll=false, multi=false, current=null, refresh=1) =
+// current may be a string or, for multi-value variables, an array of strings.
+local currentValue(current) = if current == null then null else { text: current, value: current };
+local queryVariable(name, query='', datasourceUid=null, label=null, includeAll=false, multi=false, current=null, refresh=1, allValue=null) =
+  withField(
+    withField(
+      {
+        type: 'query',
+        name: name,
+        label: if label == null then name else label,
+        query: query,
+        definition: query,
+        includeAll: includeAll,
+        multi: multi,
+        refresh: refresh,
+        current: currentValue(current),
+      },
+      'datasource',
+      if datasourceUid == null then null else datasource(datasourceUid)
+    ),
+    'allValue',
+    allValue
+  );
+local splitValues(values) =
+  if std.isString(values) then [std.stripChars(value, ' ') for value in std.split(values, ',') if std.stripChars(value, ' ') != '']
+  else values;
+local customVariable(name, values, current=null, label=null, multi=false, includeAll=false, allValue=null) =
+  local list = splitValues(values);
+  local selected = if current != null then current
+  else if std.length(list) == 0 then null
+  else if multi then [list[0]]
+  else list[0];
+  local isSelected(value) = if std.isArray(selected) then std.member(selected, value) else value == selected;
   withField(
     {
-      type: 'query',
+      type: 'custom',
       name: name,
       label: if label == null then name else label,
-      query: query,
-      includeAll: includeAll,
+      query: std.join(',', list),
       multi: multi,
-      refresh: refresh,
-      current: if current == null then null else { text: current, value: current },
+      includeAll: includeAll,
+      current: currentValue(selected),
+      options: [{ text: value, value: value, selected: isSelected(value) } for value in list],
     },
-    'datasource',
-    if datasourceUid == null then null else datasource(datasourceUid)
+    'allValue',
+    allValue
   );
+// Accepts a variable list or a { list: [...] } templating object.
+local variableList(value) =
+  if value == null then []
+  else if std.isArray(value) then value
+  else if std.isObject(value) && has(value, 'list') then value.list
+  else error 'templating must be a list of variables or { list: [...] }';
 
 {
   dashboard: {
-    new(title, uid=null, tags=[], timezone='browser', time={ from: 'now-6h', to: 'now' }, refresh='30s', rows=[]):: (
-      local expandedRows = [expandedRowPanels(rows[index], rowY(rows, index)) for index in range(std.length(rows))];
-      local panels = withPanelIds(std.flattenArrays(expandedRows));
+    // rows: d.row(...) results; d.layout.* groups and bare panels become sections without a row header.
+    // panels: panels or d.layout.* groups placed above the rows without a row header.
+    // variables: d.variable.* constructors; templating is accepted as an alias.
+    // The result also has chainable withVariables([...]) / withTemplating([...]) methods.
+    new(title, uid=null, tags=[], timezone='browser', time={ from: 'now-6h', to: 'now' }, refresh='30s', rows=[], variables=[], templating=null, panels=[]):: (
+      local sections = [section(value) for value in panels + rows];
+      local expandedRows = [expandedRowPanels(sections[index], rowY(sections, index)) for index in range(std.length(sections))];
+      local allVariables = variableList(variables) + variableList(templating);
       {
         title: title,
         uid: if uid == null || uid == '' then slugifyTitle(title) else uid,
@@ -121,8 +169,15 @@ local queryVariable(name, query='', datasourceUid=null, label=null, includeAll=f
         time: time,
         refresh: refresh,
         schemaVersion: 39,
-        panels: panels,
-      }
+        panels: withPanelIds(std.flattenArrays(expandedRows)),
+        withVariables(list):: self + {
+          local existing = if 'templating' in super then super.templating.list else [],
+          templating: { list: existing + variableList(list) },
+        },
+        withTemplating(list):: self.withVariables(list),
+        with_templating(list):: self.withVariables(list),
+        with_variables(list):: self.withVariables(list),
+      } + (if std.length(allVariables) > 0 then { templating: { list: allVariables } } else {})
     ),
 
     with_time_range(from='now-6h', to='now'):: { time: { from: from, to: to } },
@@ -134,7 +189,7 @@ local queryVariable(name, query='', datasourceUid=null, label=null, includeAll=f
     with_timezone(timezone='browser'):: { timezone: timezone },
     withTimezone(timezone='browser'):: self.with_timezone(timezone),
 
-    with_templating(list):: { templating: { list: list } },
+    with_templating(list):: { templating: { list: variableList(list) } },
     withTemplating(list):: self.with_templating(list),
     withtemplating(list):: self.with_templating(list),
     with_template(list):: self.with_templating(list),
@@ -166,7 +221,8 @@ local queryVariable(name, query='', datasourceUid=null, label=null, includeAll=f
   prom: {
     datasource(uid):: datasource(uid),
 
-    query(expr, datasourceUid, refId=null, legend='', instant=false, format='time_series'):: (
+    // legendFormat is accepted as an alias for legend.
+    query(expr, datasourceUid, refId=null, legend='', instant=false, format='time_series', legendFormat=null):: (
       local base = {
         datasource: datasource(datasourceUid),
         expr: expr,
@@ -175,7 +231,8 @@ local queryVariable(name, query='', datasourceUid=null, label=null, includeAll=f
         format: format,
         editorMode: 'code',
       };
-      withField(withField(base, 'refId', refId), 'legendFormat', if legend == '' then null else legend)
+      local legendText = if legendFormat != null then legendFormat else legend;
+      withField(withField(base, 'refId', refId), 'legendFormat', if legendText == '' then null else legendText)
     ),
   },
 
@@ -189,14 +246,45 @@ local queryVariable(name, query='', datasourceUid=null, label=null, includeAll=f
 
   templating: {
     list: {
-      new(name, datasourceUid=null, query='', label=null, includeAll=false, multi=false, current=null, refresh=1)::
-        queryVariable(name, query, datasourceUid, label, includeAll, multi, current, refresh),
+      new(name, datasourceUid=null, query='', label=null, includeAll=false, multi=false, current=null, refresh=1, allValue=null)::
+        queryVariable(name, query, datasourceUid, label, includeAll, multi, current, refresh, allValue),
     },
   },
 
   variable: {
-    query(name, query='', datasourceUid=null, label=null, includeAll=false, multi=false, current=null, refresh=1)::
-      queryVariable(name, query, datasourceUid, label, includeAll, multi, current, refresh),
+    query(name, query='', datasourceUid=null, label=null, includeAll=false, multi=false, current=null, refresh=1, allValue=null)::
+      queryVariable(name, query, datasourceUid, label, includeAll, multi, current, refresh, allValue),
+
+    // Values from a label: label_values(metric, label), or label_values(label) without a metric.
+    // Refreshes on time range change so values follow the selected range.
+    labelValues(name, label, metric=null, datasourceUid=null, displayLabel=null, includeAll=false, multi=false, current=null, allValue=null)::
+      queryVariable(
+        name,
+        if metric == null then 'label_values(%s)' % label else 'label_values(%s, %s)' % [metric, label],
+        datasourceUid,
+        displayLabel,
+        includeAll,
+        multi,
+        current,
+        2,
+        allValue
+      ),
+
+    // Fixed values: an array of strings or a comma-separated string. current defaults to the first value.
+    custom(name, values, current=null, label=null, multi=false, includeAll=false, allValue=null)::
+      customVariable(name, values, current, label, multi, includeAll, allValue),
+
+    constant(name, value)::
+      { type: 'constant', name: name, hide: 2, query: value, current: currentValue(value) },
+
+    textbox(name, value='', label=null)::
+      {
+        type: 'textbox',
+        name: name,
+        label: if label == null then name else label,
+        query: value,
+        current: currentValue(value),
+      },
 
     datasource(name='datasource', type='prometheus', label=null, current=null)::
       {

@@ -50,6 +50,7 @@ function makeReadTool(workspace: SessionWorkspace): AgentTool {
       throwIfAborted(signal);
       const args = params as ReadParams;
       const path = resolveToolPath(args.path);
+      await workspace.prepareMounts(signal);
       const tx = workspace.begin({ signal });
       try {
         const type = await tx.entryType(path).catch(() => undefined);
@@ -102,6 +103,7 @@ function makeWriteTool(workspace: SessionWorkspace): AgentTool {
       if (typeof args.content !== 'string') {
         throw new Error('write requires string content');
       }
+      await workspace.prepareMounts(signal);
       const tx = workspace.begin({ signal });
       try {
         const before = await readIfExists(tx, path);
@@ -154,6 +156,7 @@ function makeEditTool(workspace: SessionWorkspace): AgentTool {
       if (!Array.isArray(args.edits) || args.edits.length === 0) {
         throw new Error('edit requires at least one {oldText, newText} edit');
       }
+      await workspace.prepareMounts(signal);
       const tx = workspace.begin({ signal });
       try {
         const before = await tx.readFile(path);

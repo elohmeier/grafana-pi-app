@@ -9,7 +9,9 @@ datasources:
     isDefault: true
     editable: true
     jsonData:
-      timeInterval: 5s
+      # Matches the seeded history step (HISTORY_STEP_SECONDS, default 60) so
+      # the rate interval spans at least two samples; live 5s scrapes still work.
+      timeInterval: 60s
   - name: Thanos Prod
     uid: thanos-prod-db
     type: prometheus
@@ -18,4 +20,6 @@ datasources:
     isDefault: false
     editable: true
     jsonData:
-      timeInterval: 5s
+      # Matches the seeded history step (HISTORY_STEP_SECONDS, default 60) so
+      # the rate interval spans at least two samples; live 5s scrapes still work.
+      timeInterval: 60s

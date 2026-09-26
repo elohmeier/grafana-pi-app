@@ -722,7 +722,6 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/telemetry/events", a.withAppAccess(a.handleTelemetryEvents))
 	mux.HandleFunc("/jsonnet/eval", a.withAppAccess(a.handleJsonnetEval))
 	mux.HandleFunc("/jsonnet/fix", a.withAppAccess(a.handleJsonnetFix))
-	mux.HandleFunc("/jsonnet-libs/search", a.withAppAccess(a.handleJsonnetLibSearch))
-	mux.HandleFunc("/jsonnet-libs/read", a.withAppAccess(a.handleJsonnetLibRead))
-	mux.HandleFunc("/jsonnet-libs/list", a.withAppAccess(a.handleJsonnetLibList))
+	mux.HandleFunc("/jsonnet-libs/files", a.withAppAccess(a.handleJsonnetLibFiles))
+	mux.HandleFunc("/promql/parse", a.withAppAccess(a.handlePromQLParse))
 }

@@ -7,6 +7,7 @@ import type { Page } from '@playwright/test';
 import {
   appliedDashboardUids,
   bashCalls,
+  dashboardDataProblemCalls,
   dashboardExpressions,
   fetchSavedDashboard,
   findBudgetError,
@@ -17,8 +18,8 @@ import {
   formatToolTimeline,
   getRecord,
   hasSuccessfulPromEvidence,
+  isSuccessfulBash,
   nonRowPanels,
-  numericField,
   promEvidenceText,
   readPositiveInteger,
   stringField,
@@ -357,11 +358,8 @@ function formatBenchmarkReport(run: BenchmarkRun, ids: { sourceUid: string; fixe
   return lines.join('\n');
 }
 
-/** The agent inspected the stale source dashboard: typed context, or hydrating/inspecting its working copy. */
+/** The agent inspected the stale source dashboard: read, hydrated, or inspected its working copy. */
 function inspectedSourceDashboard(events: BenchmarkEvent[], sourceUid: string) {
-  const typed = summarizeToolCalls(events).some(
-    (call) => call.name === 'inspect_dashboard_context' && call.status === 'completed' && !call.isError
-  );
   const sourcePath = `/grafana/dashboards/${sourceUid}`;
   const read = summarizeToolCalls(events).some(
     (call) => call.name === 'read' && (stringField(getRecord(call.args), 'path') ?? '').startsWith(sourcePath)
@@ -369,21 +367,43 @@ function inspectedSourceDashboard(events: BenchmarkEvent[], sourceUid: string) {
   const shell = bashCalls(events).some(
     (call) =>
       call.command.includes(sourceUid) &&
-      /\b(grafana\s+fetch|grafana-dashboard\s+inspect|cat|jq|rg|grep)\b/.test(call.command)
+      /\b(grafana\s+fetch|grafana-dashboard\s+(inspect|data|validate)|cat|jq|rg|grep)\b/.test(call.command)
   );
-  return typed || read || shell;
+  return read || shell;
 }
 
-/** Stale queries were recognised: typed context reported failed/zero-series queries, or stale PromQL was run. */
+const STALE_METRIC = 'http_request_total';
+
+/**
+ * Stale queries were recognised: `grafana-dashboard data` reported empty/failing
+ * panels, stale PromQL was run, or metric discovery showed the stale metric is absent.
+ */
 function observedStaleEvidence(events: BenchmarkEvent[]) {
-  const typed = summarizeToolCalls(events).some((call) => {
-    if (call.name !== 'inspect_dashboard_context') {
+  return (
+    dashboardDataProblemCalls(events).length > 0 ||
+    promEvidenceText(events).includes(STALE_METRIC) ||
+    observedStaleMetricAbsence(events)
+  );
+}
+
+/** A successful `grafana-prom metrics PATTERN` whose pattern matches the stale metric but whose output lacks it. */
+function observedStaleMetricAbsence(events: BenchmarkEvent[]) {
+  return bashCalls(events).some((call) => {
+    if (!isSuccessfulBash(call)) {
       return false;
     }
-    const validation = getRecord(getRecord(getRecord(call.result)?.details)?.validation);
-    return numericField(validation, 'failedQueries') > 0 || numericField(validation, 'zeroSeriesQueries') > 0;
+    return [...call.command.matchAll(/\bgrafana-prom\s+metrics\s+(?:'([^']*)'|"([^"]*)"|([^\s|;&-]\S*))/g)].some(
+      (match) => {
+        let pattern: RegExp;
+        try {
+          pattern = new RegExp(match[1] ?? match[2] ?? match[3]);
+        } catch {
+          return false;
+        }
+        return pattern.test(STALE_METRIC) && !call.stdout.split('\n').some((line) => line.trim() === STALE_METRIC);
+      }
+    );
   });
-  return typed || promEvidenceText(events).includes('http_request_total');
 }
 
 function findRichQualityError(run: BenchmarkRun, ids: { sourceUid: string; fixedUid: string }, outcome: Outcome) {

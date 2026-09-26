@@ -79,13 +79,17 @@ describe('streaming status', () => {
           content: [
             { type: 'thinking', thinking: 'checking' },
             { type: 'text', text: 'answer' },
-            { type: 'toolCall', name: 'inspect_dashboard_context', arguments: {} },
+            { type: 'toolCall', name: 'inspect_dashboard_metric_usage', arguments: {} },
           ],
         },
       } as any,
       1800
     );
-    expect(status).toMatchObject({ phase: 'preparing_tool', detail: 'inspect_dashboard_context', startedAt: 1000 });
+    expect(status).toMatchObject({
+      phase: 'preparing_tool',
+      detail: 'inspect_dashboard_metric_usage',
+      startedAt: 1000,
+    });
   });
 
   it('resolves display status from the live streaming assistant message', () => {
@@ -112,21 +116,26 @@ describe('streaming status', () => {
         type: 'message_update',
         message: {
           role: 'assistant',
-          content: [{ type: 'toolCall', name: 'inspect_dashboard_context', arguments: {} }],
+          content: [{ type: 'toolCall', name: 'inspect_dashboard_metric_usage', arguments: {} }],
         },
         assistantMessageEvent: { type: 'toolcall_start' },
       } as any,
       1500
     );
-    expect(runStatusText(status)).toBe('Preparing inspect dashboard context');
+    expect(runStatusText(status)).toBe('Preparing inspect dashboard metric usage');
     expect(runStatusBadgeText(status)).toBe('Tool call');
 
     status = reduceChatRunStatus(
       status,
-      { type: 'tool_execution_start', toolName: 'inspect_dashboard_context', toolCallId: 'call-1', args: {} } as any,
+      {
+        type: 'tool_execution_start',
+        toolName: 'inspect_dashboard_metric_usage',
+        toolCallId: 'call-1',
+        args: {},
+      } as any,
       1800
     );
-    expect(runStatusText(status)).toBe('Running inspect dashboard context');
+    expect(runStatusText(status)).toBe('Running inspect dashboard metric usage');
     expect(runStatusBadgeText(status)).toBe('Running tool');
     expect(runStatusText(status, 'workspace_apply')).toBe('Waiting for approval: workspace apply');
     expect(runStatusBadgeText(status, 'workspace_apply')).toBe('Approval');

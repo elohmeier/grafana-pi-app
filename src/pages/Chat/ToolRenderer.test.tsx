@@ -199,7 +199,7 @@ describe('ToolRenderer', () => {
           },
           {
             type: 'toolCall',
-            name: 'inspect_dashboard_context',
+            name: 'inspect_dashboard_metric_usage',
             arguments: {
               uid: 'service-health',
             },
@@ -209,7 +209,7 @@ describe('ToolRenderer', () => {
     );
 
     expect(container.textContent).toContain('Capture dashboard screenshot | service-health');
-    expect(container.textContent).toContain('Inspect dashboard context | service-health');
+    expect(container.textContent).toContain('Inspect dashboard metric usage | service-health');
     expect(container.textContent).toContain('1200 x 800');
     expect(container.textContent).not.toContain('"uid"');
   });

@@ -320,8 +320,6 @@ function asSimpleToolCallSummary(
       return workspaceEditToolCallSummary(record);
     case 'bash':
       return workspaceBashToolCallSummary(record);
-    case 'inspect_dashboard_context':
-      return dashboardToolCallSummary('Inspect dashboard context', record);
     case 'inspect_dashboard_metric_usage':
       return dashboardToolCallSummary('Inspect dashboard metric usage', record);
     case 'find_panel_alert_rules':
@@ -906,7 +904,6 @@ const TOOL_ICONS: Record<string, IconName> = {
   edit: 'file-edit-alt',
   write: 'file-edit-alt',
   bash: 'brackets-curly',
-  inspect_dashboard_context: 'dashboard',
   inspect_dashboard_metric_usage: 'dashboard',
   find_panel_alert_rules: 'bell',
   get_alert_rule: 'bell',

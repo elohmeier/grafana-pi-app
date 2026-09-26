@@ -98,14 +98,32 @@ export function createFakeDashboardBroker(
       store.delete(uid);
       return { outcome: 'applied' };
     },
+    async dryRun(document: any, resourceVersion) {
+      const uid = document.metadata.name;
+      calls.push(`dryRun:${uid}@${resourceVersion ?? 'new'}`);
+      const stored = store.get(uid);
+      if (resourceVersion === undefined) {
+        return stored ? { ok: false, status: 409, message: 'already exists' } : { ok: true, status: 201 };
+      }
+      if (!stored || String(stored.resourceVersion) !== resourceVersion) {
+        return { ok: false, status: 409, message: 'the object has been modified' };
+      }
+      return { ok: true, status: 200 };
+    },
     folderExists: async (uid) => uid === 'ops',
     allowedDatasourceUids: () => ['prometheus'],
+  };
+
+  const dataRequests: Array<{ queries: Array<Record<string, unknown>>; from: string; to: string }> = [];
+  let dataResponse: (request: (typeof dataRequests)[number]) => unknown = () => ({ results: {} });
+  const setDataResponse = (responder: typeof dataResponse) => {
+    dataResponse = responder;
   };
 
   const broker: WorkspaceBroker = {
     dashboards,
     prometheus: {
-      datasources: () => [{ uid: 'prometheus', name: 'Prometheus', isDefault: true }],
+      datasources: () => [{ uid: 'prometheus', name: 'Prometheus', isDefault: true, timeInterval: '60s' }],
       async metricNames() {
         return {
           datasourceUid: 'prometheus',
@@ -120,6 +138,10 @@ export function createFakeDashboardBroker(
       },
       async series(_ds, match) {
         return { datasourceUid: 'prometheus', series: [{ __name__: match, job: 'api' }], truncated: false };
+      },
+      async queryData(request) {
+        dataRequests.push(request);
+        return dataResponse(request);
       },
       async query(_ds, spec) {
         return {
@@ -139,5 +161,5 @@ export function createFakeDashboardBroker(
     stored.resourceVersion = ++version;
   };
 
-  return { broker, store, calls, touch };
+  return { broker, store, calls, touch, dataRequests, setDataResponse };
 }

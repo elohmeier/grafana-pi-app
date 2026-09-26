@@ -127,6 +127,17 @@ export function isSuccessfulBash(call: BashCall) {
 }
 
 /** bash calls that ran `grafana-prom query`. */
+/** `grafana-dashboard data` calls that reported a panel as empty or failing (exit 1 means a panel errored). */
+export function dashboardDataProblemCalls(events: BenchmarkEvent[]) {
+  return bashCalls(events).filter(
+    (call) =>
+      /\bgrafana-dashboard\s+data\b/.test(call.command) &&
+      call.status === 'completed' &&
+      !call.timedOut &&
+      (call.exitCode === 1 || /"status"\s*:\s*"(empty|error)"|^\s*"?(empty|error)"?\s*$/m.test(call.stdout))
+  );
+}
+
 export function promQueryCalls(events: BenchmarkEvent[]) {
   return bashCalls(events).filter((call) => /\bgrafana-prom\s+query\b/.test(call.command));
 }

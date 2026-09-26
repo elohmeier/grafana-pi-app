@@ -18,7 +18,7 @@ local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
 
 Use `d.dashboard.new(title=..., uid=..., time={ from: 'now-6h', to: 'now' }, rows=[...])`, `d.row`, `d.layout.full`, `d.layout.twoUp`, `d.layout.threeUp`, `d.layout.fourUp`, `d.layout.statStrip`, `d.panel.timeseries`, `d.panel.stat`, `d.panel.table`, and `d.prom.query`.
 
-Valid `d.dashboard.new` named arguments are `title`, `uid`, `tags`, `timezone`, `time`, `refresh`, and `rows`. Do not use `timeframe`, `timeFrom`, or `timeTo`.
+Valid `d.dashboard.new` named arguments are `title`, `uid`, `tags`, `timezone`, `time`, `refresh`, `rows`, `panels`, and `variables`. `rows` takes `d.row(...)` results; `d.layout.*` groups in `rows` or `panels` are laid out without a row header. `d.prom.query(expr, datasourceUid, refId=null, legend='', instant=false)` also accepts `legendFormat=` for `legend=`. Do not use `timeframe`, `timeFrom`, or `timeTo`.
 
 `d.layout.full` takes one panel object, for example `d.layout.full(d.panel.table(...), h=10)`. `d.layout.twoUp`, `threeUp`, `fourUp`, and `statStrip` take arrays of panels.
 
@@ -32,24 +32,34 @@ Do not pass `span`, `description`, `sortByField`, or `sortDesc` to helper panels
 
 Do not import Grafonnet and do not use constructor chains such as `grafana.dashboard.new()` or `.with_*` methods. If you write raw panels instead of helper calls, write a plain object with explicit `panels`, `targets`, and `gridPos` fields.
 
-If variables are needed, use a plain Grafana templating object:
+If variables are needed, pass them to `d.dashboard.new(..., variables=[...])`:
 
 ```jsonnet
-+ {
-  templating: {
-    list: [
-      d.variable.query(
-        name='job',
-        datasourceUid='prometheus',
-        query='label_values(up, job)',
-        label='Job',
-        includeAll=true,
-        multi=true,
+d.dashboard.new(
+  title='Checkout routes',
+  uid='checkout-routes',
+  variables=[
+    // Fixed values; current defaults to the first value.
+    d.variable.custom('route', ['/', '/api/orders', '/render/report'], current='/render/report'),
+    // Values of a Prometheus label, refreshed when the time range changes.
+    d.variable.labelValues('job', 'job', metric='up', datasourceUid='prometheus', multi=true, includeAll=true),
+  ],
+  rows=[
+    d.row('Traffic', [
+      d.layout.full(
+        d.panel.timeseries(
+          title='Request rate',
+          datasourceUid='prometheus',
+          targets=[d.prom.query('sum by (route) (rate(http_requests_total{route="$route", job=~"$job"}[$__rate_interval]))', 'prometheus', legend='{{route}}')],
+          unit='reqps',
+        )
       ),
-    ],
-  },
-}
+    ]),
+  ],
+)
 ```
+
+Other constructors: `d.variable.query(name, query, datasourceUid)`, `d.variable.constant(name, value)`, and `d.variable.textbox(name, value)`. Use `=~"$name"` for multi-value or All variables. Check the rendered dashboard with `grafana-dashboard data PATH --var route=/render/report`.
 
 For tables, pass explicit `columns=[...]` and `rename={...}` to `d.panel.table` so the generated panel filters and organizes visible columns.
 

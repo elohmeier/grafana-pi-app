@@ -95,6 +95,11 @@ export class SessionWorkspace {
     return this.generated;
   }
 
+  /** Runs mount preparation; a mount that fails to prepare stays empty for this call. */
+  async prepareMounts(signal?: AbortSignal) {
+    await Promise.all(this.generated.map((mount) => mount.prepare?.(signal).catch(() => undefined)));
+  }
+
   subscribe(listener: () => void) {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

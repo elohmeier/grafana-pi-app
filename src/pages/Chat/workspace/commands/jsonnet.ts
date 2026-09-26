@@ -4,7 +4,6 @@ import {
   fail,
   json,
   listOption,
-  numberOption,
   ok,
   stringOption,
   UsageError,
@@ -114,58 +113,6 @@ export const jsonnetCommand: WorkspaceCommandSpec = {
         return json({ path, changed: true, repairs: repaired.repairs, next: `jsonnet ${path}` });
       },
     },
-    lib: {
-      summary:
-        'Browse vendored libraries: `lib ls [DIR]`, `lib cat PATH [--offset N --limit N]`, `lib search PATTERN [--path DIR]`.',
-      usage: 'jsonnet lib ls|cat|search ...',
-      effect: 'remote-read',
-      options: {
-        offset: { type: 'number', description: 'First line for `lib cat`.', default: 1 },
-        limit: { type: 'number', description: 'Lines for `lib cat` (max 500).', default: 200 },
-        path: { type: 'string', description: 'Library directory for `lib search`.' },
-      },
-      examples: [
-        'jsonnet lib ls github.com/g42/pi-dashboard',
-        'jsonnet lib search timeseries --path github.com/g42/pi-dashboard',
-        'jsonnet lib cat github.com/g42/pi-dashboard/main.libsonnet --limit 80',
-      ],
-      async run(parsed, ctx) {
-        const jsonnet = requireJsonnet(ctx);
-        const [action, target] = parsed.positionals;
-        if (action === 'ls') {
-          const result = await jsonnet.listLibraries(target, ctx.signal);
-          return ok(
-            result.files.map((file) => `${result.basePath}/${file}`).join('\n') + (result.files.length ? '\n' : '')
-          );
-        }
-        if (action === 'cat') {
-          if (!target) {
-            throw new UsageError('lib cat requires PATH');
-          }
-          const result = await jsonnet.readLibrary(
-            target,
-            {
-              offset: numberOption(parsed, 'offset', 1, 1, 1_000_000),
-              limit: numberOption(parsed, 'limit', 200, 1, 500),
-            },
-            ctx.signal
-          );
-          const last = result.lines[result.lines.length - 1]?.line ?? 0;
-          const footer =
-            last < result.totalLines ? `# ${result.totalLines - last} more lines; use --offset ${last + 1}\n` : '';
-          return ok(result.lines.map((line) => line.text).join('\n') + '\n', footer);
-        }
-        if (action === 'search') {
-          if (!target) {
-            throw new UsageError('lib search requires PATTERN');
-          }
-          const result = await jsonnet.searchLibraries(target, stringOption(parsed, 'path'), ctx.signal);
-          const lines = result.matches.map((match) => `${match.file}:${match.line}:${match.text}`);
-          return ok(lines.join('\n') + (lines.length ? '\n' : ''), result.capped ? '# results capped\n' : '');
-        }
-        throw new UsageError('expected `lib ls`, `lib cat`, or `lib search`');
-      },
-    },
   },
 };
 
@@ -230,6 +177,24 @@ function dashboardResource(output: string, uid: string, folderUid: string | unde
   }
   if (spec.apiVersion && spec.spec) {
     throw new Error('the program already returns a resource; drop --resource');
+  }
+  const usage =
+    "return d.dashboard.new(title=..., uid=..., variables=[...], rows=[d.row('Title', [d.layout.full(d.panel.timeseries(...))])])";
+  if (typeof spec.title !== 'string' || !spec.title.trim()) {
+    throw new Error(
+      `--resource expects a classic dashboard object with a title; got top-level keys [${Object.keys(spec).join(', ')}]. ${usage}`
+    );
+  }
+  if (spec.panels !== undefined) {
+    const panels = Array.isArray(spec.panels) ? spec.panels : [];
+    const invalid = panels.findIndex(
+      (panel) => !panel || typeof panel !== 'object' || typeof (panel as { type?: unknown }).type !== 'string'
+    );
+    if (!Array.isArray(spec.panels) || invalid >= 0) {
+      throw new Error(
+        `--resource expects panels to be panel objects with a type${invalid >= 0 ? ` (panels[${invalid}] has none)` : ''}; pass d.row(...) and d.layout.* results to d.dashboard.new(rows=[...]) instead of panels. ${usage}`
+      );
+    }
   }
   const { id: _id, ...rest } = spec;
   return {

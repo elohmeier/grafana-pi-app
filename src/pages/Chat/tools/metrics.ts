@@ -468,6 +468,8 @@ type SeriesSummary = {
   mean?: number;
   delta?: number;
   deltaPercent?: number;
+  /** The same values keyed by Grafana reducer id, matching `grafana-dashboard data` series. */
+  calcs?: { lastNotNull: number | null; min: number | null; max: number | null; mean: number | null };
 };
 
 type SummaryPoint = {
@@ -617,7 +619,7 @@ function summarizePrometheusApiSeries(series: PrometheusApiSeries): SeriesSummar
     }
   }
 
-  return summary;
+  return withReducerCalcs(summary);
 }
 
 function prometheusApiSeriesName(metric: Record<string, string>) {
@@ -695,6 +697,16 @@ function summarizeNumberField(frame: DataFrame, field: Field, timeField?: Field)
     }
   }
 
+  return withReducerCalcs(summary);
+}
+
+function withReducerCalcs(summary: SeriesSummary): SeriesSummary {
+  summary.calcs = {
+    lastNotNull: summary.last?.value ?? null,
+    min: summary.min?.value ?? null,
+    max: summary.max?.value ?? null,
+    mean: summary.mean ?? null,
+  };
   return summary;
 }
 

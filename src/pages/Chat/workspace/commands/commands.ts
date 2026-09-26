@@ -3,8 +3,11 @@ import {
   fixDashboardLayout,
   inspectDashboard,
   validateDashboardDocument,
+  type DashboardPanelInfo,
   type DashboardValidationReport,
 } from '../dashboardModel';
+import { collectDashboardData } from '../dashboardData';
+import { DashboardWalkError } from '../dashboardPanels';
 import { jsonnetCommand } from './jsonnet';
 import { normalizeWorkspacePath, truncateUtf8 } from '../paths';
 import { PlanError, applyWorkspacePlan, createWorkspacePlan } from '../plans';
@@ -161,10 +164,17 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
   summary: 'Inspect and validate dashboard working copies.',
   subcommands: {
     inspect: {
-      summary: 'Summarize panels, queries, variables, and datasources of a dashboard file.',
-      usage: 'grafana-dashboard inspect PATH',
+      summary:
+        'Summarize a dashboard file: panels (row path, grid position, queries, legend, transformations, unit/thresholds, links), variables with current values, time, and datasources.',
+      usage: 'grafana-dashboard inspect PATH [--panel ID]...',
       effect: 'local-read',
-      examples: ['grafana-dashboard inspect /grafana/dashboards/checkout/dashboard.json'],
+      options: {
+        panel: { type: 'string[]', description: 'Only these panels: id (classic) or element name (v2); repeatable.' },
+      },
+      examples: [
+        'grafana-dashboard inspect /grafana/dashboards/checkout/dashboard.json',
+        "grafana-dashboard inspect /grafana/dashboards/checkout/dashboard.json | jq -c '.panels[] | {id, title, rowPath, queries: [.queries[].expr]}'",
+      ],
       async run(parsed, ctx) {
         const path = requirePath(parsed, ctx);
         const content = await ctx.tx.readFile(path);
@@ -174,7 +184,34 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
         } catch (error) {
           return fail(`${path}: invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
         }
-        return json({ path, ...inspectDashboard(resource) });
+        const inspection = inspectDashboard(resource);
+        const wanted = listOption(parsed, 'panel');
+        if (wanted.length > 0) {
+          const matches = (panel: DashboardPanelInfo, id: string) => panel.key === id || String(panel.id) === id;
+          const missing = wanted.filter((id) => !inspection.panels.some((panel) => matches(panel, id)));
+          if (missing.length > 0) {
+            return fail(
+              `grafana-dashboard inspect: no panel ${missing.map((id) => JSON.stringify(id)).join(', ')}; available: ${inspection.panels.map((panel) => panel.id ?? panel.key).join(', ')}`
+            );
+          }
+          inspection.panels = inspection.panels.filter((panel) => wanted.some((id) => matches(panel, id)));
+        }
+        const target = ctx.workspace.classify(path);
+        const meta = target.type === 'resource' ? ctx.workspace.getResource(target.uid)?.base?.meta : undefined;
+        return json({
+          path,
+          ...inspection,
+          ...(meta
+            ? {
+                grafana: {
+                  url: meta.url,
+                  resourceVersion: meta.resourceVersion,
+                  ...(meta.managedBy ? { managedBy: meta.managedBy } : {}),
+                  fetchedAt: meta.fetchedAt,
+                },
+              }
+            : {}),
+        });
       },
     },
     fix: {
@@ -199,9 +236,17 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
       },
     },
     validate: {
-      summary: 'Validate JSON, resource envelope, structure, PromQL syntax, and datasource policy. Exit 1 on errors.',
-      usage: 'grafana-dashboard validate PATH...',
+      summary:
+        'Validate JSON, resource envelope, structure, PromQL syntax (upstream Prometheus parser, saved variable values), and datasource policy. --server also dry-runs the write in Grafana. Exit 1 on errors.',
+      usage: 'grafana-dashboard validate PATH... [--server]',
       effect: 'local-read',
+      options: {
+        server: {
+          type: 'boolean',
+          description:
+            'Also send each document to Grafana as a dry-run update/create (nothing is saved): checks strict decoding, admission, write permission, and whether the dashboard changed since it was fetched.',
+        },
+      },
       async run(parsed, ctx) {
         if (parsed.positionals.length === 0) {
           throw new UsageError('at least one PATH is required');
@@ -211,17 +256,106 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
           const path = normalizeWorkspacePath(raw, ctx.cwd);
           const target = ctx.workspace.classify(path);
           const uid = target.type === 'resource' ? target.uid : undefined;
+          // Reading first hydrates the resource, so its base revision is known afterwards.
           const content = await ctx.tx.readFile(path);
-          const report = validateDashboardDocument(content, {
+          const base = uid ? ctx.workspace.getResource(uid)?.base : undefined;
+          const report = await validateDashboardDocument(content, {
             expectedUid: uid,
             allowedDatasourceUids: ctx.broker.dashboards?.allowedDatasourceUids?.(),
-            managedBy: uid ? ctx.workspace.getResource(uid)?.base?.meta.managedBy : undefined,
+            managedBy: base?.meta.managedBy,
+            promql: ctx.broker.promql,
+            signal: ctx.signal,
           });
           await checkFolder(content, report, ctx);
+          if (parsed.options.server === true) {
+            await serverDryRun(content, base?.meta.resourceVersion, report, ctx);
+          }
           reports.push({ path, ...report });
         }
         const okAll = reports.every((report) => report.ok);
         return json(reports.length === 1 ? reports[0] : { schemaVersion: 1, ok: okAll, reports }, okAll ? 0 : 1);
+      },
+    },
+    data: {
+      summary:
+        'Run panel queries as the current user and apply the panel transformations, overrides, units, and reducers: shows what each panel displays (status ok/empty/error/skipped, reduced series or bounded table rows). Prometheus panels only.',
+      usage:
+        'grafana-dashboard data PATH [--panel ID]... [--type TYPE]... [--var NAME=VALUE]... [--from now-1h] [--to now]',
+      effect: 'remote-read',
+      options: {
+        panel: { type: 'string[]', description: 'Panel id (classic) or element name (v2); repeatable.' },
+        type: { type: 'string[]', description: 'Only panels of this type, e.g. stat or table; repeatable.' },
+        var: {
+          type: 'string[]',
+          description: 'Override a variable; repeat the same NAME to select several values. Default: saved values.',
+        },
+        from: { type: 'string', description: 'Range start (default: dashboard time).' },
+        to: { type: 'string', description: 'Range end (default: dashboard time).' },
+        'max-panels': { type: 'number', description: 'Panels to query, 1-30.', default: 10 },
+        'max-series': { type: 'number', description: 'Series per panel, 1-200.', default: 10 },
+        'max-rows': { type: 'number', description: 'Table rows per frame, 1-200.', default: 10 },
+        'include-hidden': { type: 'boolean', description: 'Also run hidden queries.' },
+        'include-collapsed': {
+          type: 'boolean',
+          description: 'Also run panels in collapsed rows (implied by --panel).',
+        },
+      },
+      examples: [
+        'grafana-dashboard data /grafana/dashboards/checkout/dashboard.json --panel 3 --from now-30m',
+        "grafana-dashboard data /grafana/dashboards/checkout/dashboard.json --var service=api --var service=web | jq '.panels[] | {id, title, status}'",
+      ],
+      async run(parsed, ctx) {
+        const path = requirePath(parsed, ctx);
+        const prom = requireProm(ctx);
+        if (!prom.queryData) {
+          throw new Error('panel data queries are not available in this session');
+        }
+        const content = await ctx.tx.readFile(path);
+        let resource: unknown;
+        try {
+          resource = JSON.parse(content);
+        } catch (error) {
+          return fail(`${path}: invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        let report;
+        try {
+          report = await collectDashboardData(resource, {
+            panels: listOption(parsed, 'panel'),
+            panelTypes: listOption(parsed, 'type'),
+            vars: listOption(parsed, 'var'),
+            from: stringOption(parsed, 'from'),
+            to: stringOption(parsed, 'to'),
+            maxPanels: numberOption(parsed, 'max-panels', 10, 1, 30),
+            maxSeries: numberOption(parsed, 'max-series', 10, 1, 200),
+            maxRows: numberOption(parsed, 'max-rows', 10, 1, 200),
+            includeHiddenTargets: parsed.options['include-hidden'] === true,
+            includeCollapsed: parsed.options['include-collapsed'] === true,
+            datasources: prom.datasources(),
+            query: prom.queryData,
+            signal: ctx.signal,
+          });
+        } catch (error) {
+          if (error instanceof DashboardWalkError) {
+            return fail(`grafana-dashboard data: ${error.message}`);
+          }
+          throw error;
+        }
+        const artifact = ctx.artifacts?.register({
+          kind: 'json',
+          title: `Panel data: ${report.title}`,
+          toolName: 'grafana-dashboard data',
+          data: report,
+          summary: report.panels.map((panel) => `${panel.title}: ${panel.status}`).join(', '),
+        });
+        const failed = report.panels.some((panel) => panel.status === 'error');
+        const stderr = report.panelsOmitted
+          ? `# ${report.panelsOmitted} more panels not queried (--max-panels); select with --panel or --type\n`
+          : '';
+        return json(
+          { path, ...report, ...(artifact ? { artifact: `/artifacts/${artifact.id}.json` } : {}) },
+          failed ? 1 : 0,
+          stderr
+        );
       },
     },
   },
@@ -477,9 +611,11 @@ export const workspaceCommand: WorkspaceCommandSpec = {
       async run(parsed, ctx) {
         ctx.tx.checkpoint();
         try {
-          const plan = createWorkspacePlan(ctx.workspace, {
+          const plan = await createWorkspacePlan(ctx.workspace, {
             paths: listOption(parsed, 'path').map((path) => normalizeWorkspacePath(path, ctx.cwd)),
             allowedDatasourceUids: ctx.broker.dashboards?.allowedDatasourceUids?.(),
+            promql: ctx.broker.promql,
+            signal: ctx.signal,
           });
           return json({
             schemaVersion: 1,
@@ -592,6 +728,48 @@ async function checkFolder(content: string, report: DashboardValidationReport, c
     report.levels.policy = 'failed';
     report.ok = false;
   }
+}
+
+/** Dry-runs the write in Grafana; a revision is sent only for existing dashboards (update vs. create). */
+async function serverDryRun(
+  content: string,
+  resourceVersion: string | undefined,
+  report: DashboardValidationReport,
+  ctx: WorkspaceCommandContext
+) {
+  report.notRun = report.notRun.filter((level) => !level.startsWith('server dry-run'));
+  const dryRun = ctx.broker.dashboards?.dryRun;
+  if (!dryRun || report.levels.json !== 'passed' || report.levels.envelope !== 'passed') {
+    report.warnings.push({
+      level: 'server',
+      message: dryRun
+        ? 'server dry-run skipped: fix JSON and envelope errors first'
+        : 'server dry-run is not available',
+    });
+    return;
+  }
+  const result = await dryRun(JSON.parse(content), resourceVersion, ctx.signal);
+  if (result.ok) {
+    report.levels.server = 'passed';
+    return;
+  }
+  const status = result.status;
+  const message = result.message ?? 'request failed';
+  if (status === 409 || status === 412) {
+    report.errors.push({
+      level: 'server',
+      message: `conflict: ${message}. The dashboard changed in Grafana since it was fetched; run \`grafana refresh\` and reapply your edits.`,
+    });
+  } else if (status === 401 || status === 403) {
+    report.errors.push({ level: 'server', message: `not permitted to save this dashboard: ${message}` });
+  } else if (status !== undefined && status >= 400 && status < 500) {
+    report.errors.push({ level: 'server', message: `rejected by Grafana (HTTP ${status}): ${message}` });
+  } else {
+    report.warnings.push({ level: 'server', message: `server dry-run unavailable: ${message}` });
+    return;
+  }
+  report.levels.server = 'failed';
+  report.ok = false;
 }
 
 function requireDashboards(ctx: WorkspaceCommandContext) {

@@ -1,4 +1,5 @@
-import { parser as promqlParser } from '@prometheus-io/lezer-promql';
+import { collectPanels, transformationId, unwrapDashboard, type WalkedPanel } from './dashboardPanels';
+import { checkDashboardPromql, lezerParser, type PromqlParser } from './promqlCheck';
 
 export const DASHBOARD_API_GROUP = 'dashboard.grafana.app';
 
@@ -9,6 +10,9 @@ export type DashboardQueryInfo = {
   datasourceUid?: string;
   datasourceType?: string;
   expr?: string;
+  /** Query text of non-PromQL targets (query, rawSql, expression, ...). */
+  query?: string;
+  legendFormat?: string;
   hidden?: boolean;
 };
 
@@ -17,9 +21,31 @@ export type DashboardPanelInfo = {
   id?: number;
   title: string;
   type: string;
-  row?: string;
+  /** Row and tab titles from the outermost layout level inward. */
+  rowPath?: string[];
+  collapsed?: boolean;
+  gridPos?: Record<string, unknown>;
+  description?: string;
+  libraryPanel?: string;
+  repeat?: string;
   datasourceUid?: string;
   queries: DashboardQueryInfo[];
+  transformations?: string[];
+  /** Compact field config and options: unit, decimals, min/max, thresholds, legend and reduce calcs. */
+  display?: Record<string, unknown>;
+  links?: string[];
+};
+
+export type DashboardVariableInfo = {
+  name: string;
+  type?: string;
+  label?: string;
+  datasourceUid?: string;
+  query?: string;
+  current?: string | string[];
+  multi?: boolean;
+  includeAll?: boolean;
+  options?: string[];
 };
 
 export type DashboardInspection = {
@@ -30,13 +56,15 @@ export type DashboardInspection = {
   title?: string;
   tags: string[];
   folderUid?: string;
+  time?: { from?: string; to?: string };
+  refresh?: string;
   panelCount: number;
   panels: DashboardPanelInfo[];
-  variables: Array<{ name: string; type?: string; query?: string }>;
+  variables: DashboardVariableInfo[];
   datasourceUids: string[];
 };
 
-export type ValidationLevel = 'json' | 'envelope' | 'structure' | 'queries' | 'policy';
+export type ValidationLevel = 'json' | 'envelope' | 'structure' | 'queries' | 'policy' | 'server';
 
 export type ValidationDiagnostic = {
   level: ValidationLevel;
@@ -49,6 +77,8 @@ export type DashboardValidationReport = {
   ok: boolean;
   format: DashboardFormat;
   levels: Record<ValidationLevel, 'passed' | 'failed' | 'skipped'>;
+  /** Parser used for the queries level: the upstream Prometheus parser, or the offline lezer fallback. */
+  promqlParser?: PromqlParser['name'];
   errors: ValidationDiagnostic[];
   warnings: ValidationDiagnostic[];
   /** Validation levels that this command does not run; reported so a pass is not over-read. */
@@ -72,8 +102,9 @@ export function inspectDashboard(resource: unknown): DashboardInspection {
   const record = isRecord(resource) ? resource : {};
   const spec: AnyRecord = isRecord(record.spec) ? record.spec : record;
   const format = dashboardFormat(resource);
-  const panels = format === 'v2' ? v2Panels(spec) : v1Panels(spec);
-  const variables = format === 'v2' ? v2Variables(spec) : v1Variables(spec);
+  const panels = walkPanels(resource);
+  const variables = dashboardVariables(format === 'v2' ? spec.variables : spec.templating?.list);
+  const time = isRecord(spec.timeSettings) ? spec.timeSettings : isRecord(spec.time) ? spec.time : {};
   const datasourceUids = new Set<string>();
   for (const panel of panels) {
     if (panel.datasourceUid) {
@@ -93,6 +124,12 @@ export function inspectDashboard(resource: unknown): DashboardInspection {
     title: stringOrUndefined(spec.title),
     tags: Array.isArray(spec.tags) ? spec.tags.filter((tag: unknown): tag is string => typeof tag === 'string') : [],
     folderUid: stringOrUndefined(record.metadata?.annotations?.['grafana.app/folder']),
+    ...(time.from || time.to
+      ? { time: compact({ from: stringOrUndefined(time.from), to: stringOrUndefined(time.to) }) }
+      : {}),
+    ...(stringOrUndefined(spec.refresh ?? time.autoRefresh)
+      ? { refresh: stringOrUndefined(spec.refresh ?? time.autoRefresh) }
+      : {}),
     panelCount: panels.length,
     panels,
     variables,
@@ -100,10 +137,17 @@ export function inspectDashboard(resource: unknown): DashboardInspection {
   };
 }
 
-export function validateDashboardDocument(
+export async function validateDashboardDocument(
   content: string,
-  options: { expectedUid?: string; allowedDatasourceUids?: string[]; managedBy?: string } = {}
-): DashboardValidationReport {
+  options: {
+    expectedUid?: string;
+    allowedDatasourceUids?: string[];
+    managedBy?: string;
+    /** Defaults to the offline lezer parser; pass the backend parser for upstream Prometheus syntax. */
+    promql?: PromqlParser;
+    signal?: AbortSignal;
+  } = {}
+): Promise<DashboardValidationReport> {
   const errors: ValidationDiagnostic[] = [];
   const warnings: ValidationDiagnostic[] = [];
   const levels: DashboardValidationReport['levels'] = {
@@ -112,18 +156,21 @@ export function validateDashboardDocument(
     structure: 'skipped',
     queries: 'skipped',
     policy: 'skipped',
+    server: 'skipped',
   };
   const notRun = [
     'version-specific Grafana schema (CUE) validation',
-    'server dry-run',
-    'runtime data checks (use grafana-prom query)',
+    'server dry-run (use --server)',
+    'panel data checks (use grafana-dashboard data)',
     'rendering checks',
   ];
+  let promqlParser: PromqlParser['name'] | undefined;
   const finish = (format: DashboardFormat): DashboardValidationReport => ({
     schemaVersion: 1,
     ok: errors.length === 0,
     format,
     levels,
+    ...(promqlParser ? { promqlParser } : {}),
     errors,
     warnings,
     notRun,
@@ -195,24 +242,36 @@ export function validateDashboardDocument(
 
   const inspection = inspectDashboard(resource);
   const queryErrors = errors.length;
-  let promQueries = 0;
-  for (const panel of inspection.panels) {
-    for (const query of panel.queries) {
-      if (!query.expr) {
-        continue;
-      }
-      promQueries++;
-      const syntaxError = promqlSyntaxError(query.expr);
-      if (syntaxError) {
-        errors.push({
-          level: 'queries',
-          path: `panel ${JSON.stringify(panel.title)} query ${query.refId ?? '?'}`,
-          message: `PromQL syntax error ${syntaxError}: ${query.expr}`,
-        });
-      }
+  let promql;
+  try {
+    promql = await checkDashboardPromql(resource, options.promql ?? lezerParser, options.signal);
+  } catch (error) {
+    if (options.signal?.aborted) {
+      throw error;
     }
+    warnings.push({
+      level: 'queries',
+      message: `${error instanceof Error ? error.message : String(error)}; checked with the less strict offline parser`,
+    });
+    promql = await checkDashboardPromql(resource, lezerParser);
   }
-  levels.queries = promQueries === 0 ? 'skipped' : errors.length > queryErrors ? 'failed' : 'passed';
+  promqlParser = promql.parser;
+  for (const diagnostic of promql.errors) {
+    errors.push({
+      level: 'queries',
+      path: `panel ${diagnostic.panel} ${JSON.stringify(diagnostic.title)} query ${diagnostic.refId || '?'}`,
+      message: `PromQL: ${diagnostic.message}: ${diagnostic.expr}`,
+    });
+  }
+  for (const skipped of promql.skipped) {
+    warnings.push({
+      level: 'queries',
+      path: `panel ${skipped.panel} ${JSON.stringify(skipped.title)} query ${skipped.refId || '?'}`,
+      message: `not checked: ${skipped.reason}`,
+    });
+  }
+  levels.queries =
+    promql.checked + promql.errors.length === 0 ? 'skipped' : errors.length > queryErrors ? 'failed' : 'passed';
 
   const policyErrors = errors.length;
   if (options.managedBy) {
@@ -241,35 +300,6 @@ const BUILTIN_DATASOURCE_UIDS = new Set([
   'expr',
   '__expr__',
 ]);
-
-/** Returns a short location description for the first PromQL syntax error, or undefined. */
-export function promqlSyntaxError(expr: string): string | undefined {
-  const masked = maskGrafanaTemplateVariables(expr);
-  const tree = promqlParser.parse(masked);
-  let errorAt: number | undefined;
-  tree.iterate({
-    enter(node) {
-      if (errorAt === undefined && node.type.isError) {
-        errorAt = node.from;
-      }
-    },
-  });
-  return errorAt === undefined ? undefined : `near offset ${errorAt}`;
-}
-
-/** Replaces Grafana macros and template variables with syntactically neutral placeholders. */
-export function maskGrafanaTemplateVariables(expr: string) {
-  return expr
-    .replace(/\$\{?__(rate_interval|interval|range|interval_ms|range_s|range_ms)(?::[^}]*)?\}?/g, (match) =>
-      /ms|_s/.test(match) ? '1' : '5m'
-    )
-    .replace(
-      /\$\{([A-Za-z0-9_]+)(?::[^}]*)?\}|\$([A-Za-z0-9_]+)|\[\[([A-Za-z0-9_]+)(?::[^\]]*)?\]\]/g,
-      (_m, a, b, c) => {
-        return `var_${a ?? b ?? c}`;
-      }
-    );
-}
 
 function validateV1Structure(spec: AnyRecord, errors: ValidationDiagnostic[], warnings: ValidationDiagnostic[]) {
   if (typeof spec.title !== 'string' || !spec.title.trim()) {
@@ -413,91 +443,122 @@ function collectElementReferences(node: unknown, names: Set<string>) {
   }
 }
 
-function v1Panels(spec: AnyRecord): DashboardPanelInfo[] {
-  const panels: DashboardPanelInfo[] = [];
-  const visit = (items: unknown[], row?: string) => {
-    for (const panel of items) {
-      if (!isRecord(panel)) {
-        continue;
-      }
-      if (panel.type === 'row') {
-        visit(Array.isArray(panel.panels) ? panel.panels : [], String(panel.title ?? ''));
-        continue;
-      }
-      const panelDatasource = datasourceRef(panel.datasource);
-      panels.push({
-        key: `panel-${panel.id ?? panels.length}`,
-        id: typeof panel.id === 'number' ? panel.id : undefined,
-        title: String(panel.title ?? ''),
-        type: String(panel.type ?? ''),
-        row,
-        datasourceUid: panelDatasource.uid,
-        queries: (Array.isArray(panel.targets) ? panel.targets : []).filter(isRecord).map((target: AnyRecord) => {
-          const targetDatasource = datasourceRef(target.datasource);
-          return compact({
-            refId: stringOrUndefined(target.refId),
-            datasourceUid: targetDatasource.uid ?? panelDatasource.uid,
-            datasourceType: targetDatasource.type ?? panelDatasource.type,
-            expr: stringOrUndefined(target.expr),
-            hidden: target.hide === true ? true : undefined,
-          });
-        }),
+function walkPanels(resource: unknown): DashboardPanelInfo[] {
+  let walked;
+  try {
+    const [shape, dashboard] = unwrapDashboard(resource);
+    walked = collectPanels(shape, dashboard, { includeCollapsed: true, includeHiddenTargets: true });
+  } catch {
+    return [];
+  }
+  return walked.map(panelInfo);
+}
+
+const QUERY_TEXT_KEYS = ['query', 'rawSql', 'rawQuery', 'luceneQuery', 'target', 'expression'];
+const MAX_TEXT = 400;
+
+function panelInfo(panel: WalkedPanel): DashboardPanelInfo {
+  const raw: AnyRecord = panel.raw;
+  const panelDatasource = datasourceRef(panel.datasource);
+  const transformations = panel.transformations.map(transformationId).filter(Boolean);
+  const links = (Array.isArray(raw.links) ? raw.links : [])
+    .filter(isRecord)
+    .map((link: AnyRecord) => [stringOrUndefined(link.title), stringOrUndefined(link.url)].filter(Boolean).join(' -> '))
+    .filter(Boolean)
+    .slice(0, 8);
+  return compact({
+    key: panel.key,
+    id: /^\d+$/.test(panel.id) ? Number(panel.id) : undefined,
+    title: panel.title,
+    type: panel.type,
+    rowPath: panel.rowPath.length ? panel.rowPath : undefined,
+    collapsed: panel.collapsed,
+    gridPos: panel.gridPos,
+    description: shortText(raw.description),
+    libraryPanel: panel.libraryPanel,
+    repeat: stringOrUndefined(raw.repeat) ?? stringOrUndefined(raw.repeatOptions?.value),
+    datasourceUid: panelDatasource.uid,
+    queries: panel.targets.map((target: AnyRecord) => {
+      const targetDatasource = datasourceRef(target.datasource);
+      const expr = stringOrUndefined(target.expr);
+      const queryKey = expr ? undefined : QUERY_TEXT_KEYS.find((key) => typeof target[key] === 'string' && target[key]);
+      return compact({
+        refId: stringOrUndefined(target.refId),
+        datasourceUid: targetDatasource.uid,
+        datasourceType: targetDatasource.type,
+        expr,
+        query: queryKey ? shortText(target[queryKey]) : undefined,
+        legendFormat: stringOrUndefined(target.legendFormat),
+        hidden: target.hide === true ? true : undefined,
       });
-    }
-  };
-  visit(Array.isArray(spec.panels) ? spec.panels : []);
-  return panels;
+    }),
+    transformations: transformations.length ? transformations : undefined,
+    display: panelDisplay(panel),
+    links: links.length ? links : undefined,
+  });
 }
 
-function v2Panels(spec: AnyRecord): DashboardPanelInfo[] {
-  const elements = isRecord(spec.elements) ? spec.elements : {};
-  return Object.entries(elements)
-    .filter(([, element]) => isRecord(element) && element.kind === 'Panel')
-    .map(([key, element]: [string, AnyRecord]) => {
-      const panel = element.spec ?? {};
-      const queries = Array.isArray(panel.data?.spec?.queries) ? panel.data.spec.queries : [];
-      return {
-        key,
-        id: typeof panel.id === 'number' ? panel.id : undefined,
-        title: String(panel.title ?? ''),
-        type: String(panel.vizConfig?.group ?? panel.vizConfig?.kind ?? ''),
-        queries: queries.filter(isRecord).map((query: AnyRecord) => {
-          const inner = query.spec?.query ?? {};
-          return compact({
-            refId: stringOrUndefined(query.spec?.refId),
-            datasourceUid: stringOrUndefined(inner.datasource?.name),
-            datasourceType: stringOrUndefined(inner.group),
-            expr: stringOrUndefined(inner.spec?.expr),
-            hidden: query.spec?.hidden === true ? true : undefined,
-          });
-        }),
-      };
-    });
+function panelDisplay(panel: WalkedPanel) {
+  const defaults: AnyRecord = isRecord(panel.fieldConfig.defaults) ? panel.fieldConfig.defaults : {};
+  const options: AnyRecord = panel.options;
+  const steps = Array.isArray(defaults.thresholds?.steps) ? defaults.thresholds.steps.filter(isRecord) : [];
+  const overrides = Array.isArray(panel.fieldConfig.overrides) ? panel.fieldConfig.overrides.length : 0;
+  const mappings = Array.isArray(defaults.mappings) ? defaults.mappings.length : 0;
+  const legendCalcs = Array.isArray(options.legend?.calcs) ? options.legend.calcs : [];
+  const reduceCalcs = Array.isArray(options.reduceOptions?.calcs) ? options.reduceOptions.calcs : [];
+  const display = compact({
+    unit: stringOrUndefined(defaults.unit),
+    decimals: typeof defaults.decimals === 'number' ? defaults.decimals : undefined,
+    min: typeof defaults.min === 'number' ? defaults.min : undefined,
+    max: typeof defaults.max === 'number' ? defaults.max : undefined,
+    thresholds: steps.length
+      ? steps.slice(0, 8).map((step: AnyRecord) => `${step.value ?? 'base'}:${step.color ?? '?'}`)
+      : undefined,
+    thresholdsMode: steps.length ? stringOrUndefined(defaults.thresholds?.mode) : undefined,
+    mappings: mappings || undefined,
+    overrides: overrides || undefined,
+    legendCalcs: legendCalcs.length ? legendCalcs : undefined,
+    reduceCalcs: reduceCalcs.length ? reduceCalcs : undefined,
+  });
+  return Object.keys(display).length ? display : undefined;
 }
 
-function v1Variables(spec: AnyRecord) {
-  const list = Array.isArray(spec.templating?.list) ? spec.templating.list : [];
-  return list.filter(isRecord).map((variable: AnyRecord) =>
-    compact({
-      name: String(variable.name ?? ''),
-      type: stringOrUndefined(variable.type),
-      query: typeof variable.query === 'string' ? variable.query : stringOrUndefined(variable.query?.query),
-    })
-  );
-}
-
-function v2Variables(spec: AnyRecord) {
-  const list = Array.isArray(spec.variables) ? spec.variables : [];
-  return list.filter(isRecord).map((variable: AnyRecord) =>
-    compact({
-      name: String(variable.spec?.name ?? ''),
-      type: stringOrUndefined(variable.kind),
+function dashboardVariables(list: unknown): DashboardVariableInfo[] {
+  return (Array.isArray(list) ? list : []).filter(isRecord).map((variable: AnyRecord) => {
+    const spec: AnyRecord = isRecord(variable.spec) ? variable.spec : variable;
+    const query = spec.query;
+    const current = spec.current?.value ?? spec.current?.text;
+    const options = (Array.isArray(spec.options) ? spec.options : [])
+      .filter(isRecord)
+      .map((option: AnyRecord) => String(option.value ?? option.text ?? ''))
+      .filter(Boolean);
+    return compact({
+      name: String(spec.name ?? ''),
+      type: stringOrUndefined(isRecord(variable.spec) ? variable.kind : variable.type),
+      label: stringOrUndefined(spec.label),
+      datasourceUid: datasourceRef(spec.datasource).uid,
       query:
-        typeof variable.spec?.query === 'string'
-          ? variable.spec.query
-          : stringOrUndefined(variable.spec?.query?.spec?.expr),
-    })
-  );
+        typeof query === 'string'
+          ? shortText(query)
+          : shortText(query?.query ?? query?.spec?.expr ?? query?.spec?.query ?? query?.expr),
+      current: Array.isArray(current)
+        ? current.map(String)
+        : current != null && current !== ''
+          ? String(current)
+          : undefined,
+      multi: spec.multi === true ? true : undefined,
+      includeAll: spec.includeAll === true ? true : undefined,
+      options: options.length ? options.slice(0, 20) : undefined,
+    });
+  });
+}
+
+function shortText(value: unknown) {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  const text = value.replace(/\s+/g, ' ').trim();
+  return !text ? undefined : text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT - 3)}...` : text;
 }
 
 function datasourceRef(value: unknown): { uid?: string; type?: string } {
@@ -505,7 +566,7 @@ function datasourceRef(value: unknown): { uid?: string; type?: string } {
     return { uid: value };
   }
   if (isRecord(value)) {
-    return { uid: stringOrUndefined(value.uid), type: stringOrUndefined(value.type) };
+    return { uid: stringOrUndefined(value.uid) ?? stringOrUndefined(value.name), type: stringOrUndefined(value.type) };
   }
   return {};
 }

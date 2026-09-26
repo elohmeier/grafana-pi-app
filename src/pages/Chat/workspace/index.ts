@@ -3,7 +3,13 @@ import type { DashboardMutationAPI } from '@grafana/data';
 import type { GrafanaSkill } from '../skills/types';
 import type { ArtifactRuntime } from '../tools/artifacts';
 import type { WorkspaceApprovalService, WorkspaceBroker } from './broker';
-import { createArtifactsMount, createCatalogMount, createLiveDashboardMount, createSkillsMount } from './mounts';
+import {
+  createArtifactsMount,
+  createCatalogMount,
+  createJsonnetLibraryMount,
+  createLiveDashboardMount,
+  createSkillsMount,
+} from './mounts';
 import { createPythonCommands, type PythonRunner } from './python/pythonCommand';
 import { renderWorkspacePromptSection } from './prompt';
 import { createWorkspaceTools } from './tools';
@@ -45,6 +51,9 @@ export function createSessionWorkspaceToolkit(options: SessionWorkspaceToolkitOp
     mounts.push(createCatalogMount(broker.dashboards));
     const dashboards = broker.dashboards;
     workspace.setHydrator((_kind, uid, signal) => dashboards.get(uid, signal));
+  }
+  if (broker.jsonnet) {
+    mounts.push(createJsonnetLibraryMount(broker.jsonnet));
   }
   const liveDashboardMounted = Boolean(options.getDashboardMutationAPI?.());
   if (options.getDashboardMutationAPI) {

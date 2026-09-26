@@ -34,13 +34,14 @@ Use this skill when the user asks for a dashboard, panel, row, variable, live da
 ## File Workflow
 
 1. Collect the datasource UID, existing dashboard UID, and intent from the user or page context.
-2. Existing dashboards: read `/grafana/dashboards/<uid>/dashboard.json` (fetched on first read), change it with `edit`, `jq`, or `python3`, and keep `metadata.name` unchanged.
+2. Existing dashboards: read `/grafana/dashboards/<uid>/dashboard.json` (fetched on first read; `grafana-dashboard inspect PATH` summarizes it, and `grafana-dashboard data PATH` shows which panels are empty or failing before you change anything), change it with `edit`, `jq`, or `python3`, and keep `metadata.name` unchanged.
 3. New dashboards: write `/workspace/<name>.jsonnet`, then render it into a working copy:
    `mkdir -p /grafana/dashboards/<uid> && jsonnet /workspace/<name>.jsonnet --resource <uid> -o /grafana/dashboards/<uid>/dashboard.json`.
    Fix Jsonnet errors with `edit` and re-run; `jsonnet fix FILE` repairs common invalid constructors as a visible edit.
-4. Run `grafana-dashboard fix PATH` (panel ids and grid layout) and `grafana-dashboard validate PATH`; fix every reported error.
-5. Run `workspace plan`, then `workspace apply <plan-id>`. The user approves the exact diff; report applied, conflicted, failed, or denied per dashboard.
-6. For several dashboards at once, fetch them with `grafana fetch UID...`, search with `rg`, change them in one script, validate all, and plan them together.
+4. Run `grafana-dashboard fix PATH` (panel ids and grid layout) and `grafana-dashboard validate PATH`; fix every reported error. Add `--server` to dry-run the save in Grafana (permissions, strict decoding, and whether the dashboard changed since it was fetched).
+5. Run `grafana-dashboard data PATH --panel ID` for panels whose queries, variables, or transformations changed. It runs the queries as the user and applies the panel's transformations, units, and reducers; treat `empty`, `error`, or `skipped` as findings to fix or report, not as success. For empty panels, read `executedQueries`: it shows the query as Grafana ran it, for example `$__rate_interval` resolved to a window shorter than the data's sample spacing.
+6. Run `workspace plan`, then `workspace apply <plan-id>`. The user approves the exact diff; report applied, conflicted, failed, or denied per dashboard.
+7. For several dashboards at once, fetch them with `grafana fetch UID...`, search with `rg`, change them in one script, validate all, and plan them together.
 
 ## Jsonnet Rules
 
@@ -48,7 +49,8 @@ Use this skill when the user asks for a dashboard, panel, row, variable, live da
 - Read `/.agents/skills/grafana-dashboard/references/example.md` or `/.agents/skills/grafana-dashboard/templates/prometheus.md` when you need a concrete helper example before writing Jsonnet.
 - Do not import Grafonnet for new dashboards.
 - Do not invent or use Grafonnet constructors such as `g.dashboard.new`, `grafana.dashboard.new`, `g.panel.new`, `grafana.panel.new`, `row.new`, or chained `.with_*` methods.
-- Valid `d.dashboard.new` named arguments are `title`, `uid`, `tags`, `timezone`, `time`, `refresh`, and `rows`. Use `time={ from: 'now-6h', to: 'now' }`; do not use `timeframe`, `timeFrom`, or `timeTo`.
+- Valid `d.dashboard.new` named arguments are `title`, `uid`, `tags`, `timezone`, `time`, `refresh`, `rows`, `panels`, and `variables`. `rows` takes `d.row(...)` results; `d.layout.*` groups in `rows` or `panels` are laid out without a row header. Use `time={ from: 'now-6h', to: 'now' }`; do not use `timeframe`, `timeFrom`, or `timeTo`.
+- Variables go in `variables=[...]`: `d.variable.custom(name, values, current=null, multi=false, includeAll=false)` for fixed values (array or comma-separated string), `d.variable.labelValues(name, label, metric=null, datasourceUid=null, multi=false, includeAll=false, current=null)` for Prometheus label values, `d.variable.query(name, query, datasourceUid)`, `d.variable.constant(name, value)`, and `d.variable.textbox(name, value)`. Reference them in queries as `$name` (use `=~"$name"` for multi-value or All).
 - Generate a plain object with `title`, stable `uid`, `tags`, `timezone`, `time`, `schemaVersion`, and `panels`.
 - Use the helper layout APIs for common 24-column rows: `full`, `twoUp`, `threeUp`, `fourUp`, and `statStrip`. If writing raw panels, include explicit `gridPos` values.
 - `d.layout.full` takes one panel object, not an array; `d.layout.twoUp`, `threeUp`, `fourUp`, and `statStrip` take arrays. Do not invent layout helpers.
@@ -57,7 +59,7 @@ Use this skill when the user asks for a dashboard, panel, row, variable, live da
 - Use the selected Prometheus datasource UID directly in panel targets. Do not use datasource variables or unlisted datasource UIDs.
 - For tables, use `d.panel.table(..., columns=[...], rename={...})` so the rendered table includes explicit `labelsToFields`, `filterFieldsByName`, and `organize` transformations.
 - After writing a Jsonnet file once, use `edit` with exact `oldText` for follow-up changes instead of rewriting the whole file.
-- `jsonnet lib cat github.com/g42/pi-dashboard/main.libsonnet` shows the helper source; `jsonnet lib search NAME` finds helper functions.
+- The helper source is `/lib/jsonnet/github.com/g42/pi-dashboard/main.libsonnet`; read it with `cat` or find helpers with `rg -n NAME /lib/jsonnet/github.com/g42`.
 
 ## Panel Guidance
 

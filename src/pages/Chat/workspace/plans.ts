@@ -2,6 +2,7 @@ import { createTwoFilesPatch } from 'diff';
 import type { WorkspaceApprovalService, WorkspaceBroker } from './broker';
 import { validateDashboardDocument } from './dashboardModel';
 import { canonicalJson, sha256Hex } from './hash';
+import type { PromqlParser } from './promqlCheck';
 import { truncateUtf8 } from './paths';
 import type { WorkspaceApplyRecord, WorkspacePlan, WorkspacePlanOperation } from './types';
 import type { SessionWorkspace } from './workspace';
@@ -11,10 +12,10 @@ const MAX_PLAN_OPERATIONS = 50;
 
 export class PlanError extends Error {}
 
-export function createWorkspacePlan(
+export async function createWorkspacePlan(
   workspace: SessionWorkspace,
-  options: { paths?: string[]; allowedDatasourceUids?: string[] } = {}
-): WorkspacePlan {
+  options: { paths?: string[]; allowedDatasourceUids?: string[]; promql?: PromqlParser; signal?: AbortSignal } = {}
+): Promise<WorkspacePlan> {
   const selected = new Set(options.paths ?? []);
   const entries = workspace
     .resourceEntries()
@@ -52,10 +53,12 @@ export function createWorkspacePlan(
     let apiVersion = meta?.apiVersion ?? 'dashboard.grafana.app/v1';
     let validation: WorkspacePlanOperation['validation'] = { ok: true, errors: [], warnings: [] };
     if (after !== null) {
-      const report = validateDashboardDocument(after, {
+      const report = await validateDashboardDocument(after, {
         expectedUid: entry.uid,
         allowedDatasourceUids: options.allowedDatasourceUids,
         managedBy: meta?.managedBy,
+        promql: options.promql,
+        signal: options.signal,
       });
       validation = {
         ok: report.ok,

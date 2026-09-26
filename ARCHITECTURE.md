@@ -275,9 +275,6 @@ returns the same list on every turn:
 - `read`, `write`, `edit`, `bash`: the session filesystem tools from
   `src/pages/Chat/workspace/tools.ts`. Discovery, PromQL queries, dashboard
   editing, validation, Jsonnet, and writes all happen here.
-- `inspect_dashboard_context`: typed panel, query, layout, field config, and
-  variable context for one dashboard, with current-variable-substituted
-  queries and best-effort Prometheus validation summaries.
 - `inspect_dashboard_metric_usage`, `search_dashboard_metric_usage`,
   `get_metric_neighborhood`: dashboard-derived Prometheus metric context.
 - `find_panel_alert_rules`, `get_alert_rule`: read-only alert troubleshooting.
@@ -358,9 +355,10 @@ The system prompt lists them from the same registry.
 | `grafana-prom query EXPR \| -e EXPR... [--range]`  | Instant or range PromQL with compact summaries; several `-e` expressions run in one call. Results are also stored as artifacts. |
 | `grafana-dashboard inspect PATH`                   | Panels, queries, variables, and datasources of a dashboard file.                                                                |
 | `grafana-dashboard fix PATH`                       | Explicit classic layout repair (panel IDs, `gridPos`, overlaps), reviewable with `workspace diff`.                              |
-| `grafana-dashboard validate PATH...`               | JSON, resource envelope, structure, PromQL syntax, and datasource allow-list checks.                                            |
+| `grafana-dashboard validate PATH... [--server]`    | JSON, envelope, structure, PromQL syntax (upstream parser), and allow-list checks; `--server` dry-runs the save in Grafana.     |
+| `grafana-dashboard data PATH [--panel ID]...`      | Runs panel queries as the user and applies transformations, overrides, units, and reducers; bounded per-panel status and rows.  |
 | `jsonnet [eval] FILE [-o OUT] [--resource UID]`    | Evaluate workspace Jsonnet in the backend. `--resource` wraps the result in a dashboard resource envelope.                      |
-| `jsonnet fix FILE`, `jsonnet lib ls\|cat\|search`  | Structural Grafonnet repair in place; browse the vendored libraries.                                                            |
+| `jsonnet fix FILE`                                 | Structural Grafonnet repair in place. The vendored libraries are read-only files under `/lib/jsonnet/<import path>`.            |
 | `workspace status\|diff\|discard`                  | Staged resource changes, usage, and limits.                                                                                     |
 | `workspace plan\|apply\|plans`                     | Freeze, approve, and apply changes (see [Dashboard Changes](#dashboard-changes-plan-and-apply)).                                |
 
@@ -369,6 +367,40 @@ Commands reach Grafana through the `WorkspaceBroker` in
 dashboard App Platform API, Prometheus through the frontend datasource
 service, and Jsonnet through the plugin backend. All calls run as the current
 Grafana user.
+
+Dashboard inspection, validation, and data checks share one walker,
+`workspace/dashboardPanels.ts`. It reads classic JSON, v1 resources, v2
+specs, and legacy `/api/dashboards/uid` responses. It covers collapsed and
+expanded rows, v2 rows and tabs (as a row path with grid positions), hidden
+targets that expressions depend on, and saved variable values with Prometheus
+escaping. It was ported from the `grafana-inspect` tool in the dotfiles
+repository. The typed tools `find_panel_alert_rules` and the dashboard
+metric-usage tools read panels
+through its `walkClassicPanels` view, which maps v2 panels to classic panel
+objects.
+
+- PromQL syntax: `workspace/promqlCheck.ts` interpolates saved variables,
+  substitutes placeholder values for `$__rate_interval` and other macros, and
+  reports undefined variables. It sends the expressions in one batch to the
+  backend `/promql/parse` route, which uses the upstream Prometheus parser with
+  experimental syntax enabled. When the route is unavailable it falls back to
+  the less strict lezer grammar and says so in a warning. Non-Prometheus
+  queries are reported as not checked.
+- `validate --server` sends the same request that `workspace apply` would
+  send, with `dryRun=All&fieldValidation=Strict`: a PUT with the fetched
+  `resourceVersion` for existing dashboards, and a POST for new ones. Grafana
+  decodes the document strictly, checks permissions and revision conflicts, and
+  saves nothing. For v1 resources it does not validate the spec; for v2 it
+  checks types but not dangling layout references, which the local structure
+  level covers.
+- `grafana-dashboard data` resolves each target to an allowed Prometheus
+  datasource (or `__expr__`), computes `intervalMs` from the range and
+  `maxDataPoints`, and posts to `/api/ds/query`. The broker rejects any other
+  datasource. Frames go through Grafana's transformer registry,
+  `applyFieldOverrides`, and `reduceField`. The command reports `ok`, `empty`,
+  `error` (including errors inside HTTP 200 responses), or `skipped` with a
+  reason. Query variables saved as All without known options are approximated
+  as `.*`, and the output notes this.
 
 ## Python
 
@@ -477,8 +509,7 @@ read-only troubleshooting.
 The app supports three dashboard paths:
 
 1. Read-only inspection: working copies with `read`/`rg`/`jq`,
-   `grafana-dashboard inspect`, `inspect_dashboard_context`, and
-   `screenshot_dashboard`.
+   `grafana-dashboard inspect` and `data`, and `screenshot_dashboard`.
 2. Durable changes: edit working copies, then plan and apply.
 3. Ephemeral live edits to the currently open dashboard (variant only, see
    [Live Dashboard Editing](#live-dashboard-editing)).
@@ -773,10 +804,13 @@ Routes are registered in `pkg/plugin/resources.go`:
 /telemetry/events
 /jsonnet/eval
 /jsonnet/fix
-/jsonnet-libs/search
-/jsonnet-libs/read
-/jsonnet-libs/list
+/jsonnet-libs/files
+/promql/parse
 ```
+
+`/jsonnet-libs/files` lists the vendored library files, or returns one
+package's contents for the `/lib/jsonnet` mount. `/promql/parse` checks
+PromQL syntax with the upstream Prometheus parser.
 
 The old Jsonnet render/save, virtual-file, and agent-contract routes are gone.
 The backend uses Grafana's plugin app client secret only to build the authz

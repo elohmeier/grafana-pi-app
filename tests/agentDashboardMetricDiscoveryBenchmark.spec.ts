@@ -29,7 +29,6 @@ const DASHBOARD_METRIC_CONTEXT_TOOLS = new Set([
   'search_dashboard_metric_usage',
   'inspect_dashboard_metric_usage',
   'get_metric_neighborhood',
-  'inspect_dashboard_context',
 ]);
 
 test.describe.configure({ mode: 'serial' });
@@ -364,7 +363,7 @@ function firstDashboardContextStart(events: BenchmarkEvent[]) {
     (call) =>
       call.status === 'completed' &&
       !call.isError &&
-      (/\bgrafana\s+(search|fetch)\b|\bgrafana-dashboard\s+inspect\b/.test(call.command) ||
+      (/\bgrafana\s+(search|fetch)\b|\bgrafana-dashboard\s+(inspect|data)\b/.test(call.command) ||
         (/\b(rg|grep|jq|cat|find)\b/.test(call.command) && call.command.includes('/grafana/')))
   );
   const starts = [...typed, ...shell].map((call) => call.startedAt);

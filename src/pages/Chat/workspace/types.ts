@@ -78,6 +78,8 @@ export type GeneratedMount = {
   root: string;
   description: string;
   files: () => Record<string, GeneratedFile>;
+  /** Loads what files() needs to list, before a tool call or bash invocation reads the filesystem. */
+  prepare?: (signal?: AbortSignal) => Promise<void>;
 };
 
 export type WorkspaceFileChange = {

@@ -8,9 +8,17 @@ import {
 } from '../tools/metrics';
 import type { GrafanaToolConfig, PrometheusMetadataResponse } from '../tools/types';
 import { PLUGIN_ID } from '../../../constants';
-import type { DashboardBroker, DashboardWriteResult, JsonnetBroker, PrometheusBroker, WorkspaceBroker } from './broker';
+import type {
+  DashboardBroker,
+  DashboardDryRunResult,
+  DashboardWriteResult,
+  JsonnetBroker,
+  PrometheusBroker,
+  WorkspaceBroker,
+} from './broker';
 import { DASHBOARD_API_GROUP } from './dashboardModel';
 import { sha256Hex } from './hash';
+import type { PromqlParser } from './promqlCheck';
 import type { WorkspaceResourceSnapshot } from './types';
 
 const FOLDER_ANNOTATION = 'grafana.app/folder';
@@ -41,8 +49,30 @@ export function createGrafanaWorkspaceBroker(toolConfig: GrafanaToolConfig): Wor
     dashboards: createDashboardBroker(toolConfig),
     prometheus: createPrometheusBroker(toolConfig),
     jsonnet: createJsonnetBroker(),
+    promql: createPromqlParser(),
   };
 }
+
+function createPromqlParser(): PromqlParser {
+  return {
+    name: 'prometheus',
+    async parse(queries, signal) {
+      const response = await request<{ results: Array<{ id: string; error?: string; start?: number; end?: number }> }>(
+        'POST',
+        `/api/plugins/${PLUGIN_ID}/resources/promql/parse`,
+        { queries },
+        signal
+      );
+      if (!response.ok) {
+        throw new Error(`PromQL parser unavailable: ${response.message}`);
+      }
+      return response.data.results ?? [];
+    },
+  };
+}
+
+let libraryListing: Promise<{ packages: string[]; files: Array<{ path: string; size: number }> }> | undefined;
+const libraryPackages = new Map<string, Promise<Record<string, string>>>();
 
 function createJsonnetBroker(): JsonnetBroker {
   const resource = async <T>(path: string, data: unknown, signal?: AbortSignal) => {
@@ -57,25 +87,30 @@ function createJsonnetBroker(): JsonnetBroker {
       return (await resource<{ output: string }>('/jsonnet/eval', evalRequest, signal)).output;
     },
     fix: (source, signal) => resource<{ source: string; repairs: string[] }>('/jsonnet/fix', { source }, signal),
-    async listLibraries(path, signal) {
-      const data = await resource<{ basePath: string; result: string[] }>('/jsonnet-libs/list', { path }, signal);
-      return { basePath: data.basePath, files: data.result ?? [] };
-    },
-    async readLibrary(path, window, signal) {
-      const data = await resource<{ path: string; totalLines: number; result: Array<{ line: number; text: string }> }>(
-        '/jsonnet-libs/read',
-        { path, ...window },
+    async listLibraryFiles(signal) {
+      // The vendored libraries are static for a plugin build; share one listing.
+      libraryListing ??= resource<{ packages: string[]; files: Array<{ path: string; size: number }> }>(
+        '/jsonnet-libs/files',
+        {},
         signal
-      );
-      return { path: data.path, totalLines: data.totalLines, lines: data.result ?? [] };
+      ).catch((error) => {
+        libraryListing = undefined;
+        throw error;
+      });
+      return libraryListing;
     },
-    async searchLibraries(pattern, path, signal) {
-      const data = await resource<{ result: Array<{ file: string; line: number; text: string }>; capped: boolean }>(
-        '/jsonnet-libs/search',
-        { pattern, path },
-        signal
-      );
-      return { matches: data.result ?? [], capped: Boolean(data.capped) };
+    loadLibraryPackage(pkg, signal) {
+      let loaded = libraryPackages.get(pkg);
+      if (!loaded) {
+        loaded = resource<{ files: Array<{ path: string; content?: string }> }>(
+          '/jsonnet-libs/files',
+          { package: pkg },
+          signal
+        ).then((data) => Object.fromEntries(data.files.map((file) => [file.path, file.content ?? ''])));
+        loaded.catch(() => libraryPackages.delete(pkg));
+        libraryPackages.set(pkg, loaded);
+      }
+      return loaded;
     },
   };
 }
@@ -131,17 +166,17 @@ function createDashboardBroker(toolConfig: GrafanaToolConfig): DashboardBroker {
     return toSnapshot(response.data);
   };
 
-  const write = async (
+  const prepareWrite = async (
     method: 'POST' | 'PUT',
     document: unknown,
     resourceVersion: string | undefined,
     signal?: AbortSignal
-  ): Promise<DashboardWriteResult> => {
+  ) => {
     const resource = document as K8sResource;
     const uid = resource.metadata?.name;
     const version = apiVersionPath(resource.apiVersion) ?? (await preferredVersion());
     if (!uid) {
-      return { outcome: 'failed', error: 'metadata.name is required' };
+      return undefined;
     }
     let annotations = resource.metadata?.annotations ?? {};
     let labels = resource.metadata?.labels;
@@ -174,11 +209,45 @@ function createDashboardBroker(toolConfig: GrafanaToolConfig): DashboardBroker {
       spec: resource.spec,
     };
     const url = method === 'POST' ? collection(version) : `${collection(version)}/${encodeURIComponent(uid)}`;
-    const response = await request<K8sResource>(method, url, body, signal);
+    return { uid, url, body };
+  };
+
+  const write = async (
+    method: 'POST' | 'PUT',
+    document: unknown,
+    resourceVersion: string | undefined,
+    signal?: AbortSignal
+  ): Promise<DashboardWriteResult> => {
+    const prepared = await prepareWrite(method, document, resourceVersion, signal);
+    if (!prepared) {
+      return { outcome: 'failed', error: 'metadata.name is required' };
+    }
+    const response = await request<K8sResource>(method, prepared.url, prepared.body, signal);
     if (!response.ok) {
       return writeFailure(response);
     }
-    return { outcome: 'applied', snapshot: toSnapshot(response.data), url: dashboardUrl(uid) };
+    return { outcome: 'applied', snapshot: toSnapshot(response.data), url: dashboardUrl(prepared.uid) };
+  };
+
+  const dryRun = async (
+    document: unknown,
+    resourceVersion: string | undefined,
+    signal?: AbortSignal
+  ): Promise<DashboardDryRunResult> => {
+    const method = resourceVersion ? 'PUT' : 'POST';
+    const prepared = await prepareWrite(method, document, resourceVersion, signal);
+    if (!prepared) {
+      return { ok: false, message: 'metadata.name is required' };
+    }
+    const response = await request<K8sResource>(
+      method,
+      `${prepared.url}?dryRun=All&fieldValidation=Strict`,
+      prepared.body,
+      signal
+    );
+    return response.ok
+      ? { ok: true, status: response.status }
+      : { ok: false, status: response.status, message: response.message };
   };
 
   return {
@@ -206,6 +275,7 @@ function createDashboardBroker(toolConfig: GrafanaToolConfig): DashboardBroker {
     get,
     create: (document, signal) => write('POST', document, undefined, signal),
     update: (document, resourceVersion, signal) => write('PUT', document, resourceVersion, signal),
+    dryRun,
     async delete(uid, resourceVersion, signal) {
       const version = await preferredVersion();
       const response = await request<unknown>(
@@ -345,11 +415,15 @@ async function request<T>(
 function createPrometheusBroker(toolConfig: GrafanaToolConfig): PrometheusBroker {
   return {
     datasources: () =>
-      getPrometheusDatasourceSettings(toolConfig).map((ds) => ({
-        uid: ds.uid,
-        name: ds.name,
-        isDefault: ds.isDefault,
-      })),
+      getPrometheusDatasourceSettings(toolConfig).map((ds) => {
+        const timeInterval = (ds.jsonData as { timeInterval?: unknown } | undefined)?.timeInterval;
+        return {
+          uid: ds.uid,
+          name: ds.name,
+          isDefault: ds.isDefault,
+          ...(typeof timeInterval === 'string' && timeInterval ? { timeInterval } : {}),
+        };
+      }),
     async metricNames(datasourceUid, signal) {
       const ds = await getPrometheusDatasource(toolConfig, datasourceUid);
       const response = await getDatasourceResource<PrometheusMetadataResponse<string[]>>(
@@ -393,6 +467,21 @@ function createPrometheusBroker(toolConfig: GrafanaToolConfig): PrometheusBroker
       );
       const series = response.data ?? [];
       return { datasourceUid: ds.uid, series: series.slice(0, limit), truncated: series.length > limit };
+    },
+    async queryData(body, signal) {
+      const allowed = new Set(getPrometheusDatasourceSettings(toolConfig).map((ds) => ds.uid));
+      for (const query of body.queries) {
+        const ds = (query.datasource ?? {}) as { uid?: string; type?: string };
+        const expression = ds.uid === '__expr__' && ds.type === '__expr__';
+        if (!expression && !(ds.type === 'prometheus' && ds.uid && allowed.has(ds.uid))) {
+          throw new Error(`datasource ${JSON.stringify(ds.uid ?? '')} is not an allowed Prometheus datasource`);
+        }
+      }
+      const response = await request<unknown>('POST', '/api/ds/query', body, signal);
+      if (!response.ok) {
+        throw new Error(response.message);
+      }
+      return response.data;
     },
     async query(datasourceUid, spec, signal) {
       const ds = await getPrometheusDatasource(toolConfig, datasourceUid);

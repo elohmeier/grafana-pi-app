@@ -72,7 +72,6 @@ Dashboard reads and writes run in the browser as the current Grafana user, so th
 The assistant is a single agent; there are no specialist subagents or per-skill tool sets. Its tool list is the same on every turn:
 
 - `read`, `write`, `edit`, `bash` over the session filesystem.
-- `inspect_dashboard_context` for typed panel, query, layout, and variable context.
 - `inspect_dashboard_metric_usage`, `search_dashboard_metric_usage`, and `get_metric_neighborhood` for dashboard-derived metric context.
 - `find_panel_alert_rules` and `get_alert_rule` for read-only alert troubleshooting.
 - The live dashboard tools, in the `grafana-assistant-app` variant when the dashboard mutation API is available.
@@ -88,6 +87,7 @@ Each chat has its own filesystem:
 | `/workspace`, `/session`                   | Scratch files persisted with the chat. `/workspace` is the default working directory; `/session/plan.md` and `/session/findings.md` hold durable notes.                  |
 | `/tmp`                                     | Scratch files that are not persisted.                                                                                                                                    |
 | `/artifacts`, `/.agents/skills`            | Read-only earlier tool results and skill files.                                                                                                                          |
+| `/lib/jsonnet/<import path>`               | Read-only vendored Jsonnet libraries (`pi-dashboard` helpers, Grafonnet, xtd, docsonnet), loaded per package from the backend on first read.                             |
 
 Each tool call or bash invocation is one transaction with quotas and path checks. Links are not supported. Its file changes are committed together, or discarded on timeout, cancellation, or a quota or policy error. `workspace` commands first commit the writes made earlier in the same call.
 
@@ -95,8 +95,8 @@ Each tool call or bash invocation is one transaction with quotas and path checks
 
 - `grafana search|fetch|refresh`: dashboard discovery and working-copy hydration.
 - `grafana-prom datasources|metrics|labels|series|query`: Prometheus discovery and bounded query summaries. `query` accepts several `-e EXPR` in one call.
-- `grafana-dashboard inspect|fix|validate`: dashboard summaries, explicit layout repair, and validation (structure, PromQL syntax, datasource allow-list).
-- `jsonnet [eval] FILE [-o OUT] [--resource UID]`, `jsonnet fix FILE`, `jsonnet lib ls|cat|search`: Jsonnet evaluation and repair in the backend, and browsing of the vendored libraries.
+- `grafana-dashboard inspect|fix|validate|data`: dashboard summaries (panels with row path, layout, queries, legend, transformations, units and thresholds; variables with current values), explicit layout repair, validation (structure, PromQL syntax with the upstream Prometheus parser, datasource allow-list, and with `--server` a Grafana dry-run of the save), and panel data checks that run a panel's queries and apply its transformations, units, and reducers.
+- `jsonnet [eval] FILE [-o OUT] [--resource UID]`, `jsonnet fix FILE`: Jsonnet evaluation and repair in the backend. The vendored libraries are files under `/lib/jsonnet`.
 - `workspace status|diff|discard|plan|apply|plans`: staged changes, plans, and approved writes.
 - `python3` / `python`: CPython compiled to WebAssembly, run in a Web Worker per invocation with no network access. It works on a copy of the filesystem; its file changes go through the same transaction.
 
@@ -273,7 +273,7 @@ PLUGIN_VARIANT_ID=grafana-assistant-app npm run package:variant
 
 The generated files are `grafana-assistant-app-<version>.zip` and `grafana-assistant-app-<version>.zip.sha1`. The packaging script temporarily rewrites `src/plugin.json` during the build and restores it before exiting.
 
-The local Compose stack also seeds Prometheus with six hours of synthetic RED/USE, Thanos, and enterprise service metrics derived from the `agentic-observability` demo. To include future overlap for short-window `now` queries during a manual demo, start the stack with `HISTORY_FUTURE_SECONDS=3600`; the default is `0` so live Grafana and plugin scrapes can be ingested immediately. To refresh the generated history after it ages out, remove the demo volumes before starting Grafana again:
+The local Compose stack also seeds Prometheus with six hours of synthetic RED/USE, Thanos, and enterprise service metrics derived from the `agentic-observability` demo. The history has one sample per minute (`HISTORY_STEP_SECONDS=60`), and the provisioned Prometheus datasources set `timeInterval: 60s` to match, so `$__rate_interval` covers at least two samples; change both together. To include future overlap for short-window `now` queries during a manual demo, start the stack with `HISTORY_FUTURE_SECONDS=3600`; the default is `0` so live Grafana and plugin scrapes can be ingested immediately. To refresh the generated history after it ages out, remove the demo volumes before starting Grafana again:
 
 ```bash
 docker compose down -v
@@ -350,7 +350,7 @@ To benchmark the typed dashboard context repair path, run:
 npm run benchmark:dashboard-context
 ```
 
-This benchmark seeds a stale dashboard, then runs a rich-context repair that must inspect the source dashboard (`inspect_dashboard_context` or its working copy), recognize the stale queries, and apply a repaired copy through `workspace plan` and an approved `workspace apply`. It writes the report to `test-results/dashboard-context-benchmark/latest-report.txt` with separate event and answer files for the run.
+This benchmark seeds a stale dashboard, then runs a rich-context repair that must inspect the source dashboard's working copy (for example with `grafana-dashboard inspect`), recognize the stale queries (for example from `grafana-dashboard data` reporting empty panels, or failing PromQL), and apply a repaired copy through `workspace plan` and an approved `workspace apply`. It writes the report to `test-results/dashboard-context-benchmark/latest-report.txt` with separate event and answer files for the run.
 
 To benchmark live dashboard editing in the sidebar-capable variant, run:
 

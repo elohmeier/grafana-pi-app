@@ -82,7 +82,6 @@ const ARTIFACT_MAX_SLICE_LIMIT = 500;
 const JQ_OUTPUT_LIMIT = 80000;
 
 const ARTIFACT_TOOL_NAMES = new Set([
-  'inspect_dashboard_context',
   'inspect_dashboard_metric_usage',
   'search_dashboard_metric_usage',
   'get_metric_neighborhood',
@@ -97,7 +96,6 @@ const ARTIFACT_TOOL_NAMES = new Set([
 ]);
 
 const ALWAYS_ARTIFACT_TOOL_NAMES = new Set([
-  'inspect_dashboard_context',
   'list_live_dashboard_panels',
   'get_live_dashboard_layout',
   'get_live_dashboard_info',
@@ -549,7 +547,6 @@ function compactLiveDashboardGrid(spec: Record<string, unknown> | undefined) {
 
 function artifactKind(toolName: string, data: unknown, details: unknown): ArtifactKind {
   if (
-    toolName === 'inspect_dashboard_context' ||
     toolName === 'inspect_dashboard_metric_usage' ||
     toolName === 'search_dashboard_metric_usage' ||
     toolName === 'get_metric_neighborhood' ||

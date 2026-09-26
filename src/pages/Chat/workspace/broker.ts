@@ -1,3 +1,4 @@
+import type { PromqlParser } from './promqlCheck';
 import type { WorkspaceResourceSnapshot } from './types';
 
 /**
@@ -10,6 +11,8 @@ export type WorkspaceBroker = {
   dashboards?: DashboardBroker;
   prometheus?: PrometheusBroker;
   jsonnet?: JsonnetBroker;
+  /** Upstream Prometheus parser in the plugin backend. */
+  promql?: PromqlParser;
 };
 
 /** Stateless Jsonnet evaluation with the plugin's vendored libraries (grafonnet, pi-dashboard helpers). */
@@ -26,17 +29,12 @@ export type JsonnetBroker = {
   ) => Promise<string>;
   /** Structural repair of common invalid dashboard constructors; returns the repaired source. */
   fix: (source: string, signal?: AbortSignal) => Promise<{ source: string; repairs: string[] }>;
-  listLibraries: (path: string | undefined, signal?: AbortSignal) => Promise<{ basePath: string; files: string[] }>;
-  readLibrary: (
-    path: string,
-    window: { offset?: number; limit?: number },
+  /** Import paths and sizes of the vendored library files, and the packages they belong to. */
+  listLibraryFiles: (
     signal?: AbortSignal
-  ) => Promise<{ path: string; totalLines: number; lines: Array<{ line: number; text: string }> }>;
-  searchLibraries: (
-    pattern: string,
-    path: string | undefined,
-    signal?: AbortSignal
-  ) => Promise<{ matches: Array<{ file: string; line: number; text: string }>; capped: boolean }>;
+  ) => Promise<{ packages: string[]; files: Array<{ path: string; size: number }> }>;
+  /** Contents of every file in one vendored package, keyed by import path. */
+  loadLibraryPackage: (pkg: string, signal?: AbortSignal) => Promise<Record<string, string>>;
 };
 
 export type DashboardSearchHit = {
@@ -61,6 +59,8 @@ export type DashboardWriteResult = {
   error?: string;
 };
 
+export type DashboardDryRunResult = { ok: boolean; status?: number; message?: string };
+
 export type DashboardBroker = {
   search: (
     query: { query?: string; tags?: string[]; folderUids?: string[]; limit: number; page: number },
@@ -73,6 +73,16 @@ export type DashboardBroker = {
   update: (document: unknown, resourceVersion: string, signal?: AbortSignal) => Promise<DashboardWriteResult>;
   /** Conditional delete against the base resourceVersion. */
   delete: (uid: string, resourceVersion: string | undefined, signal?: AbortSignal) => Promise<DashboardWriteResult>;
+  /**
+   * Sends the document to Grafana with `dryRun=All&fieldValidation=Strict`: the
+   * same request as an update (with the resourceVersion precondition) or create,
+   * without persisting. Checks decoding, admission, permissions, and conflicts.
+   */
+  dryRun?: (
+    document: unknown,
+    resourceVersion: string | undefined,
+    signal?: AbortSignal
+  ) => Promise<DashboardDryRunResult>;
   /** Whether a folder UID exists and is visible to the current user. */
   folderExists?: (uid: string, signal?: AbortSignal) => Promise<boolean>;
   /** Datasource UIDs dashboards may reference, when a central allow-list is configured. */
@@ -83,6 +93,8 @@ export type PrometheusDatasourceInfo = {
   uid: string;
   name: string;
   isDefault?: boolean;
+  /** Datasource scrape interval (jsonData.timeInterval): the minimum query step, as in Grafana panels. */
+  timeInterval?: string;
 };
 
 export type PrometheusBroker = {
@@ -108,6 +120,15 @@ export type PrometheusBroker = {
     limit: number,
     signal?: AbortSignal
   ) => Promise<{ datasourceUid: string; series: Array<Record<string, string>>; truncated: boolean }>;
+  /**
+   * Runs prepared dashboard targets through /api/ds/query and returns the raw
+   * response for bounded processing by the caller. Rejects any datasource other
+   * than the allowed Prometheus datasources and server-side expressions.
+   */
+  queryData?: (
+    request: { queries: Array<Record<string, unknown>>; from: string; to: string },
+    signal?: AbortSignal
+  ) => Promise<unknown>;
   /** Returns a compact, bounded query summary (never raw frames). */
   query: (
     datasourceUid: string | undefined,

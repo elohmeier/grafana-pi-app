@@ -81,7 +81,7 @@ function loadAssets(): Promise<PythonAssets> {
     return {
       wasmModule: await WebAssembly.compile(wasm),
       stdlibZip: new Uint8Array(zip),
-      cpythonScriptUrl: new URL('python.cjs', base).toString(),
+      cpythonScriptUrl: new URL('python.js', base).toString(),
     };
   })().catch((error) => {
     assetsPromise = undefined;

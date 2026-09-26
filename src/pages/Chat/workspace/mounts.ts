@@ -2,7 +2,7 @@ import type { DashboardMutationAPI } from '@grafana/data';
 import type { ArtifactRuntime } from '../tools/artifacts';
 import { SKILLS_ROOT } from '../skills/prompt';
 import type { GrafanaSkill } from '../skills/types';
-import type { DashboardBroker } from './broker';
+import type { DashboardBroker, JsonnetBroker } from './broker';
 import type { GeneratedFile, GeneratedMount } from './types';
 
 const CATALOG_PAGE_SIZE = 1000;
@@ -161,4 +161,36 @@ export function createLiveDashboardMount(getApi: () => DashboardMutationAPI | un
 
 function ensureTrailingNewline(value: string) {
   return value.endsWith('\n') ? value : `${value}\n`;
+}
+
+export const JSONNET_LIB_ROOT = '/lib/jsonnet';
+
+/**
+ * Read-only view of the vendored Jsonnet libraries at their import paths:
+ * `import 'github.com/g42/pi-dashboard/main.libsonnet'` is
+ * /lib/jsonnet/github.com/g42/pi-dashboard/main.libsonnet. The listing loads
+ * before the first filesystem access; file contents load per package on first read.
+ */
+export function createJsonnetLibraryMount(jsonnet: JsonnetBroker): GeneratedMount {
+  let listing: { packages: string[]; files: Array<{ path: string; size: number }> } | undefined;
+  return {
+    root: JSONNET_LIB_ROOT,
+    description: 'Read-only vendored Jsonnet libraries at their import paths.',
+    prepare: async (signal) => {
+      listing ??= await jsonnet.listLibraryFiles(signal);
+    },
+    files: () => {
+      const files: Record<string, GeneratedFile> = {};
+      for (const file of listing?.files ?? []) {
+        const pkg = listing!.packages.find((candidate) => file.path.startsWith(`${candidate}/`));
+        if (!pkg || file.path.split('/').includes('..')) {
+          continue;
+        }
+        files[`${JSONNET_LIB_ROOT}/${file.path}`] = {
+          load: async (signal) => (await jsonnet.loadLibraryPackage(pkg, signal))[file.path] ?? '',
+        };
+      }
+      return files;
+    },
+  };
 }

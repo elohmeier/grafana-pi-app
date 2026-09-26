@@ -1,7 +1,6 @@
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { createAlertTools } from './alerts';
 import { createArtifactTools } from './artifacts';
-import { createDashboardContextTools } from './dashboardContext';
 import { createDashboardMetricContextTools } from './dashboardMetricContext';
 import { createLiveDashboardMutationTools } from './dashboardMutation';
 import { createDashboardScreenshotTools } from './dashboards';
@@ -38,7 +37,6 @@ export type {
 export function createGrafanaTools(options: CreateGrafanaToolsOptions = {}): AgentTool[] {
   return dedupeTools([
     ...(options.workspaceTools ?? []),
-    ...createDashboardContextTools(options),
     ...createDashboardMetricContextTools(options),
     ...createAlertTools(options),
     ...createLiveDashboardMutationTools(options.dashboardMutation),

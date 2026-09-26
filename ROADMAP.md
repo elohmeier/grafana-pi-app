@@ -63,6 +63,31 @@ context window triggered elision and summarization, and the task finished
 with one panel dropped from the final table (summary fidelity needs a
 benchmark).
 
+- **Chezmoi tool reuse, partly done:** one dashboard walker
+  (`workspace/dashboardPanels.ts`, ported from `grafana-inspect`) now backs
+  `inspect`, `validate`, and the new `grafana-dashboard data`, which runs panel
+  queries and applies transformations, overrides, and reducers with
+  `@grafana/data`. PromQL validation uses the upstream Prometheus parser in the
+  backend (`/promql/parse`) with interpolated saved variables. The
+  `--server` option of `validate` adds a Grafana dry-run (level 5). A live
+  check found that v1 dry-runs do not validate the spec and v2 dry-runs miss
+  dangling layout references, so the local structure checks stay. The typed
+  tools in `tools/alerts.ts` and `dashboardMetricContext.ts` read panels
+  through the same walker. `inspect_dashboard_context` is removed:
+  `grafana-dashboard inspect` now returns row paths, layout, display
+  settings, and variable values, and `grafana-dashboard data` replaces its
+  query validation.
+- **Dashboard-context benchmark fixes:** production builds had broken
+  `python3` (the AMD library wrapped the worker, and Grafana served the
+  `.cjs` runtime as `text/plain`); both are fixed in `webpack.config.ts`. The
+  demo datasources now set `timeInterval: 60s` to match the seeded history,
+  so `$__rate_interval` panels are no longer empty. The `pi-dashboard` helper
+  gained `variables=`, `d.variable.custom|labelValues|constant|textbox`, a
+  `panels=` argument, header-less sections, chainable `withVariables`, and a
+  `legendFormat` alias; `jsonnet --resource` rejects non-dashboard output
+  with the helper usage. `grafana-prom query` series carry the same `calcs`
+  reducer fields as `grafana-dashboard data`.
+
 Not yet implemented:
 
 - `show_evidence` and presentation events. Rich views still dispatch by tool

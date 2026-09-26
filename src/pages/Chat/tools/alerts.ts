@@ -1,6 +1,7 @@
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { config } from '@grafana/runtime';
 import { Type } from 'typebox';
+import { walkClassicPanels } from '../workspace/dashboardPanels';
 import { backendFetch } from './client';
 import { textResult, throwIfAborted, truncateText } from './result';
 import type { GrafanaToolConfig } from './types';
@@ -354,7 +355,7 @@ async function fetchDashboardPanel(params: PanelAlertRuleSearchParams): Promise<
   const response = await backendFetch<DashboardResponse>(
     `/api/dashboards/uid/${encodeURIComponent(params.dashboardUid)}`
   );
-  const panel = findDashboardPanel(dashboardSpecFromResponse(response), params.panelId, params.panelTitle);
+  const panel = findDashboardPanel(response, params.panelId, params.panelTitle);
   return panel ? summarizePanel(panel) : undefined;
 }
 
@@ -403,29 +404,8 @@ function alertRuleCandidateKey(rule: AlertRuleResource) {
   return stringField(rule.metadata, 'name') ?? stringField(rule.metadata, 'uid') ?? JSON.stringify(rule.metadata ?? {});
 }
 
-function dashboardSpecFromResponse(response: DashboardResponse): Record<string, any> {
-  if (isDashboardV2Spec(response.dashboard) || isLegacyDashboardSpec(response.dashboard)) {
-    return response.dashboard;
-  }
-  if (isDashboardV2Spec(response.spec) || isLegacyDashboardSpec(response.spec)) {
-    return response.spec;
-  }
-  if (isDashboardV2Spec(response) || isLegacyDashboardSpec(response)) {
-    return response;
-  }
-  return {};
-}
-
-function isDashboardV2Spec(value: unknown): value is Record<string, any> {
-  return isRecord(value) && isRecord(value.elements);
-}
-
-function isLegacyDashboardSpec(value: unknown): value is Record<string, any> {
-  return isRecord(value) && Array.isArray(value.panels);
-}
-
-function findDashboardPanel(dashboard: Record<string, any>, panelId?: number | string, panelTitle?: string) {
-  const panels = collectPanels(dashboard);
+function findDashboardPanel(response: DashboardResponse, panelId?: number | string, panelTitle?: string) {
+  const panels = walkClassicPanels(response).map(({ panel }) => panel as Record<string, any>);
   const id = normalizedPanelId(panelId);
   if (id) {
     const panel = panels.find((candidate) => stringOrNumberField(candidate, 'id') === id);
@@ -440,133 +420,6 @@ function findDashboardPanel(dashboard: Record<string, any>, panelId?: number | s
   }
 
   return undefined;
-}
-
-function collectPanels(dashboard: Record<string, any>) {
-  if (isDashboardV2Spec(dashboard)) {
-    return collectV2Panels(dashboard);
-  }
-
-  const panels: Array<Record<string, any>> = [];
-  const visit = (panel: Record<string, any>) => {
-    const nested = arrayField(panel, 'panels').filter(isRecord);
-    const type = stringField(panel, 'type');
-    if (type !== 'row' || nested.length === 0) {
-      panels.push(panel);
-    }
-    for (const child of nested) {
-      visit(child);
-    }
-  };
-
-  for (const panel of arrayField(dashboard, 'panels').filter(isRecord)) {
-    visit(panel);
-  }
-
-  return panels;
-}
-
-function collectV2Panels(dashboard: Record<string, any>) {
-  const panels: Array<Record<string, any>> = [];
-  const elements = recordField(dashboard, 'elements') ?? {};
-  const seen = new Set<string>();
-
-  const pushElement = (name: string | undefined) => {
-    if (!name || seen.has(name)) {
-      return;
-    }
-    const element = recordField(elements, name);
-    if (!element || stringField(element, 'kind') !== 'Panel') {
-      return;
-    }
-    const panel = v2PanelToLegacyPanel(element);
-    if (panel) {
-      seen.add(name);
-      panels.push(panel);
-    }
-  };
-
-  const visitLayout = (layout: Record<string, any> | undefined) => {
-    const kind = stringField(layout, 'kind');
-    const spec = recordField(layout, 'spec');
-    if (!kind || !spec) {
-      return;
-    }
-
-    if (kind === 'GridLayout' || kind === 'AutoGridLayout') {
-      for (const item of arrayField(spec, 'items').filter(isRecord)) {
-        pushElement(stringField(recordField(recordField(item, 'spec'), 'element'), 'name'));
-      }
-      return;
-    }
-
-    if (kind === 'RowsLayout') {
-      for (const row of arrayField(spec, 'rows').filter(isRecord)) {
-        visitLayout(recordField(recordField(row, 'spec'), 'layout'));
-      }
-      return;
-    }
-
-    if (kind === 'TabsLayout') {
-      for (const tab of arrayField(spec, 'tabs').filter(isRecord)) {
-        visitLayout(recordField(recordField(tab, 'spec'), 'layout'));
-      }
-    }
-  };
-
-  visitLayout(recordField(dashboard, 'layout'));
-
-  for (const [name, element] of Object.entries(elements)) {
-    if (isRecord(element) && stringField(element, 'kind') === 'Panel') {
-      pushElement(name);
-    }
-  }
-
-  return panels;
-}
-
-function v2PanelToLegacyPanel(element: Record<string, any>) {
-  const spec = recordField(element, 'spec');
-  if (!spec) {
-    return undefined;
-  }
-  const dataSpec = recordField(recordField(spec, 'data'), 'spec');
-  const vizConfig = recordField(spec, 'vizConfig');
-  const vizSpec = recordField(vizConfig, 'spec');
-  const targets = arrayField(dataSpec, 'queries').filter(isRecord).map(v2PanelQueryToLegacyTarget).filter(isRecord);
-  const datasource = recordField(targets[0], 'datasource');
-
-  return compactRecord({
-    id: numberField(spec, 'id'),
-    title: stringField(spec, 'title'),
-    type: stringField(vizConfig, 'group'),
-    datasource,
-    fieldConfig: recordField(vizSpec, 'fieldConfig'),
-    targets,
-  });
-}
-
-function v2PanelQueryToLegacyTarget(query: Record<string, any>) {
-  const spec = recordField(query, 'spec');
-  const dataQuery = recordField(spec, 'query');
-  const querySpec = recordField(dataQuery, 'spec');
-  const datasource = recordField(dataQuery, 'datasource');
-  const group = stringField(dataQuery, 'group');
-
-  return compactRecord({
-    refId: stringField(spec, 'refId'),
-    hide: spec?.hidden === true ? true : undefined,
-    datasource: compactRecord({
-      uid: stringField(datasource, 'uid') ?? stringField(datasource, 'name'),
-      name: stringField(datasource, 'name'),
-      type: group,
-    }),
-    expr: stringField(querySpec, 'expr'),
-    query: stringField(querySpec, 'query'),
-    rawSql: stringField(querySpec, 'rawSql'),
-    rawQuery: stringField(querySpec, 'rawQuery'),
-    legendFormat: stringField(querySpec, 'legendFormat'),
-  });
 }
 
 function summarizePanel(panel: Record<string, any>): PanelSummary {
