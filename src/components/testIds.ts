@@ -36,6 +36,7 @@ export const testIds = {
     container: 'data-testid oa-chat-container',
     messages: 'data-testid oa-chat-messages',
     composer: 'data-testid oa-chat-composer',
+    shellMode: 'data-testid oa-chat-shell-mode',
     stop: 'data-testid oa-chat-stop',
     jumpToLatest: 'data-testid oa-chat-jump-to-latest',
     import: 'data-testid oa-chat-import',

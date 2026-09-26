@@ -2286,8 +2286,16 @@ function asWorkspaceToolResult(
     case 'write':
     case 'edit':
       return <WorkspaceMutationResultView result={workspaceMutationResultFromRecord(details, text)} />;
-    case 'bash':
-      return <WorkspaceBashResultView result={workspaceBashResultFromRecord(details)} />;
+    case 'bash': {
+      // Commands such as `grafana-dashboard screenshot` attach images after the text block.
+      const images = Array.isArray(content) ? content.filter((block) => isRecord(block) && block.type === 'image') : [];
+      return (
+        <>
+          <WorkspaceBashResultView result={workspaceBashResultFromRecord(details)} />
+          {images.length > 0 && <ContentBlocks content={images} />}
+        </>
+      );
+    }
     default:
       return undefined;
   }

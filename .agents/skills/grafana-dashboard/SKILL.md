@@ -10,11 +10,11 @@ Use this skill when the user asks for a dashboard, panel, row, variable, live da
 ## Operating Rules
 
 - Treat dashboard generation as a persistent artifact. Only create, update, or live-edit dashboards when the user explicitly asks for a dashboard change.
-- Inspect available metrics before selecting panel queries (`grafana-prom metrics`, `grafana-prom series`), and look at how existing dashboards use them (`search_dashboard_metric_usage`, `get_metric_neighborhood`).
+- Inspect available metrics before selecting panel queries (`grafana-prom metrics`, `grafana-prom series`), and look at how existing dashboards use them (`grafana-usage search`, `grafana-usage related METRIC`, `grafana-usage dashboard UID`).
 - Validate dashboard rate/trend PromQL with a range query (`grafana-prom query EXPR --from now-6h`) matching the dashboard time range. Use instant validation only for current-value stat/table evidence.
 - Treat `validationError` or zero-series validation results as unusable panel evidence. Do not apply a dashboard with requested panels silently omitted; report the exact unvalidated signal instead.
 - When a supervisor task provides explicit panel queries and says they were already validated from tool evidence with non-zero series and no `validationError`, treat that as a validated handoff. Do not redo broad metric discovery or revalidate every query; write, validate, plan, and apply.
-- Prefer live dashboard mutation tools for small on-the-fly edits to the currently open dashboard when those tools are available.
+- For on-the-fly edits to the currently open dashboard, edit `/live/dashboard/dashboard.json` and run `live apply` when that file exists.
 - Durable changes are files: `/grafana/dashboards/<uid>/dashboard.json` is a local working copy of a dashboard resource. Nothing reaches Grafana until `workspace plan` and an approved `workspace apply <plan-id>`.
 - Prefer helper-based Jsonnet for new generated dashboards and direct JSON edits (`edit`, `jq`, `python3`) for changes to existing dashboards.
 - Keep generated dashboards focused. A small useful dashboard is better than a broad dashboard with speculative panels.
@@ -22,14 +22,13 @@ Use this skill when the user asks for a dashboard, panel, row, variable, live da
 
 ## Live Editing Workflow
 
-1. Use live edits only for the currently open dashboard and only when live dashboard editing tools are available.
-2. Call `list_live_dashboard_panels`, `get_live_dashboard_layout`, `get_live_dashboard_info`, or `list_live_dashboard_variables` before applying changes when you need exact element names, layout paths, dashboard UID, or variable names.
-3. Prefer typed live tools: `rename_live_dashboard_panel`, `update_live_dashboard_panel_query`, `update_live_dashboard_panel_queries`, `apply_live_dashboard_prometheus_label_filter`, `add_live_dashboard_panel`, `move_or_resize_live_dashboard_panel`, `update_live_dashboard_settings`, `add_live_dashboard_variable`, and `update_live_dashboard_variable`.
-4. Use `apply_live_dashboard_mutation` only for advanced commands that do not have a typed tool.
-5. Use `apply_live_dashboard_prometheus_label_filter` for dashboard-wide Prometheus variable filters and `update_live_dashboard_panel_queries` for known multi-panel expression replacements. Use focused single-edit tools for heterogeneous changes.
-6. Verify with `list_live_dashboard_panels`, `get_live_dashboard_layout`, `get_live_dashboard_info`, `list_live_dashboard_variables`, or the screenshot attached by layout-affecting live edit tools.
-7. If a live mutation fails, inspect panels/layout/variables again and retry with corrected element names or paths before giving up.
-8. Do not stage or apply saved-dashboard changes for a live-edit request unless the user asks for a durable change.
+1. Use live edits only for the currently open dashboard and only when `/live/dashboard/dashboard.json` exists.
+2. For a dashboard-wide filter, go straight to `grafana-dashboard label-filter` (step 3) and `live apply`; its output lists every changed query, so no exploration is needed. Otherwise run `grafana-dashboard inspect /live/dashboard/dashboard.json` for exact element names, layout, and variables instead of parsing the file yourself. It is a v2 resource: panels are `spec.elements.<name>`, the layout tree is `spec.layout`, and variables are `spec.variables`.
+3. Change panels with `grafana-dashboard set-panel PATH --panel ID [--title] [--unit] [--type] [--expr EXPR --ref A] [--x --y --w --h]` and add them with `grafana-dashboard add-panel PATH --title T --expr EXPR [--unit U] [--right-of ID | --below ID | --x X --y Y]`; they write schema-correct JSON for classic and v2. Hand-edit JSON (`jq`, `python3`, `edit`) only for changes these commands do not cover. For a dashboard-wide Prometheus filter, use `grafana-dashboard label-filter /live/dashboard/dashboard.json --label LABEL --variable-query 'label_values(METRIC, LABEL)' [--current VALUE]`; it rewrites every selected query and adds the variable with the selected value.
+4. Run `live apply` once all requested edits are in the file; it validates first, so a separate validate is unnecessary. Edits are not visible in the browser until `live apply` succeeds.
+5. After applying, read the file again (element names can be rekeyed) and verify the requested changes; `grafana-dashboard data /live/dashboard/dashboard.json --panel NAME` shows what a panel displays.
+6. A variable's selected value must be one of the values its query returns; Grafana resets other values to All or the first option when the variable refreshes. If a value reverts after `live apply`, check it with `grafana-prom labels LABEL --match METRIC` and report the mismatch instead of applying again. If `live apply` fails, fix the file and apply again. If it reports that the browser dashboard changed, run `live discard`, read the file again, and redo the edit.
+7. Do not stage or apply saved-dashboard changes for a live-edit request unless the user asks for a durable change.
 
 ## File Workflow
 

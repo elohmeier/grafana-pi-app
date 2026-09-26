@@ -71,6 +71,12 @@ export type GeneratedFile = {
   /** Eager content, or a loader for lazily computed content. */
   content?: string;
   load?: (signal?: AbortSignal) => Promise<string> | string;
+  /**
+   * Writes stage a local overlay (stored like a /tmp scratch file: committed
+   * with the transaction, not persisted with the session). Reads return the
+   * overlay until it is removed; `rm` drops it.
+   */
+  writable?: boolean;
 };
 
 /** Read-only mount whose files are computed from app state (artifacts, skills, live dashboard...). */

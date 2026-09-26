@@ -64,9 +64,8 @@ export type BenchmarkUsage = {
   totalTokens: number;
 };
 
-/** Typed live dashboard tools that change the unsaved browser dashboard. */
-export const LIVE_DASHBOARD_WRITE_TOOL_PATTERN =
-  /^(rename_live_dashboard_panel|update_live_dashboard_|add_live_dashboard_|move_or_resize_live_dashboard_|apply_live_dashboard_)/;
+/** Commands that change the unsaved browser dashboard. */
+export const LIVE_DASHBOARD_WRITE_COMMAND_PATTERN = /\blive\s+apply\b/;
 
 export function summarizeToolCalls(events: BenchmarkEvent[]): ToolCall[] {
   const calls = new Map<string, ToolCall>();
@@ -238,9 +237,9 @@ export function appliedDashboardUids(events: BenchmarkEvent[]) {
 
 /** Durable or live dashboard writes the agent attempted. */
 export function dashboardWriteAttempts(events: BenchmarkEvent[]) {
-  const live = summarizeToolCalls(events)
-    .filter((call) => LIVE_DASHBOARD_WRITE_TOOL_PATTERN.test(call.name))
-    .map((call) => call.name);
+  const live = bashCalls(events)
+    .filter((call) => LIVE_DASHBOARD_WRITE_COMMAND_PATTERN.test(call.command))
+    .map((call) => `bash: ${truncateOneLine(call.command, 120)}`);
   const durable = workspaceApplyCalls(events).map((call) => `bash: ${truncateOneLine(call.command, 120)}`);
   return [...live, ...durable];
 }

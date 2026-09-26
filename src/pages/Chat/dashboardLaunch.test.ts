@@ -160,7 +160,7 @@ describe('dashboard Assistant launch context', () => {
     expect(contextBlock).toContain(
       'grafana-dashboard data /grafana/dashboards/<uid>/dashboard.json --panel <panel.id>'
     );
-    expect(contextBlock).toContain('typed live dashboard edit tools');
+    expect(contextBlock).toContain('/live/dashboard/dashboard.json');
     expect(contextBlock).toContain('"uid": "dash-uid"');
     expect(contextBlock).toContain('Do not create, sync, upload, delete, or persist dashboards');
   });

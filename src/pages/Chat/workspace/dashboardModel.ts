@@ -405,6 +405,7 @@ function validateV2Structure(spec: AnyRecord, errors: ValidationDiagnostic[], wa
       errors.push({ level: 'structure', path: `.spec.elements.${key}`, message: 'element must have a kind' });
     }
   }
+  validateV2Variables(spec.variables, errors);
   const referenced = new Set<string>();
   collectElementReferences(spec.layout, referenced);
   for (const name of referenced) {
@@ -425,6 +426,60 @@ function validateV2Structure(spec: AnyRecord, errors: ValidationDiagnostic[], wa
       });
     }
   }
+}
+
+const V2_VARIABLE_KINDS = [
+  'QueryVariable',
+  'TextVariable',
+  'ConstantVariable',
+  'DatasourceVariable',
+  'IntervalVariable',
+  'CustomVariable',
+  'GroupByVariable',
+  'AdhocVariable',
+  'SwitchVariable',
+];
+
+/** Checks the v2 variable shape Grafana's schema rejects most often: kind, spec.name, and the query envelope. */
+function validateV2Variables(variables: unknown, errors: ValidationDiagnostic[]) {
+  if (variables === undefined) {
+    return;
+  }
+  if (!Array.isArray(variables)) {
+    errors.push({ level: 'structure', path: '.spec.variables', message: 'variables must be an array' });
+    return;
+  }
+  const names = new Set<string>();
+  variables.forEach((variable, index) => {
+    const path = `.spec.variables[${index}]`;
+    if (!isRecord(variable) || !V2_VARIABLE_KINDS.includes(variable.kind)) {
+      errors.push({
+        level: 'structure',
+        path: `${path}.kind`,
+        message: `kind must be one of ${V2_VARIABLE_KINDS.join(', ')} (v2 variables are {kind, spec: {name, ...}}, not classic templating entries)`,
+      });
+      return;
+    }
+    const name = isRecord(variable.spec) ? variable.spec.name : undefined;
+    if (typeof name !== 'string' || !name) {
+      errors.push({ level: 'structure', path: `${path}.spec.name`, message: 'variable name is required' });
+    } else if (names.has(name)) {
+      errors.push({ level: 'structure', path: `${path}.spec.name`, message: `duplicate variable ${name}` });
+    } else {
+      names.add(name);
+    }
+    if (
+      variable.kind === 'QueryVariable' &&
+      (!isRecord(variable.spec?.query) || variable.spec.query.kind !== 'DataQuery')
+    ) {
+      errors.push({
+        level: 'structure',
+        path: `${path}.spec.query`,
+        message:
+          'query must be {kind: "DataQuery", group: "prometheus", datasource: {name: UID}, spec: {query: "label_values(...)"}}; `grafana-dashboard label-filter --variable-query` writes one',
+      });
+    }
+  });
 }
 
 function collectElementReferences(node: unknown, names: Set<string>) {

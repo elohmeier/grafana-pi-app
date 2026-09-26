@@ -1,3 +1,10 @@
+import type { AlertRuleParams, PanelAlertRuleSearchParams } from '../tools/alerts';
+import type {
+  DashboardMetricContextParams,
+  DashboardMetricSearchParams,
+  MetricNeighborhoodParams,
+} from '../tools/dashboardMetricContext';
+import type { ScreenshotParams } from '../tools/types';
 import type { PromqlParser } from './promqlCheck';
 import type { WorkspaceResourceSnapshot } from './types';
 
@@ -13,6 +20,55 @@ export type WorkspaceBroker = {
   jsonnet?: JsonnetBroker;
   /** Upstream Prometheus parser in the plugin backend. */
   promql?: PromqlParser;
+  /** Read-only Grafana-managed alert rules. */
+  alerts?: AlertBroker;
+  /** Prometheus metric usage derived from visible dashboards. */
+  metricUsage?: MetricUsageBroker;
+  /** Browser navigation and Grafana image rendering. */
+  ui?: UiBroker;
+  /** The unsaved dashboard open in the browser (sidebar variant with the mutation API). */
+  live?: LiveDashboardBroker;
+};
+
+export type LiveDashboardSnapshot = {
+  uid: string;
+  info: Record<string, unknown>;
+  /** v2 DashboardSpec of the unsaved browser state. */
+  spec: Record<string, unknown>;
+  revision: string;
+};
+
+export type LiveDashboardBroker = {
+  available: () => boolean;
+  get: (signal?: AbortSignal) => Promise<LiveDashboardSnapshot>;
+  /** Replaces the unsaved dashboard; returns the re-serialized spec (element names may be rekeyed). */
+  apply: (
+    spec: Record<string, unknown>,
+    signal?: AbortSignal
+  ) => Promise<{ spec?: Record<string, unknown>; warnings: string[] }>;
+};
+
+export type AlertBroker = {
+  findPanelRules: (params: PanelAlertRuleSearchParams, signal?: AbortSignal) => Promise<unknown>;
+  getRule: (params: AlertRuleParams, signal?: AbortSignal) => Promise<unknown>;
+};
+
+export type MetricUsageBroker = {
+  /** `resource` is a local working copy; without it the dashboard is fetched by UID. */
+  inspect: (
+    params: DashboardMetricContextParams,
+    options: { resource?: Record<string, any>; meta?: Record<string, any>; signal?: AbortSignal }
+  ) => Promise<unknown>;
+  search: (params: DashboardMetricSearchParams, signal?: AbortSignal) => Promise<unknown>;
+  neighborhood: (params: MetricNeighborhoodParams, signal?: AbortSignal) => Promise<unknown>;
+};
+
+export type DashboardImage = { data: string; mimeType: string; width: number; height: number };
+
+export type UiBroker = {
+  /** Opens a Grafana-relative path in the browser. */
+  navigate: (path: string) => void;
+  screenshot?: (params: ScreenshotParams, signal?: AbortSignal) => Promise<DashboardImage>;
 };
 
 /** Stateless Jsonnet evaluation with the plugin's vendored libraries (grafonnet, pi-dashboard helpers). */
@@ -132,7 +188,7 @@ export type PrometheusBroker = {
   /** Returns a compact, bounded query summary (never raw frames). */
   query: (
     datasourceUid: string | undefined,
-    spec: { query: string; type: 'instant' | 'range'; start?: string; end?: string },
+    spec: { query: string; type: 'instant' | 'range'; start?: string; end?: string; step?: string },
     signal?: AbortSignal
   ) => Promise<Record<string, unknown>>;
 };

@@ -1,9 +1,7 @@
-import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { parser as promqlParser } from '@prometheus-io/lezer-promql';
-import { Type } from 'typebox';
 import { walkClassicPanels } from '../workspace/dashboardPanels';
 import { backendFetch } from './client';
-import { textResult, throwIfAborted, truncateText } from './result';
+import { throwIfAborted, truncateText } from './result';
 import type { DashboardSearchResult, GrafanaToolConfig } from './types';
 
 const MAX_INSPECT_USAGES = 120;
@@ -11,7 +9,6 @@ const MAX_SEARCH_DASHBOARDS = 30;
 const MAX_SEARCH_USAGES = 160;
 const MAX_RESULT_METRICS = 60;
 const MAX_RESULT_RELATIONS = 80;
-const MAX_OUTPUT_LENGTH = 100000;
 
 type DashboardResponse = {
   dashboard?: Record<string, any>;
@@ -20,13 +17,13 @@ type DashboardResponse = {
   spec?: Record<string, any>;
 };
 
-type DashboardMetricContextParams = {
+export type DashboardMetricContextParams = {
   uid: string;
   datasourceUid?: string;
   maxUsages?: number;
 };
 
-type DashboardMetricSearchParams = {
+export type DashboardMetricSearchParams = {
   query?: string;
   tag?: string;
   datasourceUid?: string;
@@ -36,7 +33,7 @@ type DashboardMetricSearchParams = {
   maxUsages?: number;
 };
 
-type MetricNeighborhoodParams = DashboardMetricSearchParams & {
+export type MetricNeighborhoodParams = DashboardMetricSearchParams & {
   metric?: string;
   metrics?: string[];
   dashboardUid?: string;
@@ -126,45 +123,6 @@ type QueryFacts = {
   groupingLabels: string[];
   functions: string[];
 };
-
-function prepareDashboardMetricContextArguments(params: unknown): DashboardMetricContextParams {
-  return withErrorContext('prepare dashboard metric context arguments', () => {
-    const record = isRecord(params) ? params : {};
-    return compactOptionalRecord({
-      uid: optionalString(record.uid) ?? optionalString(record.dashboardUid) ?? '',
-      datasourceUid: optionalString(record.datasourceUid),
-      maxUsages: optionalNumber(record.maxUsages),
-    }) as DashboardMetricContextParams;
-  });
-}
-
-function prepareDashboardMetricSearchArguments(params: unknown): DashboardMetricSearchParams {
-  return withErrorContext('prepare dashboard metric search arguments', () => {
-    const record = isRecord(params) ? params : {};
-    return compactOptionalRecord({
-      query: optionalString(record.query),
-      tag: optionalString(record.tag),
-      datasourceUid: optionalString(record.datasourceUid),
-      seedMetric: optionalString(record.seedMetric) ?? optionalString(record.metric),
-      seedMetrics: optionalStringList(record.seedMetrics),
-      maxDashboards: optionalNumber(record.maxDashboards),
-      maxUsages: optionalNumber(record.maxUsages),
-    }) as DashboardMetricSearchParams;
-  });
-}
-
-function prepareMetricNeighborhoodArguments(params: unknown): MetricNeighborhoodParams {
-  return withErrorContext('prepare metric neighborhood arguments', () => {
-    const record = isRecord(params) ? params : {};
-    return compactOptionalRecord({
-      ...prepareDashboardMetricSearchArguments(record),
-      metric: optionalString(record.metric) ?? optionalString(record.seedMetric),
-      metrics: optionalStringList(record.metrics) ?? optionalStringList(record.seedMetrics),
-      dashboardUid: optionalString(record.dashboardUid) ?? optionalString(record.uid),
-      maxResults: optionalNumber(record.maxResults),
-    }) as MetricNeighborhoodParams;
-  });
-}
 
 const PROMQL_RESERVED_IDENTIFIERS = new Set([
   'abs',
@@ -259,14 +217,6 @@ const PROMQL_RESERVED_IDENTIFIERS = new Set([
   'year',
 ]);
 
-export function createDashboardMetricContextTools(toolConfig: GrafanaToolConfig): AgentTool[] {
-  return [
-    makeInspectDashboardMetricUsageTool(toolConfig),
-    makeSearchDashboardMetricUsageTool(toolConfig),
-    makeMetricNeighborhoodTool(toolConfig),
-  ];
-}
-
 export function extractDashboardMetricUsage(
   dashboard: Record<string, any>,
   options: {
@@ -314,179 +264,71 @@ export function extractDashboardMetricUsage(
   } as ExtractedDashboardMetricUsage;
 }
 
-function makeInspectDashboardMetricUsageTool(toolConfig: GrafanaToolConfig): AgentTool {
-  return {
-    name: 'inspect_dashboard_metric_usage',
-    label: 'Inspect dashboard metric usage',
-    description:
-      'Extract Prometheus metric usage from one existing dashboard, including panel locations, labels, grouping labels, functions, and metric relations. Use this before broad metric discovery when the current or named dashboard likely documents relevant metrics.',
-    prepareArguments: prepareDashboardMetricContextArguments,
-    parameters: Type.Object({
-      uid: Type.String({ description: 'Dashboard UID.' }),
-      datasourceUid: Type.Optional(Type.String({ description: 'Optional Prometheus datasource UID filter.' })),
-      maxUsages: Type.Optional(
-        Type.Number({ description: `Maximum extracted usages. Defaults to ${MAX_INSPECT_USAGES}.` })
-      ),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const args = params as DashboardMetricContextParams;
-      try {
-        throwIfAborted(signal);
-        const response = await fetchDashboard(args.uid);
-        const result = extractDashboardMetricUsage(dashboardSpecFromResponse(response), {
-          meta: response.meta,
-          uid: args.uid,
-          datasourceUid: args.datasourceUid,
-          allowedPrometheusDatasourceUids: toolConfig.allowedPrometheusDatasourceUids,
-          maxUsages: args.maxUsages,
-        });
-
-        return textResult(truncateText(JSON.stringify(result, null, 2), MAX_OUTPUT_LENGTH), {
-          uid: result.dashboard.uid,
-          title: result.dashboard.title,
-          metricCount: result.metrics.length,
-          usageCount: result.usages.length,
-          relationCount: result.relations.length,
-          omitted: result.omitted,
-          summarized: true,
-        });
-      } catch (error) {
-        throw new Error(`inspect_dashboard_metric_usage failed: ${formatUnknownError(error)}`);
-      }
-    },
-  };
+/**
+ * Extracts Prometheus metric usage from one dashboard. `resource` is a local
+ * working copy ({spec}) or a legacy API response; without it the dashboard is
+ * fetched by UID.
+ */
+export async function inspectDashboardMetricUsage(
+  args: DashboardMetricContextParams,
+  toolConfig: GrafanaToolConfig,
+  options: { resource?: Record<string, any>; meta?: Record<string, any>; signal?: AbortSignal } = {}
+) {
+  throwIfAborted(options.signal);
+  const response: DashboardResponse = options.resource ?? (await fetchDashboard(args.uid));
+  return extractDashboardMetricUsage(dashboardSpecFromResponse(response), {
+    meta: options.meta ?? response.meta,
+    uid: args.uid,
+    datasourceUid: args.datasourceUid,
+    allowedPrometheusDatasourceUids: toolConfig.allowedPrometheusDatasourceUids,
+    maxUsages: args.maxUsages,
+  });
 }
 
-function makeSearchDashboardMetricUsageTool(toolConfig: GrafanaToolConfig): AgentTool {
-  return {
-    name: 'search_dashboard_metric_usage',
-    label: 'Search dashboard metric usage',
-    description:
-      'Search visible dashboards and extract a ranked Prometheus metric usage corpus from their panels. Prefer this before broad `grafana-prom metrics` scans when existing dashboards may already encode the important metrics, labels, and PromQL relations.',
-    prepareArguments: prepareDashboardMetricSearchArguments,
-    parameters: Type.Object(
-      {
-        query: Type.Optional(Type.String({ description: 'Optional dashboard title search text.' })),
-        tag: Type.Optional(Type.String({ description: 'Optional dashboard tag filter.' })),
-        datasourceUid: Type.Optional(Type.String({ description: 'Optional Prometheus datasource UID filter.' })),
-        seedMetric: Type.Optional(Type.String({ description: 'Optional seed metric to rank related usage around.' })),
-        seedMetrics: Type.Optional(
-          Type.Array(Type.String(), { description: 'Optional seed metrics to rank related usage around.' })
-        ),
-        maxDashboards: Type.Optional(
-          Type.Number({ description: `Maximum dashboards to inspect. Defaults to ${MAX_SEARCH_DASHBOARDS}.` })
-        ),
-        maxUsages: Type.Optional(
-          Type.Number({ description: `Maximum usage records to return. Defaults to ${MAX_SEARCH_USAGES}.` })
-        ),
-      },
-      { required: [] }
-    ),
-    async execute(_toolCallId, params, signal) {
-      const args = params as DashboardMetricSearchParams;
-      try {
-        throwIfAborted(signal);
-        const result = await buildDashboardMetricUsageSearch({ params: args, toolConfig, signal });
-
-        return textResult(truncateText(JSON.stringify(result, null, 2), MAX_OUTPUT_LENGTH), {
-          query: args.query,
-          tag: args.tag,
-          dashboardCount: result.dashboards.length,
-          metricCount: result.metrics.length,
-          usageCount: result.usages.length,
-          relationCount: result.relations.length,
-          seedMetrics: result.seedMetrics,
-          omitted: result.omitted,
-          summarized: true,
-        });
-      } catch (error) {
-        throw new Error(`search_dashboard_metric_usage failed: ${formatUnknownError(error)}`);
-      }
-    },
-  };
+/** Searches visible dashboards and returns a ranked Prometheus metric usage corpus. */
+export async function searchDashboardMetricUsage(
+  args: DashboardMetricSearchParams,
+  toolConfig: GrafanaToolConfig,
+  signal?: AbortSignal
+) {
+  throwIfAborted(signal);
+  return buildDashboardMetricUsageSearch({ params: args, toolConfig, signal });
 }
 
-function makeMetricNeighborhoodTool(toolConfig: GrafanaToolConfig): AgentTool {
+/** Ranks metrics related to seed metrics by dashboard co-usage, shared panels, and label signatures. */
+export async function getMetricNeighborhood(
+  args: MetricNeighborhoodParams,
+  toolConfig: GrafanaToolConfig,
+  signal?: AbortSignal
+) {
+  throwIfAborted(signal);
+  const seedMetrics = normalizeSeedMetrics([args.metric, ...(args.metrics ?? [])]);
+  if (seedMetrics.length === 0) {
+    throw new Error('at least one seed metric is required');
+  }
+
+  const corpus = args.dashboardUid
+    ? await metricUsageCorpusForDashboard({ uid: args.dashboardUid, params: args, toolConfig, signal })
+    : await buildDashboardMetricUsageSearch({ params: { ...args, seedMetrics }, toolConfig, signal });
+  const seedSet = new Set(seedMetrics);
+  const maxResults = clampInt(args.maxResults ?? MAX_RESULT_METRICS, 1, MAX_RESULT_METRICS);
+  const neighbors = rankMetricSummaries({
+    summaries: corpus.metrics.filter((metric) => !seedSet.has(metric.metric)),
+    relations: corpus.relations,
+    seedMetrics,
+    query: args.query,
+  }).slice(0, maxResults);
   return {
-    name: 'get_metric_neighborhood',
-    label: 'Get metric neighborhood',
-    description:
-      'Find metrics related to one or more seed metrics using dashboard co-usage, shared panels, shared dashboards, and label-signature similarity. Use this to expand from a known metric to likely latency, error, saturation, or resource metrics before validating PromQL.',
-    prepareArguments: prepareMetricNeighborhoodArguments,
-    parameters: Type.Object(
-      {
-        metric: Type.Optional(Type.String({ description: 'Seed Prometheus metric.' })),
-        metrics: Type.Optional(Type.Array(Type.String(), { description: 'Seed Prometheus metrics.' })),
-        dashboardUid: Type.Optional(
-          Type.String({ description: 'Optional dashboard UID to inspect instead of searching dashboards.' })
-        ),
-        query: Type.Optional(Type.String({ description: 'Optional dashboard title search text.' })),
-        tag: Type.Optional(Type.String({ description: 'Optional dashboard tag filter.' })),
-        datasourceUid: Type.Optional(Type.String({ description: 'Optional Prometheus datasource UID filter.' })),
-        maxDashboards: Type.Optional(
-          Type.Number({
-            description: `Maximum dashboards to inspect when searching. Defaults to ${MAX_SEARCH_DASHBOARDS}.`,
-          })
-        ),
-        maxResults: Type.Optional(
-          Type.Number({ description: `Maximum neighbors to return. Defaults to ${MAX_RESULT_METRICS}.` })
-        ),
-      },
-      { required: [] }
-    ),
-    async execute(_toolCallId, params, signal) {
-      const args = params as MetricNeighborhoodParams;
-      try {
-        throwIfAborted(signal);
-        const seedMetrics = normalizeSeedMetrics([args.metric, ...(args.metrics ?? [])]);
-        if (seedMetrics.length === 0) {
-          throw new Error('get_metric_neighborhood requires metric or metrics.');
-        }
-
-        const corpus = args.dashboardUid
-          ? await metricUsageCorpusForDashboard({
-              uid: args.dashboardUid,
-              params: args,
-              toolConfig,
-              signal,
-            })
-          : await buildDashboardMetricUsageSearch({
-              params: { ...args, seedMetrics },
-              toolConfig,
-              signal,
-            });
-        const seedSet = new Set(seedMetrics);
-        const maxResults = clampInt(args.maxResults ?? MAX_RESULT_METRICS, 1, MAX_RESULT_METRICS);
-        const neighbors = rankMetricSummaries({
-          summaries: corpus.metrics.filter((metric) => !seedSet.has(metric.metric)),
-          relations: corpus.relations,
-          seedMetrics,
-          query: args.query,
-        }).slice(0, maxResults);
-        const result = {
-          seedMetrics,
-          dashboards: corpus.dashboards,
-          neighbors,
-          relations: corpus.relations
-            .filter((relation) => seedSet.has(relation.source) || seedSet.has(relation.target))
-            .slice(0, MAX_RESULT_RELATIONS),
-          usages: corpus.usages
-            .filter((usage) => seedSet.has(usage.metric) || neighbors.some((metric) => metric.metric === usage.metric))
-            .slice(0, args.maxUsages ? clampInt(args.maxUsages, 1, MAX_SEARCH_USAGES) : MAX_SEARCH_USAGES),
-          omitted: corpus.omitted,
-        };
-
-        return textResult(truncateText(JSON.stringify(result, null, 2), MAX_OUTPUT_LENGTH), {
-          seedMetrics,
-          dashboardCount: corpus.dashboards.length,
-          neighborCount: neighbors.length,
-          relationCount: Array.isArray(result.relations) ? result.relations.length : 0,
-          summarized: true,
-        });
-      } catch (error) {
-        throw new Error(`get_metric_neighborhood failed: ${formatUnknownError(error)}`);
-      }
-    },
+    seedMetrics,
+    dashboards: corpus.dashboards,
+    neighbors,
+    relations: corpus.relations
+      .filter((relation) => seedSet.has(relation.source) || seedSet.has(relation.target))
+      .slice(0, MAX_RESULT_RELATIONS),
+    usages: corpus.usages
+      .filter((usage) => seedSet.has(usage.metric) || neighbors.some((metric) => metric.metric === usage.metric))
+      .slice(0, args.maxUsages ? clampInt(args.maxUsages, 1, MAX_SEARCH_USAGES) : MAX_SEARCH_USAGES),
+    omitted: corpus.omitted,
   };
 }
 
@@ -1325,47 +1167,8 @@ function compactRecord<T extends Record<string, unknown> | undefined>(record: T)
   );
 }
 
-function compactOptionalRecord(record: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(record).filter(([, value]) => value !== undefined && value !== '' && !isEmptyArray(value))
-  );
-}
-
-function isEmptyArray(value: unknown) {
-  return Array.isArray(value) && value.length === 0;
-}
-
 function normalizeWhitespace(value: string | undefined) {
   return value?.replace(/\s+/g, ' ').trim() || undefined;
-}
-
-function optionalString(value: unknown): string | undefined {
-  if (typeof value === 'string') {
-    return normalizeWhitespace(value);
-  }
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
-  if (Array.isArray(value)) {
-    return normalizeWhitespace(
-      value
-        .map((item) => optionalString(item))
-        .filter(Boolean)
-        .join(' ')
-    );
-  }
-  return undefined;
-}
-
-function optionalStringList(value: unknown): string[] | undefined {
-  const values = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[,\s]+/) : [];
-  const normalized = values.map((item) => optionalString(item)).filter((item): item is string => Boolean(item));
-  return normalized.length > 0 ? Array.from(new Set(normalized)) : undefined;
-}
-
-function optionalNumber(value: unknown): number | undefined {
-  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
-  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function toQueryString(params: Record<string, unknown> | undefined) {

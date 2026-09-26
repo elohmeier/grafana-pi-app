@@ -4,10 +4,14 @@ import type { SessionWorkspace, WorkspaceTransaction } from '../workspace';
 
 export type CommandEffect = 'local-read' | 'local-stage' | 'remote-read' | 'remote-write';
 
+export type CommandImage = { data: string; mimeType: string; title: string };
+
 export type CommandResult = {
   stdout: string;
   stderr: string;
   exitCode: number;
+  /** Images returned to the model with the bash result (for example dashboard screenshots). */
+  images?: CommandImage[];
 };
 
 export type WorkspaceCommandContext = {

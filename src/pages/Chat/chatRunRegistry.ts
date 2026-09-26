@@ -1,6 +1,6 @@
 import type { Agent, BeforeToolCallResult } from '@earendil-works/pi-agent-core';
 import type { DashboardAssistantLaunch } from './dashboardLaunch';
-import type { Artifact, InvestigationReport } from './grafanaTools';
+import type { Artifact } from './grafanaTools';
 import type { ChatRunStatus } from './streamingStatus';
 import type { CompactionState } from './compaction';
 import type { SessionWorkspace } from './workspace';
@@ -20,7 +20,6 @@ export type ChatRunSnapshot = {
   dashboardLaunch?: DashboardAssistantLaunch;
   workspace?: SessionWorkspace;
   compaction?: { state?: CompactionState };
-  investigationReport?: InvestigationReport;
   artifacts: Record<string, Artifact>;
   artifactCounter: number;
   toolRuns: Record<string, ToolRunView>;

@@ -88,6 +88,36 @@ benchmark).
   with the helper usage. `grafana-prom query` series carry the same `calcs`
   reducer fields as `grafana-dashboard data`.
 
+- **Typed tools moved into the shell:** `read_artifact`, `update_report`,
+  `navigate`, `screenshot_dashboard`, `find_panel_alert_rules`,
+  `get_alert_rule`, and the three dashboard metric-usage tools are removed.
+  Their logic is reached through new broker capabilities as `grafana open`,
+  `grafana-dashboard screenshot`, `grafana-alert find|get`,
+  `grafana-usage dashboard|search|related`. The investigation report is the
+  Markdown file `/session/report.md`, which the chat renders; older structured
+  reports migrate into it on load. Commands can
+  return images, which the bash tool attaches to its result.
+- **Live dashboard as a file:** the 15 typed live dashboard tools are removed.
+  `/live/dashboard/dashboard.json` is a writable v2 resource read with
+  `GET_SPEC`; `live diff|apply|discard|status` apply it with `APPLY_SPEC`, with
+  a spec-hash precondition against browser changes. `grafana-dashboard
+label-filter` replaces the dashboard-wide label filter tool for working
+  copies and the live file alike. The model-facing tool list is now `read`,
+  `write`, `edit`, and `bash`.
+- **Shell compatibility from the first benchmark run:** `jq` is jq 1.8 via
+  `jq-wasm` instead of just-bash's reimplementation, which evaluated
+  parenthesized assignment targets such as `(.a.b) = 5` to the value alone and
+  silently corrupted files. `/dev/null` works as a sink. `grafana-prom query`
+  accepts `--step` and always prints `{queryType, failed, results}`.
+- **Typed file edits:** the benchmark showed the local model breaking large v2
+  JSON when hand-editing it. `grafana-dashboard add-panel` and `set-panel`
+  write schema-correct panels, queries, units, and positions into classic or
+  v2 files (working copies and the live file), so typed domain operations stay
+  behind commands as planned.
+- **User shell mode:** composer input starting with `!` runs in the chat's
+  session shell without a model call. The result is stored as a `userShell`
+  message, and the model receives it as user context on the next prompt.
+
 Not yet implemented:
 
 - `show_evidence` and presentation events. Rich views still dispatch by tool

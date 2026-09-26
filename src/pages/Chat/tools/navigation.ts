@@ -1,10 +1,6 @@
-import type { AgentTool } from '@earendil-works/pi-agent-core';
-import { locationService } from '@grafana/runtime';
-import { Type } from 'typebox';
 import { PLUGIN_BASE_URL } from '../../../constants';
-import { textResult, throwIfAborted } from './result';
 
-type NavigateParams = {
+export type NavigateParams = {
   type: 'dashboard' | 'prometheus_explore' | 'app_chat' | 'relative';
   uid?: string;
   slug?: string;
@@ -13,44 +9,6 @@ type NavigateParams = {
   start?: string;
   end?: string;
   path?: string;
-};
-
-export function createNavigationTools(): AgentTool[] {
-  return [navigateTool];
-}
-
-const navigateTool: AgentTool = {
-  name: 'navigate',
-  label: 'Navigate',
-  description:
-    'Navigate to safe Grafana-relative destinations: dashboards by UID, Prometheus Explore for a query, this app chat, or an explicit relative Grafana path.',
-  parameters: Type.Object({
-    type: Type.Union(
-      [
-        Type.Literal('dashboard'),
-        Type.Literal('prometheus_explore'),
-        Type.Literal('app_chat'),
-        Type.Literal('relative'),
-      ],
-      { description: 'Destination type.' }
-    ),
-    uid: Type.Optional(Type.String({ description: 'Dashboard UID for dashboard navigation.' })),
-    slug: Type.Optional(Type.String({ description: 'Optional dashboard URL slug.' })),
-    datasourceUid: Type.Optional(Type.String({ description: 'Prometheus datasource UID for Explore navigation.' })),
-    query: Type.Optional(Type.String({ description: 'PromQL expression for Explore navigation.' })),
-    start: Type.Optional(Type.String({ description: 'Explore start time. Defaults to now-1h.' })),
-    end: Type.Optional(Type.String({ description: 'Explore end time. Defaults to now.' })),
-    path: Type.Optional(Type.String({ description: 'Safe relative Grafana path for relative navigation.' })),
-  }),
-  async execute(_toolCallId, params, signal) {
-    throwIfAborted(signal);
-    const args = params as NavigateParams;
-    const path = buildNavigationPath(args);
-
-    locationService.push(path);
-
-    return textResult(`Opened ${path}`, { path, type: args.type });
-  },
 };
 
 export function buildNavigationPath(args: NavigateParams) {
@@ -103,7 +61,7 @@ function prometheusExplorePath(args: NavigateParams) {
 function safeRelativePath(path: string | undefined) {
   const value = requiredString(path, 'path');
   if (!value.startsWith('/') || value.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(value)) {
-    throw new Error('navigate relative path must be a Grafana-relative path starting with /.');
+    throw new Error('path must be a Grafana-relative path starting with /.');
   }
   return value;
 }
@@ -111,7 +69,7 @@ function safeRelativePath(path: string | undefined) {
 function requiredString(value: string | undefined, field: string) {
   const trimmed = value?.trim();
   if (!trimmed) {
-    throw new Error(`navigate requires ${field} for this destination type.`);
+    throw new Error(`${field} is required for this destination`);
   }
   return trimmed;
 }

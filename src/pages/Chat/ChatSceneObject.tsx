@@ -8,17 +8,10 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from 'react';
 import { css, cx } from '@emotion/css';
-import {
-  Agent,
-  type AgentEvent,
-  type AgentMessage,
-  type AfterToolCallContext,
-  type AfterToolCallResult,
-  type StreamFn,
-  streamProxy,
-} from '@earendil-works/pi-agent-core';
+import { Agent, type AgentEvent, type AgentMessage, type StreamFn, streamProxy } from '@earendil-works/pi-agent-core';
 import { SceneComponentProps, SceneObjectBase, SceneObjectState } from '@grafana/scenes';
 import {
   Alert,
@@ -43,11 +36,9 @@ import { usePluginMeta } from '../../utils/utils.plugin';
 import {
   createGrafanaTools,
   artifactByteSize,
-  artifactizeToolResult,
   type Artifact,
   type ArtifactRuntime,
   type GrafanaToolRuntime,
-  type InvestigationReport,
 } from './grafanaTools';
 import { formatAssistantError, type AssistantErrorView } from './llmErrors';
 import {
@@ -57,9 +48,13 @@ import {
   type PiAppJsonData,
   type PiAppThinkingLevel,
 } from './model';
-import { convertChatMessagesToLlm, hasPersistableMessages } from './chatMessages';
+import {
+  convertChatMessagesToLlm,
+  createUserShellMessage,
+  hasPersistableMessages,
+  parseUserShellInput,
+} from './chatMessages';
 import { getGrafanaSkills, renderGrafanaSystemPrompt, selectGrafanaSkills } from './skills';
-import { isFailedDashboardMutationResult } from './tools/result';
 import {
   ContentBlocks,
   ToolActivityPanel,
@@ -112,7 +107,7 @@ import {
 import { createSessionWorkspaceToolkit, SessionWorkspace, type PersistedWorkspace } from './workspace';
 import type { WorkspaceApprovalRequest, WorkspaceApprovalService } from './workspace/broker';
 import { createGrafanaWorkspaceBroker } from './workspace/grafanaBroker';
-import { migrateLegacyJsonnetFiles } from './workspace/migration';
+import { migrateLegacyInvestigationReport, migrateLegacyJsonnetFiles, REPORT_PATH } from './workspace/migration';
 import {
   buildSummarizerPrompt,
   ContextCompactor,
@@ -138,7 +133,8 @@ type StoredSession = SessionIndexItem & {
   thinkingLevel?: PiAppThinkingLevel;
   /** Legacy Jsonnet sources from sessions created before the session filesystem; migrated on load. */
   virtualJsonnetFiles?: unknown;
-  investigationReport?: InvestigationReport;
+  /** Legacy structured report from the retired update_report tool; migrated into /session/report.md on load. */
+  investigationReport?: unknown;
   artifacts?: Record<string, Artifact>;
   artifactCounter?: number;
   workspace?: PersistedWorkspace;
@@ -311,15 +307,30 @@ export function ChatApp({
     []
   );
   const sessionIdRef = useRef<string>(undefined);
-  const investigationReportRef = useRef<InvestigationReport>(undefined);
   const artifactsRef = useRef<Record<string, Artifact>>({});
   const artifactCounterRef = useRef(0);
-  const workspaceRef = useRef<SessionWorkspace>(new SessionWorkspace());
+  const [workspace, setWorkspaceState] = useState(() => new SessionWorkspace());
+  const [userShellRunning, setUserShellRunning] = useState(false);
+  const workspaceRef = useRef<SessionWorkspace>(workspace);
   // Shared holder so a run handed off between page and sidebar keeps one compaction state.
   const compactionRef = useRef<CompactionHolder>({});
   const dashboardLaunchRef = useRef<DashboardAssistantLaunch>(undefined);
   const externalLaunchRef = useRef<ExternalAssistantLaunch>(undefined);
-  const [investigationReport, setInvestigationReport] = useState<InvestigationReport>();
+  // The workspace instance changes with the session; state lets the report file subscription follow it.
+  const replaceWorkspace = useCallback((next: SessionWorkspace) => {
+    workspaceRef.current = next;
+    setWorkspaceState(next);
+  }, []);
+  const subscribeWorkspace = useCallback(
+    (listener: () => void) => {
+      const unsubscribe = workspace.subscribe(listener);
+      return () => {
+        unsubscribe();
+      };
+    },
+    [workspace]
+  );
+  const report = useSyncExternalStore(subscribeWorkspace, () => workspace.getScratchFile(REPORT_PATH));
   useEffect(() => {
     if (pluginMetaJsonData.isOpenAIAPIKeySet) {
       return;
@@ -343,17 +354,6 @@ export function ChatApp({
       mounted = false;
     };
   }, [pluginMetaJsonData.isOpenAIAPIKeySet]);
-  const setInvestigationReportSnapshot = useCallback((report: InvestigationReport) => {
-    investigationReportRef.current = report;
-    setInvestigationReport(report);
-  }, []);
-  const investigationReportRuntime = useMemo(
-    () => ({
-      getReport: () => investigationReportRef.current,
-      setReport: setInvestigationReportSnapshot,
-    }),
-    [setInvestigationReportSnapshot]
-  );
   const setArtifactSnapshots = useCallback((artifacts: Record<string, Artifact>, counter?: number) => {
     const compacted = compactArtifacts(artifacts);
     artifactsRef.current = compacted;
@@ -391,22 +391,6 @@ export function ChatApp({
       list: () => Object.values(artifactsRef.current).sort(compareArtifactsByCreatedAt),
     }),
     []
-  );
-  const afterToolCall = useCallback(
-    async (context: AfterToolCallContext, signal?: AbortSignal): Promise<AfterToolCallResult | undefined> => {
-      if (signal?.aborted || context.isError) {
-        return undefined;
-      }
-      if (isFailedDashboardMutationResult(context.result)) {
-        return { isError: true };
-      }
-      try {
-        return artifactizeToolResult(artifactRuntime, context.toolCall.name, context.result);
-      } catch {
-        return undefined;
-      }
-    },
-    [artifactRuntime]
   );
   const [agent, setAgent] = useState<Agent>();
   const agentRef = useRef<Agent>(undefined);
@@ -556,13 +540,9 @@ export function ChatApp({
     [requestToolConfirmation]
   );
 
-  const buildSkillRuntime = useCallback(
-    (prompt: string) => {
-      const sidebarPageContext = isSidebarVariant
-        ? buildAssistantSidebarPageContextSnapshot(sidebarRouteRef.current, { liveDashboardEditingAvailable })
-        : undefined;
-      const selection = selectGrafanaSkills(prompt, skills, sidebarPageContextSkillHints(sidebarPageContext));
-      const workspaceToolkit = createSessionWorkspaceToolkit({
+  const buildWorkspaceToolkit = useCallback(
+    () =>
+      createSessionWorkspaceToolkit({
         workspace: workspaceRef.current,
         broker: workspaceBroker,
         approvals: workspaceApprovals,
@@ -570,11 +550,27 @@ export function ChatApp({
         skills,
         python: pythonRunner,
         getDashboardMutationAPI: liveDashboardEditingAvailable ? () => dashboardMutationAPI : undefined,
-      });
+      }),
+    [
+      artifactRuntime,
+      dashboardMutationAPI,
+      liveDashboardEditingAvailable,
+      pythonRunner,
+      skills,
+      workspaceApprovals,
+      workspaceBroker,
+    ]
+  );
+
+  const buildSkillRuntime = useCallback(
+    (prompt: string) => {
+      const sidebarPageContext = isSidebarVariant
+        ? buildAssistantSidebarPageContextSnapshot(sidebarRouteRef.current, { liveDashboardEditingAvailable })
+        : undefined;
+      const selection = selectGrafanaSkills(prompt, skills, sidebarPageContextSkillHints(sidebarPageContext));
+      const workspaceToolkit = buildWorkspaceToolkit();
       const tools = createGrafanaTools({
         ...jsonData,
-        investigationReport: investigationReportRuntime,
-        artifacts: artifactRuntime,
         dashboardMutation: dashboardMutationAPI,
         workspaceTools: workspaceToolkit.tools,
       });
@@ -602,18 +598,7 @@ export function ChatApp({
         skillSelection: selection,
       };
     },
-    [
-      investigationReportRuntime,
-      artifactRuntime,
-      dashboardMutationAPI,
-      isSidebarVariant,
-      liveDashboardEditingAvailable,
-      jsonData,
-      skills,
-      workspaceApprovals,
-      workspaceBroker,
-      pythonRunner,
-    ]
+    [buildWorkspaceToolkit, dashboardMutationAPI, isSidebarVariant, liveDashboardEditingAvailable, jsonData, skills]
   );
 
   const persistIndex = useCallback(
@@ -643,7 +628,6 @@ export function ChatApp({
         messages,
         modelId: llmModel.id,
         thinkingLevel,
-        investigationReport: investigationReportRef.current,
         artifacts: artifactsRef.current,
         artifactCounter: artifactCounterRef.current,
         workspace: workspaceRef.current.serialize(),
@@ -744,7 +728,6 @@ export function ChatApp({
         convertToLlm: convertChatMessagesToLlm,
         transformContext: compactor.transform,
         streamFn,
-        afterToolCall,
         beforeToolCall: confirmToolCall,
       });
 
@@ -757,7 +740,6 @@ export function ChatApp({
     },
     [
       buildSkillRuntime,
-      afterToolCall,
       confirmToolCall,
       flushRevision,
       handleAgentEvent,
@@ -778,9 +760,8 @@ export function ChatApp({
     titleRef.current = 'New chat';
     setSelectedModelId(undefined);
     setSelectedThinkingLevel(undefined);
-    workspaceRef.current = new SessionWorkspace();
+    replaceWorkspace(new SessionWorkspace());
     compactionRef.current = {};
-    investigationReportRef.current = undefined;
     setRunStatusSnapshot(undefined);
     clearArtifacts();
     autoScrollRef.current = true;
@@ -790,10 +771,16 @@ export function ChatApp({
     setError(undefined);
     setInput('');
     setToolRuns({});
-    setInvestigationReport(undefined);
     settleToolConfirmation(false);
     buildAgent([]);
-  }, [buildAgent, clearArtifacts, setRunStatusSnapshot, settleToolConfirmation, stopCurrentAgentForSessionChange]);
+  }, [
+    replaceWorkspace,
+    buildAgent,
+    clearArtifacts,
+    setRunStatusSnapshot,
+    settleToolConfirmation,
+    stopCurrentAgentForSessionChange,
+  ]);
 
   const startDashboardLaunchSession = useCallback(
     (launch: DashboardAssistantLaunch) => {
@@ -804,10 +791,9 @@ export function ChatApp({
       externalLaunchRef.current = undefined;
       sessionIdRef.current = id;
       titleRef.current = title;
-      workspaceRef.current = new SessionWorkspace();
+      replaceWorkspace(new SessionWorkspace());
       compactionRef.current = {};
       compactionRef.current = {};
-      investigationReportRef.current = undefined;
       setRunStatusSnapshot(undefined);
       clearArtifacts();
       autoScrollRef.current = true;
@@ -817,11 +803,17 @@ export function ChatApp({
       setError(undefined);
       setInput(dashboardAssistantPrompt(launch));
       setToolRuns({});
-      setInvestigationReport(undefined);
       settleToolConfirmation(false);
       buildAgent([]);
     },
-    [buildAgent, clearArtifacts, setRunStatusSnapshot, settleToolConfirmation, stopCurrentAgentForSessionChange]
+    [
+      replaceWorkspace,
+      buildAgent,
+      clearArtifacts,
+      setRunStatusSnapshot,
+      settleToolConfirmation,
+      stopCurrentAgentForSessionChange,
+    ]
   );
 
   const startExternalAssistantLaunchSession = useCallback(
@@ -833,10 +825,9 @@ export function ChatApp({
       externalLaunchRef.current = launch;
       sessionIdRef.current = id;
       titleRef.current = title;
-      workspaceRef.current = new SessionWorkspace();
+      replaceWorkspace(new SessionWorkspace());
       compactionRef.current = {};
       compactionRef.current = {};
-      investigationReportRef.current = undefined;
       setRunStatusSnapshot(undefined);
       clearArtifacts();
       autoScrollRef.current = true;
@@ -846,11 +837,17 @@ export function ChatApp({
       setError(undefined);
       setInput(launch.prompt);
       setToolRuns({});
-      setInvestigationReport(undefined);
       settleToolConfirmation(false);
       buildAgent([]);
     },
-    [buildAgent, clearArtifacts, setRunStatusSnapshot, settleToolConfirmation, stopCurrentAgentForSessionChange]
+    [
+      replaceWorkspace,
+      buildAgent,
+      clearArtifacts,
+      setRunStatusSnapshot,
+      settleToolConfirmation,
+      stopCurrentAgentForSessionChange,
+    ]
   );
 
   const preserveCurrentRunForHandoff = useCallback(() => {
@@ -867,7 +864,6 @@ export function ChatApp({
       dashboardLaunch: dashboardLaunchRef.current,
       workspace: workspaceRef.current,
       compaction: compactionRef.current,
-      investigationReport: investigationReportRef.current,
       artifacts: { ...artifactsRef.current },
       artifactCounter: artifactCounterRef.current,
       toolRuns,
@@ -887,9 +883,8 @@ export function ChatApp({
       titleRef.current = run.title;
       setSelectedModelId(run.agent.state.model?.id || undefined);
       setSelectedThinkingLevel(parseStoredThinkingLevel(run.agent.state.thinkingLevel));
-      workspaceRef.current = run.workspace ?? new SessionWorkspace();
+      replaceWorkspace(run.workspace ?? new SessionWorkspace());
       compactionRef.current = run.compaction ?? {};
-      investigationReportRef.current = run.investigationReport;
       setRunStatusSnapshot(run.runStatus ?? (run.agent.state.isStreaming ? createInitialRunStatus() : undefined));
       setArtifactSnapshots(run.artifacts, run.artifactCounter);
       autoScrollRef.current = true;
@@ -899,7 +894,6 @@ export function ChatApp({
       setError(undefined);
       setInput('');
       setToolRuns(run.toolRuns);
-      setInvestigationReport(run.investigationReport);
       settleToolConfirmation(false);
       unsubscribeRef.current = run.agent.subscribe((event) => handleAgentEvent(event, run.agent));
       agentRef.current = run.agent;
@@ -913,6 +907,7 @@ export function ChatApp({
       return true;
     },
     [
+      replaceWorkspace,
       flushRevision,
       handleAgentEvent,
       requestToolConfirmation,
@@ -1047,7 +1042,8 @@ export function ChatApp({
   }, [flushRevision, settleToolConfirmation]);
 
   const isStreaming = Boolean(agent?.state.isStreaming);
-  const isBusy = isStreaming;
+  const isBusy = isStreaming || userShellRunning;
+  const isShellInput = parseUserShellInput(input) !== undefined;
   const hasDraft = Boolean(input.trim());
   const chatLeaveDescription =
     isStreaming || pendingToolConfirmation ? ACTIVE_CHAT_LEAVE_MESSAGE : DRAFT_CHAT_LEAVE_MESSAGE;
@@ -1237,8 +1233,53 @@ export function ChatApp({
     ]
   );
 
+  // `!command` runs in the session shell as the user, without a model call. The
+  // result is appended to the transcript, so the agent sees it on the next prompt.
+  const runUserShellCommand = useCallback(
+    async (command: string) => {
+      const currentAgent = agentRef.current;
+      if (!currentAgent || !command || currentAgent.state.isStreaming || userShellRunning) {
+        return;
+      }
+      let sessionId = sessionIdRef.current;
+      if (!sessionId) {
+        sessionId = createSessionId();
+        sessionIdRef.current = sessionId;
+        setCurrentSessionId(sessionId);
+      }
+      if (titleRef.current === 'New chat') {
+        const title = generateTitle(`! ${command.split('\n')[0]}`);
+        titleRef.current = title;
+        setCurrentTitle(title);
+      }
+      setInput('!');
+      setError(undefined);
+      setUserShellRunning(true);
+      keepAutoScrollEnabled();
+      try {
+        const result = await buildWorkspaceToolkit().runShell(command);
+        if (agentRef.current !== currentAgent || sessionIdRef.current !== sessionId) {
+          return;
+        }
+        currentAgent.state.messages = [...currentAgent.state.messages, createUserShellMessage(result)];
+        await saveSession(sessionId, titleRef.current, currentAgent.state.messages);
+      } catch (err) {
+        setError(`Shell command failed: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        setUserShellRunning(false);
+        flushRevision();
+      }
+    },
+    [buildWorkspaceToolkit, flushRevision, keepAutoScrollEnabled, saveSession, userShellRunning]
+  );
+
   const submitPrompt = async (event: SyntheticEvent) => {
     event.preventDefault();
+    const shellCommand = parseUserShellInput(input);
+    if (shellCommand !== undefined) {
+      await runUserShellCommand(shellCommand);
+      return;
+    }
     await submitPromptText(input.trim());
   };
 
@@ -1259,10 +1300,11 @@ export function ChatApp({
       setSelectedModelId(stored.modelId || undefined);
       setSelectedThinkingLevel(parseStoredThinkingLevel(stored.thinkingLevel));
       setChatSessionParamInLocation(id);
-      workspaceRef.current = SessionWorkspace.restore(stored.workspace);
+      const restoredWorkspace = SessionWorkspace.restore(stored.workspace);
       compactionRef.current = { state: isCompactionState(stored.compaction) ? stored.compaction : undefined };
-      migrateLegacyJsonnetFiles(workspaceRef.current, stored.virtualJsonnetFiles);
-      investigationReportRef.current = stored.investigationReport;
+      migrateLegacyJsonnetFiles(restoredWorkspace, stored.virtualJsonnetFiles);
+      migrateLegacyInvestigationReport(restoredWorkspace, stored.investigationReport);
+      replaceWorkspace(restoredWorkspace);
       setRunStatusSnapshot(undefined);
       setArtifactSnapshots(stored.artifacts ?? {}, stored.artifactCounter);
       keepAutoScrollEnabled();
@@ -1271,12 +1313,12 @@ export function ChatApp({
       setError(undefined);
       setInput('');
       setToolRuns({});
-      setInvestigationReport(stored.investigationReport);
       settleToolConfirmation(false);
       buildAgent(stored.messages);
       return true;
     },
     [
+      replaceWorkspace,
       buildAgent,
       keepAutoScrollEnabled,
       setArtifactSnapshots,
@@ -1634,7 +1676,6 @@ export function ChatApp({
           modelId: llmModel.id,
           thinkingLevel,
           messages,
-          investigationReport: investigationReportRef.current,
           artifacts: artifactsRef.current,
           artifactCounter: artifactCounterRef.current,
           workspace: workspaceRef.current.serialize(),
@@ -1690,10 +1731,11 @@ export function ChatApp({
         titleRef.current = title;
         setSelectedModelId(imported.modelId || undefined);
         setSelectedThinkingLevel(parseStoredThinkingLevel(imported.thinkingLevel));
-        workspaceRef.current = SessionWorkspace.restore(imported.workspace, { trusted: false });
+        const importedWorkspace = SessionWorkspace.restore(imported.workspace, { trusted: false });
         compactionRef.current = { state: isCompactionState(imported.compaction) ? imported.compaction : undefined };
-        migrateLegacyJsonnetFiles(workspaceRef.current, imported.virtualJsonnetFiles);
-        investigationReportRef.current = imported.investigationReport;
+        migrateLegacyJsonnetFiles(importedWorkspace, imported.virtualJsonnetFiles);
+        migrateLegacyInvestigationReport(importedWorkspace, imported.investigationReport);
+        replaceWorkspace(importedWorkspace);
         setRunStatusSnapshot(undefined);
         setArtifactSnapshots(imported.artifacts ?? {}, imported.artifactCounter);
         keepAutoScrollEnabled();
@@ -1702,7 +1744,6 @@ export function ChatApp({
         setError(undefined);
         setInput('');
         setToolRuns({});
-        setInvestigationReport(imported.investigationReport);
         settleToolConfirmation(false);
         buildAgent(imported.messages);
         await saveSession(id, title, imported.messages);
@@ -1712,6 +1753,7 @@ export function ChatApp({
       }
     },
     [
+      replaceWorkspace,
       buildAgent,
       keepAutoScrollEnabled,
       saveSession,
@@ -2024,8 +2066,8 @@ export function ChatApp({
         <div
           className={cx(
             styles.messagesFrame,
-            investigationReport && styles.messagesFrameWithReport,
-            investigationReport && isSidebarVariant && styles.messagesFrameWithReportSidebar
+            report && styles.messagesFrameWithReport,
+            report && isSidebarVariant && styles.messagesFrameWithReportSidebar
           )}
         >
           <section
@@ -2069,9 +2111,7 @@ export function ChatApp({
               </div>
             )}
           </section>
-          {investigationReport && (
-            <InvestigationReportPanel collapsible={isSidebarVariant} report={investigationReport} />
-          )}
+          {report && <ReportPanel collapsible={isSidebarVariant} markdown={report.content} updatedAt={report.mtime} />}
           {isAutoScrollPaused && visibleMessages.length > 0 && (
             <Button
               className={styles.jumpToLatest}
@@ -2092,12 +2132,19 @@ export function ChatApp({
           onSubmit={submitPrompt}
         >
           <div className={styles.composerInputGroup}>
+            {isShellInput && (
+              <div className={styles.composerShellMode} data-testid={testIds.chat.shellMode}>
+                <Icon name="brackets-curly" /> Shell mode: runs in this chat&apos;s session filesystem, without the
+                model. The agent sees the output on your next message.
+              </div>
+            )}
             <TextArea
+              className={cx(isShellInput && styles.composerShellInput)}
               data-testid={testIds.chat.composer}
               rows={isSidebarVariant ? 2 : 3}
               value={input}
-              disabled={!agent || isBusy || !hasLLMConfig}
-              placeholder="Ask about metrics, PromQL, or dashboards..."
+              disabled={!agent || isBusy || (!hasLLMConfig && !isShellInput)}
+              placeholder="Ask about metrics, PromQL, or dashboards... (! runs a shell command)"
               onChange={(event) => handleInputChange(event.currentTarget.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
@@ -2122,11 +2169,13 @@ export function ChatApp({
             {(!isSidebarVariant || !isStreaming) && (
               <Button
                 data-testid={testIds.chat.send}
-                icon="message"
+                icon={isShellInput ? 'play' : 'message'}
                 type="submit"
-                disabled={!agent || !input.trim() || isBusy || !hasLLMConfig}
+                disabled={
+                  !agent || isBusy || (isShellInput ? !parseUserShellInput(input) : !input.trim() || !hasLLMConfig)
+                }
               >
-                Send
+                {isShellInput ? 'Run' : 'Send'}
               </Button>
             )}
           </div>
@@ -2246,27 +2295,22 @@ function ChatLeaveGuardModal({
   );
 }
 
-type InvestigationReportArraySection = 'scope' | 'evidence' | 'hypotheses' | 'ruledOut' | 'nextSteps' | 'remediation';
-
-const INVESTIGATION_REPORT_SECTIONS: Array<{ key: InvestigationReportArraySection; title: string }> = [
-  { key: 'scope', title: 'Scope' },
-  { key: 'evidence', title: 'Evidence' },
-  { key: 'hypotheses', title: 'Hypotheses' },
-  { key: 'ruledOut', title: 'Ruled out' },
-  { key: 'nextSteps', title: 'Next checks' },
-  { key: 'remediation', title: 'Remediation' },
-];
-
-function InvestigationReportPanel({
-  report,
+/** Renders REPORT_PATH; the first `# heading` becomes the panel title. */
+function ReportPanel({
+  markdown,
+  updatedAt,
   collapsible = false,
 }: {
-  report: InvestigationReport;
+  markdown: string;
+  updatedAt: number;
   collapsible?: boolean;
 }) {
   const styles = useStyles2(getStyles);
   const [isOpen, setIsOpen] = useState(true);
   const bodyId = useId();
+  const heading = /^#\s+(.+)$/m.exec(markdown);
+  const title = heading?.[1].trim() || 'Report';
+  const body = heading ? markdown.replace(heading[0], '').trim() : markdown.trim();
 
   const header = (
     <span className={styles.investigationReportHeader}>
@@ -2279,47 +2323,29 @@ function InvestigationReportPanel({
       )}
       <span className={styles.investigationReportHeaderContent}>
         <span className={styles.investigationReportTitleGroup}>
-          <Icon name="search" />
+          <Icon name="file-alt" />
           <span aria-level={3} role="heading">
-            {report.title}
+            {title}
           </span>
         </span>
-        <Badge
-          text={report.status === 'complete' ? 'Complete' : 'Active'}
-          color={report.status === 'complete' ? 'green' : 'blue'}
-        />
       </span>
     </span>
   );
 
-  const body = (
+  const content = (
     <div
-      aria-label="Investigation report details"
+      aria-label="Report details"
       className={cx(styles.investigationReportBody, collapsible && styles.investigationReportBodyCollapsible)}
       data-testid={testIds.chat.investigationReportScroll}
       id={bodyId}
       role="region"
       tabIndex={0}
     >
-      <div className={styles.investigationReportUpdated}>Updated {formatDate(report.updatedAt)}</div>
+      <div className={styles.investigationReportUpdated}>
+        <code>{REPORT_PATH}</code> · updated {formatDate(new Date(updatedAt).toISOString())}
+      </div>
       <div className={styles.investigationReportSections}>
-        {INVESTIGATION_REPORT_SECTIONS.map((section) => {
-          const items = report[section.key];
-          return (
-            <section className={styles.investigationReportSection} key={section.key}>
-              <h4>{section.title}</h4>
-              {Array.isArray(items) && items.length > 0 ? (
-                <ul>
-                  {items.map((item, index) => (
-                    <li key={`${section.key}:${index}:${item}`}>{item}</li>
-                  ))}
-                </ul>
-              ) : (
-                <div className={styles.investigationReportEmpty}>No entries yet.</div>
-              )}
-            </section>
-          );
-        })}
+        <ContentBlocks content={body} />
       </div>
     </div>
   );
@@ -2340,7 +2366,7 @@ function InvestigationReportPanel({
         >
           {header}
         </button>
-        {isOpen && body}
+        {isOpen && content}
       </section>
     );
   }
@@ -2348,7 +2374,7 @@ function InvestigationReportPanel({
   return (
     <aside className={styles.investigationReport} data-testid={testIds.chat.investigationReport}>
       {header}
-      {body}
+      {content}
     </aside>
   );
 }
@@ -2363,9 +2389,9 @@ const MessageView = memo(function MessageView({
   onOpenDashboard?: DashboardOpenHandler;
 }) {
   const styles = useStyles2(getStyles);
-  const isUser = message.role === 'user';
+  const isUser = message.role === 'user' || message.role === 'userShell';
   const isTool = message.role === 'toolResult';
-  const roleLabel = isTool ? undefined : message.role;
+  const roleLabel = isTool ? undefined : message.role === 'userShell' ? 'user shell' : message.role;
 
   return (
     <article
@@ -2393,6 +2419,9 @@ function renderMessageContent(message: AgentMessage, isStreaming: boolean, onOpe
     }
 
     return <ContentBlocks content={message.content} isStreaming={isStreaming} />;
+  }
+  if (message.role === 'userShell') {
+    return <ToolResultMessageBody toolName="bash" content={message.content} details={message.result} />;
   }
   if (message.role === 'toolResult') {
     return (
@@ -2481,7 +2510,9 @@ function hasActiveDashboardMutationCommands(dashboardMutationAPI: DashboardMutat
   }
 
   try {
-    return dashboardMutationAPI.getAvailableCommands().length > 0;
+    // Live editing replaces the whole unsaved spec, so both halves of the full-spec surface are required.
+    const commands = dashboardMutationAPI.getAvailableCommands().map(String);
+    return commands.includes('GET_SPEC') && commands.includes('APPLY_SPEC');
   } catch {
     return false;
   }
@@ -3229,7 +3260,7 @@ function parseChatSessionExport(value: unknown): StoredSession {
     thinkingLevel: parseStoredThinkingLevel(value.session.thinkingLevel),
     messages,
     virtualJsonnetFiles: isRecord(value.session.virtualJsonnetFiles) ? value.session.virtualJsonnetFiles : undefined,
-    investigationReport: parseInvestigationReport(value.session.investigationReport),
+    investigationReport: value.session.investigationReport,
     artifacts: parseArtifacts(value.session.artifacts),
     artifactCounter:
       typeof value.session.artifactCounter === 'number' && Number.isFinite(value.session.artifactCounter)
@@ -3238,32 +3269,6 @@ function parseChatSessionExport(value: unknown): StoredSession {
     workspace: isRecord(value.session.workspace) ? (value.session.workspace as PersistedWorkspace) : undefined,
     compaction: isCompactionState(value.session.compaction) ? value.session.compaction : undefined,
   };
-}
-
-function parseInvestigationReport(value: unknown): InvestigationReport | undefined {
-  if (value === null || value === undefined) {
-    return undefined;
-  }
-  if (!isRecord(value)) {
-    throw new Error('Import file session.investigationReport must be an object when present.');
-  }
-
-  return {
-    id: typeof value.id === 'string' && value.id ? value.id : createSessionId(),
-    title: typeof value.title === 'string' && value.title.trim() ? generateTitle(value.title) : 'Investigation report',
-    status: value.status === 'complete' ? 'complete' : 'active',
-    scope: parseStringList(value.scope),
-    evidence: parseStringList(value.evidence),
-    hypotheses: parseStringList(value.hypotheses),
-    ruledOut: parseStringList(value.ruledOut),
-    nextSteps: parseStringList(value.nextSteps),
-    remediation: parseStringList(value.remediation),
-    updatedAt: normalizeDateString(value.updatedAt),
-  };
-}
-
-function parseStringList(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
 function parseArtifacts(value: unknown): Record<string, Artifact> | undefined {
@@ -3810,6 +3815,17 @@ const getStyles = (theme: GrafanaTheme2) => ({
     '@container (max-width: 340px)': {
       gridTemplateColumns: '1fr',
     },
+  }),
+  composerShellMode: css({
+    display: 'flex',
+    alignItems: 'center',
+    gap: theme.spacing(1),
+    color: theme.colors.text.secondary,
+    fontSize: theme.typography.bodySmall.fontSize,
+  }),
+  composerShellInput: css({
+    fontFamily: theme.typography.fontFamilyMonospace,
+    borderColor: theme.colors.warning.border,
   }),
   composerInputGroup: css({
     display: 'grid',

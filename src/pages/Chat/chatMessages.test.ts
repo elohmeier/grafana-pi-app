@@ -1,6 +1,11 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, ToolResultMessage, Usage, UserMessage } from '@earendil-works/pi-ai';
-import { convertChatMessagesToLlm, hasPersistableMessages } from './chatMessages';
+import {
+  convertChatMessagesToLlm,
+  createUserShellMessage,
+  hasPersistableMessages,
+  parseUserShellInput,
+} from './chatMessages';
 
 const usage: Usage = {
   input: 0,
@@ -114,5 +119,39 @@ describe('convertChatMessagesToLlm', () => {
 describe('hasPersistableMessages', () => {
   it('keeps aborted assistant notices persistable for the visible chat history', () => {
     expect(hasPersistableMessages([assistant({ content: [], stopReason: 'aborted' })])).toBe(true);
+  });
+});
+
+describe('user shell messages', () => {
+  const result = {
+    command: 'ls /session',
+    cwd: '/workspace',
+    exitCode: 0,
+    stdout: 'report.md\n',
+    stderr: '',
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    timedOut: false,
+    changes: [],
+    durationMs: 3,
+    images: [{ data: 'aW1n', mimeType: 'image/png', title: 'Screenshot' }],
+  };
+
+  it('recognizes ! input', () => {
+    expect(parseUserShellInput('  !ls -la ')).toBe('ls -la');
+    expect(parseUserShellInput('!')).toBe('');
+    expect(parseUserShellInput('why is ! here')).toBeUndefined();
+  });
+
+  it('shows the command and output to the model as user context, without image data', () => {
+    const message = createUserShellMessage(result);
+    expect(message.result).not.toHaveProperty('images');
+    expect(hasPersistableMessages([message])).toBe(true);
+    const [converted] = convertChatMessagesToLlm([message]);
+    expect(converted.role).toBe('user');
+    const text = (converted as UserMessage).content as Array<{ type: string; text: string }>;
+    expect(text[0].text).toContain('$ ls /session');
+    expect(text[0].text).toContain('report.md');
+    expect(text[0].text).toContain('[exit 0]');
   });
 });

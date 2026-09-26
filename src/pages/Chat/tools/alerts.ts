@@ -1,9 +1,7 @@
-import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { config } from '@grafana/runtime';
-import { Type } from 'typebox';
 import { walkClassicPanels } from '../workspace/dashboardPanels';
 import { backendFetch } from './client';
-import { textResult, throwIfAborted, truncateText } from './result';
+import { throwIfAborted } from './result';
 import type { GrafanaToolConfig } from './types';
 
 const ALERT_RULE_GROUP = 'rules.alerting.grafana.app';
@@ -12,14 +10,13 @@ const DASHBOARD_UID_ANNOTATION = '__dashboardUid__';
 const PANEL_ID_ANNOTATION = '__panelId__';
 const MAX_ALERT_RULES = 250;
 const MAX_ALERT_MATCHES = 20;
-const MAX_OUTPUT_LENGTH = 120000;
 
-type AlertRuleParams = {
+export type AlertRuleParams = {
   name: string;
   namespace?: string;
 };
 
-type PanelAlertRuleSearchParams = {
+export type PanelAlertRuleSearchParams = {
   dashboardUid?: string;
   panelId?: number | string;
   panelTitle?: string;
@@ -176,125 +173,65 @@ type PrometheusCheck = {
   relativeTimeRange?: AlertExpression['relativeTimeRange'];
 };
 
-export function createAlertTools(toolConfig: GrafanaToolConfig): AgentTool[] {
-  return [makeFindPanelAlertRulesTool(toolConfig), makeGetAlertRuleTool(toolConfig)];
-}
-
-function makeFindPanelAlertRulesTool(toolConfig: GrafanaToolConfig): AgentTool {
+/** Finds Grafana-managed AlertRule resources linked or related to a dashboard panel (read-only). */
+export async function findPanelAlertRules(
+  args: PanelAlertRuleSearchParams,
+  toolConfig: GrafanaToolConfig,
+  signal?: AbortSignal
+) {
+  throwIfAborted(signal);
+  const namespace = await resolveAlertNamespace(args.namespace);
+  const [rules, panel] = await Promise.all([
+    fetchAlertRules(namespace),
+    args.dashboardUid ? fetchDashboardPanel(args).catch(() => undefined) : Promise.resolve(undefined),
+  ]);
+  throwIfAborted(signal);
+  const maxRules = clampInt(args.maxRules ?? MAX_ALERT_MATCHES, 1, MAX_ALERT_MATCHES);
+  const candidateRules = selectAlertRuleCandidates(rules, args, panel);
+  const matches = candidateRules
+    .map((rule) => scoreAlertRule(rule, { ...args, panel }, namespace, toolConfig))
+    .filter((match) => match.score > 0 || shouldReturnUnscoredRule(args))
+    .sort((left, right) => right.score - left.score || left.rule.title.localeCompare(right.rule.title))
+    .slice(0, maxRules);
+  const exactPanelMatches = matches.filter((match) =>
+    match.reasons.some((reason) => reason === 'panel link exact match')
+  );
   return {
-    name: 'find_panel_alert_rules',
-    label: 'Find panel alert rules',
-    description:
-      'Read Grafana-managed AlertRule resources from the App Platform API and find rules linked or related to a dashboard panel. This is read-only and uses /apis/rules.alerting.grafana.app/v0alpha1 only.',
-    parameters: Type.Object(
-      {
-        dashboardUid: Type.Optional(Type.String({ description: 'Dashboard UID from sidebar or user context.' })),
-        panelId: Type.Optional(
-          Type.Union([Type.Number(), Type.String()], {
-            description: 'Dashboard panel ID. Prefer this when available.',
-          })
-        ),
-        panelTitle: Type.Optional(Type.String({ description: 'Panel title for fallback matching.' })),
-        ruleName: Type.Optional(Type.String({ description: 'Specific AlertRule metadata.name to include.' })),
-        query: Type.Optional(Type.String({ description: 'Optional text to match against rule titles and labels.' })),
-        namespace: Type.Optional(
-          Type.String({ description: 'Grafana App Platform namespace. Defaults to Grafana config.' })
-        ),
-        maxRules: Type.Optional(
-          Type.Number({ description: `Maximum matched rules to return. Defaults to ${MAX_ALERT_MATCHES}.` })
-        ),
-      },
-      { required: [] }
-    ),
-    async execute(_toolCallId, params, signal) {
-      const args = params as PanelAlertRuleSearchParams;
-      throwIfAborted(signal);
-      const namespace = await resolveAlertNamespace(args.namespace);
-      const [rules, panel] = await Promise.all([
-        fetchAlertRules(namespace),
-        args.dashboardUid ? fetchDashboardPanel(args).catch(() => undefined) : Promise.resolve(undefined),
-      ]);
-      throwIfAborted(signal);
-      const maxRules = clampInt(args.maxRules ?? MAX_ALERT_MATCHES, 1, MAX_ALERT_MATCHES);
-      const candidateRules = selectAlertRuleCandidates(rules, args, panel);
-      const matches = candidateRules
-        .map((rule) => scoreAlertRule(rule, { ...args, panel }, namespace, toolConfig))
-        .filter((match) => match.score > 0 || shouldReturnUnscoredRule(args))
-        .sort((left, right) => right.score - left.score || left.rule.title.localeCompare(right.rule.title))
-        .slice(0, maxRules);
-      const exactPanelMatches = matches.filter((match) =>
-        match.reasons.some((reason) => reason === 'panel link exact match')
-      );
-      const result = {
-        namespace,
-        query: compactRecord({
-          dashboardUid: args.dashboardUid,
-          panelId: normalizedPanelId(args.panelId),
-          panelTitle: args.panelTitle,
-          ruleName: args.ruleName,
-          query: args.query,
-        }),
-        dashboardPanel: panel,
-        ruleCount: rules.length,
-        matchCount: matches.length,
-        exactPanelMatchCount: exactPanelMatches.length,
-        matches,
-        guidance: [
-          'Run prometheusChecks with `grafana-prom query` to compare the alert data query against the panel query and time range.',
-          `Grafana's dashboard alert-state overlay uses ${DASHBOARD_UID_ANNOTATION}/${PANEL_ID_ANNOTATION} annotations; App Platform panelRef alone can be enough for API lookup but not for the panel indicator.`,
-          'Check alertCondition, reducer, relativeTimeRange, for, noDataState, and execErrState before concluding from the panel visualization alone.',
-        ],
-      };
-
-      return textResult(truncateText(JSON.stringify(result, null, 2), MAX_OUTPUT_LENGTH), {
-        namespace,
-        dashboardUid: args.dashboardUid,
-        panelId: normalizedPanelId(args.panelId),
-        ruleCount: rules.length,
-        scannedRuleCount: candidateRules.length,
-        matchCount: matches.length,
-        exactPanelMatchCount: exactPanelMatches.length,
-        summarized: true,
-      });
-    },
+    namespace,
+    query: compactRecord({
+      dashboardUid: args.dashboardUid,
+      panelId: normalizedPanelId(args.panelId),
+      panelTitle: args.panelTitle,
+      ruleName: args.ruleName,
+      query: args.query,
+    }),
+    dashboardPanel: panel,
+    ruleCount: rules.length,
+    scannedRuleCount: candidateRules.length,
+    matchCount: matches.length,
+    exactPanelMatchCount: exactPanelMatches.length,
+    matches,
+    guidance: [
+      'Run prometheusChecks with `grafana-prom query` to compare the alert data query against the panel query and time range.',
+      `Grafana's dashboard alert-state overlay uses ${DASHBOARD_UID_ANNOTATION}/${PANEL_ID_ANNOTATION} annotations; App Platform panelRef alone can be enough for API lookup but not for the panel indicator.`,
+      'Check alertCondition, reducer, relativeTimeRange, for, noDataState, and execErrState before concluding from the panel visualization alone.',
+    ],
   };
 }
 
-function makeGetAlertRuleTool(toolConfig: GrafanaToolConfig): AgentTool {
+/** Reads one Grafana-managed AlertRule by metadata.name and summarizes its expressions (read-only). */
+export async function getAlertRule(args: AlertRuleParams, toolConfig: GrafanaToolConfig, signal?: AbortSignal) {
+  throwIfAborted(signal);
+  const namespace = await resolveAlertNamespace(args.namespace);
+  const rule = await fetchAlertRule(namespace, args.name);
   return {
-    name: 'get_alert_rule',
-    label: 'Get alert rule',
-    description:
-      'Read one Grafana-managed AlertRule resource by metadata.name from the App Platform API. This is read-only and returns a normalized expression and PromQL-check summary.',
-    parameters: Type.Object({
-      name: Type.String({ description: 'AlertRule metadata.name.' }),
-      namespace: Type.Optional(
-        Type.String({ description: 'Grafana App Platform namespace. Defaults to Grafana config.' })
-      ),
-    }),
-    async execute(_toolCallId, params, signal) {
-      const args = params as AlertRuleParams;
-      throwIfAborted(signal);
-      const namespace = await resolveAlertNamespace(args.namespace);
-      const rule = await fetchAlertRule(namespace, args.name);
-      const result = {
-        namespace,
-        rule: summarizeAlertRule(rule, namespace, toolConfig),
-        rawStatus: compactValue(rule.status, 3),
-        guidance: [
-          'Run prometheusChecks with `grafana-prom query` for current evidence.',
-          'Compare the alert condition with any panel thresholds; panel color and alert state can differ when queries, reducers, windows, no-data handling, or pending periods differ.',
-        ],
-      };
-
-      return textResult(truncateText(JSON.stringify(result, null, 2), MAX_OUTPUT_LENGTH), {
-        namespace,
-        name: args.name,
-        title: result.rule.title,
-        prometheusChecks: result.rule.prometheusChecks.length,
-        summarized: true,
-      });
-    },
+    namespace,
+    rule: summarizeAlertRule(rule, namespace, toolConfig),
+    rawStatus: compactValue(rule.status, 3),
+    guidance: [
+      'Run prometheusChecks with `grafana-prom query` for current evidence.',
+      'Compare the alert condition with any panel thresholds; panel color and alert state can differ when queries, reducers, windows, no-data handling, or pending periods differ.',
+    ],
   };
 }
 

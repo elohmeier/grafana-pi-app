@@ -543,7 +543,7 @@ export class WorkspaceTransaction {
         return content;
       }
       case 'generated': {
-        const content = await this.generatedContent(path);
+        const content = this.generatedOverlay(path) ?? (await this.generatedContent(path));
         if (content === undefined) {
           throw this.missingOrDir(path, 'open');
         }
@@ -597,6 +597,10 @@ export class WorkspaceTransaction {
     const target = this.workspace.classify(path);
     if (target.type === 'generated') {
       const file = this.generated().get(path);
+      const overlay = this.generatedOverlay(path);
+      if (overlay !== undefined) {
+        return utf8ByteLength(overlay);
+      }
       if (file?.content !== undefined) {
         return utf8ByteLength(file.content);
       }
@@ -730,6 +734,10 @@ export class WorkspaceTransaction {
       this.resources.set(target.uid, content);
       return;
     }
+    if (target.type === 'generated' && this.generated().get(path)?.writable) {
+      this.files.set(path, content);
+      return;
+    }
     throw this.readOnly(path, 'write');
   }
 
@@ -800,6 +808,11 @@ export class WorkspaceTransaction {
       }
       // Deleting a mounted resource stages a reviewable tombstone.
       this.resources.set(target.uid, null);
+      return;
+    }
+    if (target.type === 'generated' && this.generated().get(path)?.writable) {
+      // Removing a writable generated file drops its local overlay.
+      this.files.set(path, null);
       return;
     }
     if (target.type !== 'scratch' || path === target.mount) {
@@ -1091,6 +1104,16 @@ export class WorkspaceTransaction {
     return this.generatedFiles;
   }
 
+  /** Drops the cached content of a generated file so the next read loads it again (after a remote change). */
+  forgetGenerated(path: string) {
+    this.generatedCache.delete(normalizeWorkspacePath(path));
+  }
+
+  /** Local overlay of a writable generated file, staged or committed. */
+  private generatedOverlay(path: string) {
+    return this.generated().get(path)?.writable ? this.scratchContent(path) : undefined;
+  }
+
   private async generatedContent(path: string) {
     const file = this.generated().get(path);
     if (!file) {
@@ -1120,7 +1143,7 @@ export class WorkspaceTransaction {
       target.type === 'generated'
         ? ' (generated, read-only mount)'
         : target.type === 'none' || target.type === 'virtual'
-          ? ' (writable locations: /workspace, /session, /tmp, /grafana/dashboards/<uid>/dashboard.json)'
+          ? ' (writable locations: /workspace, /session, /tmp, /grafana/dashboards/<uid>/dashboard.json, /live/dashboard/dashboard.json)'
           : '';
     return new WorkspaceError('EROFS', `read-only file system, ${op} '${path}'${hint}`);
   }

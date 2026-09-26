@@ -198,14 +198,21 @@ function formatBenchmarkReport(
 }
 
 /**
- * Finds the first projection of a stored query artifact that happened after the query ran:
- * jq/read over /artifacts in bash, the read tool on an /artifacts path, or read_artifact.
+ * Finds the first projection of stored query results that happened after the query ran:
+ * jq over /artifacts or over a file the query output was redirected into, or the read
+ * tool on an /artifacts path.
  */
 function findArtifactProjection(events: BenchmarkEvent[], after: number) {
+  const savedOutputs = promQueryCalls(events).flatMap((call) =>
+    [...call.command.matchAll(/(?:>|\btee)\s*([^\s|;&>]+)/g)].map((match) => match[1].split('/').pop() ?? '')
+  );
   const bash = bashCalls(events).find(
     (call) =>
       call.startedAt > after &&
-      /\/artifacts\b/.test(call.command) &&
+      (/\/artifacts\b/.test(call.command) ||
+        savedOutputs.some(
+          (name) => name && !/grafana-prom\s+query/.test(call.command) && call.command.includes(name)
+        )) &&
       /\bjq\b/.test(call.command) &&
       call.exitCode === 0 &&
       !call.isError
@@ -218,9 +225,6 @@ function findArtifactProjection(events: BenchmarkEvent[], after: number) {
       continue;
     }
     const args = getRecord(call.args);
-    if (call.name === 'read_artifact' && (args?.mode === 'jq' || typeof args?.jq === 'string')) {
-      return { kind: 'read_artifact jq', text: call.resultText ?? '' };
-    }
     if (call.name === 'read' && (stringField(args, 'path') ?? '').startsWith('/artifacts/')) {
       return { kind: 'read', text: call.resultText ?? '' };
     }
@@ -246,7 +250,7 @@ function findArtifactJqQualityError(events: BenchmarkEvent[]) {
 
   const projection = findArtifactProjection(events, firstQuery.startedAt);
   if (!projection) {
-    return 'stored query results under /artifacts were never projected with jq or read';
+    return 'stored query results (under /artifacts or a saved output file) were never projected with jq or read';
   }
   if (!/query/.test(projection.text) || !/totalSeries|validationError|series|last/.test(projection.text)) {
     return `${projection.kind} result did not contain projected artifact fields`;

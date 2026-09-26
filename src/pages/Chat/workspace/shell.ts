@@ -3,7 +3,15 @@ import type { ArtifactRuntime } from '../tools/artifacts';
 import { WorkspaceBashFs } from './bashFs';
 import type { WorkspaceApprovalService, WorkspaceBroker } from './broker';
 import { WORKSPACE_COMMANDS } from './commands/commands';
-import { runRegisteredCommand, type WorkspaceCommandContext, type WorkspaceCommandSpec } from './commands/registry';
+import {
+  runRegisteredCommand,
+  type CommandImage,
+  type CommandResult,
+  type WorkspaceCommandContext,
+  type WorkspaceCommandSpec,
+} from './commands/registry';
+import { jqCommand } from './jqCommand';
+import { LIVE_DASHBOARD_PATH } from './liveDashboard';
 import { normalizeWorkspacePath, truncateUtf8 } from './paths';
 import type { WorkspaceFileChange } from './types';
 import { WorkspaceError, type SessionWorkspace, type WorkspaceTransaction } from './workspace';
@@ -12,6 +20,7 @@ export const DEFAULT_SHELL_CWD = '/workspace';
 export const DEFAULT_SHELL_TIMEOUT_MS = 30_000;
 export const MAX_SHELL_TIMEOUT_MS = 120_000;
 export const DEFAULT_SHELL_OUTPUT_BYTES = 32 * 1024;
+export const MAX_SHELL_IMAGES = 4;
 
 /** Built-in just-bash commands exposed to the agent. No network, process, or link commands. */
 export const WORKSPACE_BUILTIN_COMMANDS: CommandName[] = [
@@ -62,7 +71,6 @@ export const WORKSPACE_BUILTIN_COMMANDS: CommandName[] = [
   'false',
   'bash',
   'sh',
-  'jq',
   'yq',
   'base64',
   'diff',
@@ -114,6 +122,8 @@ export type WorkspaceBashResult = {
   changes: WorkspaceFileChange[];
   /** Set when staged changes were discarded (timeout, abort, or failed quota/policy check). */
   discardedChanges?: string;
+  /** Images produced by commands (at most MAX_SHELL_IMAGES). */
+  images?: CommandImage[];
   durationMs: number;
 };
 
@@ -179,19 +189,20 @@ export async function runWorkspaceBash(
       LANG: 'C.UTF-8',
       TMPDIR: '/tmp',
     };
+    const images: CommandImage[] = [];
     const customCommands: CustomCommand[] = [
       ...(deps.commandSpecs ?? WORKSPACE_COMMANDS).map((spec) =>
-        defineCommand(spec.name, async (args, ctx) =>
-          textResult(
-            await runRegisteredCommand(
-              spec,
-              args,
-              commandContext(commandDeps, tx, ctx.cwd, stdinText(ctx.stdin), controller.signal)
-            )
-          )
-        )
+        defineCommand(spec.name, async (args, ctx) => {
+          const result = await runRegisteredCommand(
+            spec,
+            args,
+            commandContext(commandDeps, tx, ctx.cwd, stdinText(ctx.stdin), controller.signal)
+          );
+          images.push(...(result.images ?? []));
+          return textResult(result);
+        })
       ),
-      ...(deps.extraCommands ?? []).map((extra) =>
+      ...[jqCommand, ...(deps.extraCommands ?? [])].map((extra) =>
         defineCommand(extra.name, async (args, ctx) =>
           extra.run(args, {
             ...commandContext(commandDeps, tx, ctx.cwd, stdinText(ctx.stdin), controller.signal),
@@ -281,6 +292,7 @@ export async function runWorkspaceBash(
       timedOut,
       changes,
       discardedChanges,
+      ...(images.length > 0 ? { images: images.slice(-MAX_SHELL_IMAGES) } : {}),
       durationMs: Date.now() - startedAt,
     };
   } catch (error) {
@@ -290,6 +302,33 @@ export async function runWorkspaceBash(
     deadline.clear();
     signal?.removeEventListener('abort', forwardAbort);
   }
+}
+
+export function formatBashResult(result: Omit<WorkspaceBashResult, 'images'> & { images?: CommandImage[] }) {
+  const parts: string[] = [];
+  if (result.stdout) {
+    parts.push(result.stdout.replace(/\n$/, ''));
+    if (result.stdoutTruncated) {
+      parts.push('[stdout truncated; redirect to a file and read it in windows]');
+    }
+  }
+  if (result.stderr) {
+    parts.push(`[stderr]\n${result.stderr.replace(/\n$/, '')}`);
+    if (result.stderrTruncated) {
+      parts.push('[stderr truncated]');
+    }
+  }
+  for (const image of result.images ?? []) {
+    parts.push(`[image] ${image.title} (attached below)`);
+  }
+  if (result.changes.some((change) => change.path === LIVE_DASHBOARD_PATH && change.change !== 'deleted')) {
+    parts.push(`[live] ${LIVE_DASHBOARD_PATH} has staged edits that the browser does not show yet; run \`live apply\``);
+  }
+  if (result.changes.length > 0) {
+    parts.push(`[files] ${result.changes.map((change) => `${change.change} ${change.path}`).join(', ')}`);
+  }
+  parts.push(`[exit ${result.exitCode}]`);
+  return parts.join('\n');
 }
 
 function commandContext(
@@ -311,8 +350,8 @@ function commandContext(
   };
 }
 
-function textResult(result: { stdout: string; stderr: string; exitCode: number }): ExecResult {
-  return { ...result, stdoutKind: 'text' };
+function textResult({ stdout, stderr, exitCode }: CommandResult): ExecResult {
+  return { stdout, stderr, exitCode, stdoutKind: 'text' };
 }
 
 /** Converts just-bash's latin1-shaped byte buffer into UTF-8 text. */

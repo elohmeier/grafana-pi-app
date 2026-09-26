@@ -25,11 +25,6 @@ import {
 const DEFAULT_TIMEOUT_MS = 180_000;
 const DEFAULT_MAX_TOOL_CALLS = 12;
 const OUTPUT_DIR = path.join(process.cwd(), 'test-results', 'dashboard-metric-discovery-benchmark');
-const DASHBOARD_METRIC_CONTEXT_TOOLS = new Set([
-  'search_dashboard_metric_usage',
-  'inspect_dashboard_metric_usage',
-  'get_metric_neighborhood',
-]);
 
 test.describe.configure({ mode: 'serial' });
 test.setTimeout(readPositiveInteger(process.env.BENCH_TEST_TIMEOUT_MS, DEFAULT_TIMEOUT_MS + 90_000));
@@ -325,7 +320,7 @@ function findQualityError(events: BenchmarkEvent[]) {
 
   const contextStartedAt = firstDashboardContextStart(events);
   if (contextStartedAt === undefined) {
-    return 'dashboard metric context was not consulted (no metric-usage tool or dashboard search/inspection)';
+    return 'dashboard metric context was not consulted (no grafana-usage command or dashboard search/inspection)';
   }
   const firstQuery = promQueryCalls(events)[0];
   if (firstQuery && firstQuery.startedAt < contextStartedAt) {
@@ -356,17 +351,15 @@ function findQualityError(events: BenchmarkEvent[]) {
 }
 
 function firstDashboardContextStart(events: BenchmarkEvent[]) {
-  const typed = summarizeToolCalls(events).filter(
-    (call) => DASHBOARD_METRIC_CONTEXT_TOOLS.has(call.name) && call.status === 'completed' && !call.isError
-  );
   const shell = bashCalls(events).filter(
     (call) =>
       call.status === 'completed' &&
       !call.isError &&
-      (/\bgrafana\s+(search|fetch)\b|\bgrafana-dashboard\s+(inspect|data)\b/.test(call.command) ||
+      (/\bgrafana-usage\s+(search|related|dashboard)\b/.test(call.command) ||
+        /\bgrafana\s+(search|fetch)\b|\bgrafana-dashboard\s+(inspect|data)\b/.test(call.command) ||
         (/\b(rg|grep|jq|cat|find)\b/.test(call.command) && call.command.includes('/grafana/')))
   );
-  const starts = [...typed, ...shell].map((call) => call.startedAt);
+  const starts = shell.map((call) => call.startedAt);
   return starts.length > 0 ? Math.min(...starts) : undefined;
 }
 

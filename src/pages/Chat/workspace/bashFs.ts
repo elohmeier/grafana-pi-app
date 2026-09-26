@@ -15,6 +15,8 @@ type DirentEntry = { name: string; isFile: boolean; isDirectory: boolean; isSymb
 const FILE_MODE = 0o644;
 const DIR_MODE = 0o755;
 const EPOCH = new Date(0);
+/** Discards writes and reads as empty, so `cmd > /dev/null 2>&1` works as in any shell. */
+const DEV_NULL = '/dev/null';
 
 /**
  * just-bash filesystem backed by a workspace transaction. Every shell
@@ -26,7 +28,8 @@ export class WorkspaceBashFs implements IFileSystem {
   constructor(private readonly tx: WorkspaceTransaction) {}
 
   async readFile(path: string, _options?: { encoding?: BufferEncoding | null } | BufferEncoding): Promise<string> {
-    return this.tx.readFile(this.normalize(path));
+    const normalized = this.normalize(path);
+    return normalized === DEV_NULL ? '' : this.tx.readFile(normalized);
   }
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
@@ -34,14 +37,23 @@ export class WorkspaceBashFs implements IFileSystem {
   }
 
   async writeFile(path: string, content: FileContent): Promise<void> {
-    await this.tx.writeFile(this.normalize(path), decodeContent(content));
+    const normalized = this.normalize(path);
+    if (normalized !== DEV_NULL) {
+      await this.tx.writeFile(normalized, decodeContent(content));
+    }
   }
 
   async appendFile(path: string, content: FileContent): Promise<void> {
-    await this.tx.appendFile(this.normalize(path), decodeContent(content));
+    const normalized = this.normalize(path);
+    if (normalized !== DEV_NULL) {
+      await this.tx.appendFile(normalized, decodeContent(content));
+    }
   }
 
   async exists(path: string): Promise<boolean> {
+    if (this.normalize(path) === DEV_NULL) {
+      return true;
+    }
     try {
       return await this.tx.exists(this.normalize(path));
     } catch {
@@ -51,6 +63,9 @@ export class WorkspaceBashFs implements IFileSystem {
 
   async stat(path: string): Promise<FsStat> {
     const normalized = this.normalize(path);
+    if (normalized === DEV_NULL) {
+      return { isFile: true, isDirectory: false, isSymbolicLink: false, mode: 0o666, size: 0, mtime: EPOCH };
+    }
     const type = await this.tx.entryType(normalized);
     if (!type) {
       throw new WorkspaceError('ENOENT', `no such file or directory, stat '${normalized}'`);

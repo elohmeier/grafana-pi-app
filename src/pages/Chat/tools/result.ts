@@ -12,17 +12,6 @@ export function textResult<TDetails extends Record<string, unknown>>(
   };
 }
 
-export function isFailedDashboardMutationResult(result: AgentToolResult<unknown>) {
-  const details = result.details;
-  return (
-    Boolean(details) &&
-    typeof details === 'object' &&
-    !Array.isArray(details) &&
-    typeof (details as Record<string, unknown>).command === 'string' &&
-    (details as Record<string, unknown>).success === false
-  );
-}
-
 export function truncateText(value: unknown, maxLength: number): string {
   const text = typeof value === 'string' ? value : String(value);
   return text.length > maxLength ? `${text.slice(0, maxLength)}\n... (truncated)` : text;

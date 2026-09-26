@@ -41,7 +41,6 @@ class is `Agent`, created in `buildAgent` in
 - `transformContext`: the context compactor from
   `src/pages/Chat/compaction.ts`.
 - `beforeToolCall`: a hook that can block tool execution before it happens.
-- `afterToolCall`: a hook that turns large tool results into artifacts.
 
 The model never directly touches Grafana, Prometheus, files, or dashboards. It
 only emits tool-call JSON. The app decides which tools exist, validates their
@@ -67,9 +66,9 @@ The main implementation areas are:
   transactions, the `read`/`write`/`edit`/`bash` tools, shell commands
   (`commands/`), plan/apply (`plans.ts`), the Grafana broker
   (`grafanaBroker.ts`), and CPython-WASM support (`python/`).
-- `src/pages/Chat/tools/`: Typed tools that the shell does not cover (dashboard
-  context, dashboard metric usage, alerts, live dashboard edits, investigation
-  report, navigation, screenshots, artifacts) and shared Prometheus helpers.
+- `src/pages/Chat/tools/`: Domain logic behind the shell commands (dashboard
+  metric usage, alerts, navigation, screenshots,
+  artifacts) and shared Prometheus helpers.
 - `pkg/main.go`: Go backend entry point. Grafana starts this binary as the
   plugin backend process.
 - `pkg/plugin/`: Backend resource routes, LLM proxy, access checks, stateless
@@ -199,7 +198,6 @@ Sessions store:
   dashboard working copies with their fetched base, plans, and the apply
   journal),
 - the compaction state (rolling summary and how many messages it covers),
-- investigation report state,
 - artifacts and the artifact counter.
 
 Storage is per Grafana user through `usePluginUserStorage()`, capped at 50
@@ -274,22 +272,23 @@ returns the same list on every turn:
 
 - `read`, `write`, `edit`, `bash`: the session filesystem tools from
   `src/pages/Chat/workspace/tools.ts`. Discovery, PromQL queries, dashboard
-  editing, validation, Jsonnet, and writes all happen here.
-- `inspect_dashboard_metric_usage`, `search_dashboard_metric_usage`,
-  `get_metric_neighborhood`: dashboard-derived Prometheus metric context.
-- `find_panel_alert_rules`, `get_alert_rule`: read-only alert troubleshooting.
-- The live dashboard tools (variant only, when the mutation API is available).
-- `update_report`: the structured investigation report.
-- `navigate`: safe in-Grafana navigation.
-- `screenshot_dashboard`: dashboard screenshots through the image renderer.
-- `read_artifact`: slices, fields, or `jq` results from stored artifacts.
+  editing, validation, Jsonnet, dashboard-derived metric usage
+  (`grafana-usage`), alert lookups (`grafana-alert`), the investigation report
+  (the Markdown file `/session/report.md`, rendered next to the chat),
+  navigation (`grafana open`), screenshots
+  (`grafana-dashboard screenshot`), and writes all happen here.
+- Nothing else: live dashboard edits are the `live` command over
+  `/live/dashboard/dashboard.json` (see [Live Dashboard Editing](#live-dashboard-editing)).
 
-The typed tools cover capabilities that the shell does not provide yet. Skills
-do not add or remove tools.
+Skills do not add or remove tools.
 
-`afterToolCall` stores bulky tool results as artifacts and returns a bounded
-preview with an artifact reference. Artifacts are listed under `/artifacts`
-and readable with `read`, `jq`, or `read_artifact`.
+Commands reach Grafana only through the typed `WorkspaceBroker` capabilities
+(`workspace/broker.ts`); the domain logic stays in `src/pages/Chat/tools/`. A
+command can return images (`CommandResult.images`); the bash tool attaches
+them to its result after the text, so the model sees a screenshot like any
+other tool image. Commands with bulky output (`grafana-prom query`,
+`grafana-dashboard data`, `grafana-usage`) also register an artifact under
+`/artifacts`, readable with `read` and `jq`.
 
 ## Session Filesystem
 
@@ -297,18 +296,18 @@ and readable with `read`, `jq`, or `read_artifact`.
 virtual filesystem per chat. It keeps canonical resource snapshots separate
 from local overlays and scratch files.
 
-| Path                                                  | Kind                 | Behavior                                                                                                                                                                                           |
-| ----------------------------------------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/grafana/dashboards/<uid>/dashboard.json`            | resource             | Working copy of the dashboard resource (`{apiVersion, kind, metadata, spec}`). Fetched lazily on first access through the dashboard App Platform API as the current user. Writes stage an overlay. |
-| `/grafana/dashboards/<uid>/meta.json`                 | generated, read-only | Provider-owned metadata: revision (`resourceVersion`), folder, API version, and managed-by.                                                                                                        |
-| `/grafana/catalog/dashboards.ndjson`                  | generated, read-only | Paginated, metadata-only catalog of dashboards visible to the user (up to 5000, cached for 5 minutes). Loaded on first read.                                                                       |
-| `/grafana/catalog/coverage.json`                      | generated, read-only | Whether the catalog is complete, and its limit.                                                                                                                                                    |
-| `/live/dashboard/{info,panels,layout,variables}.json` | generated, read-only | Unsaved state of the dashboard open in the browser, read through the mutation API (variant only).                                                                                                  |
-| `/workspace`                                          | scratch, persisted   | Default working directory.                                                                                                                                                                         |
-| `/session`                                            | scratch, persisted   | Durable notes, such as `plan.md` and `findings.md`.                                                                                                                                                |
-| `/tmp`                                                | scratch              | Not persisted; separate quota.                                                                                                                                                                     |
-| `/artifacts`                                          | generated, read-only | `index.ndjson` and one JSON file per artifact.                                                                                                                                                     |
-| `/.agents/skills`                                     | generated, read-only | `SKILL.md` and resources of bundled and custom skills.                                                                                                                                             |
+| Path                                          | Kind                                 | Behavior                                                                                                                                                                                           |
+| --------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/grafana/dashboards/<uid>/dashboard.json`    | resource                             | Working copy of the dashboard resource (`{apiVersion, kind, metadata, spec}`). Fetched lazily on first access through the dashboard App Platform API as the current user. Writes stage an overlay. |
+| `/grafana/dashboards/<uid>/meta.json`         | generated, read-only                 | Provider-owned metadata: revision (`resourceVersion`), folder, API version, and managed-by.                                                                                                        |
+| `/grafana/catalog/dashboards.ndjson`          | generated, read-only                 | Paginated, metadata-only catalog of dashboards visible to the user (up to 5000, cached for 5 minutes). Loaded on first read.                                                                       |
+| `/grafana/catalog/coverage.json`              | generated, read-only                 | Whether the catalog is complete, and its limit.                                                                                                                                                    |
+| `/live/dashboard/dashboard.json`, `info.json` | generated; `dashboard.json` writable | Unsaved state of the dashboard open in the browser as a v2 resource (variant only). Edits stage a non-persisted overlay that `live apply` applies to the browser.                                  |
+| `/workspace`                                  | scratch, persisted                   | Default working directory.                                                                                                                                                                         |
+| `/session`                                    | scratch, persisted                   | Durable notes, such as `plan.md` and `findings.md`.                                                                                                                                                |
+| `/tmp`                                        | scratch                              | Not persisted; separate quota.                                                                                                                                                                     |
+| `/artifacts`                                  | generated, read-only                 | `index.ndjson` and one JSON file per artifact.                                                                                                                                                     |
+| `/.agents/skills`                             | generated, read-only                 | `SKILL.md` and resources of bundled and custom skills.                                                                                                                                             |
 
 Invariants:
 
@@ -329,19 +328,31 @@ Invariants:
 
 ## Bash And Workspace Commands
 
+The user can use the same shell: composer input that starts with `!` runs
+through `runShell` from `createSessionWorkspaceToolkit`, with the same commands,
+transaction, and approvals, but without a model call. The result is appended
+to the transcript as a custom `userShell` agent message (`chatMessages.ts`),
+rendered like a bash result, persisted with the session, and converted into a
+user message for the model, so the agent sees the command and its output on
+the next prompt.
+
 `runWorkspaceBash` (`src/pages/Chat/workspace/shell.ts`) runs the just-bash
 browser bundle (`just-bash/browser`) against the transaction through
 `WorkspaceBashFs`. Shell variables and the working directory reset per call;
 files persist. The default timeout is 30 seconds (maximum 120 seconds), output
 is truncated at 32 KiB per stream, and just-bash execution limits bound
-commands, loops, and `awk`/`sed`/`jq` iterations. The interpreter runs on the
+commands, loops, and `awk`/`sed` iterations. The interpreter runs on the
 main browser thread, so the timeout is a cooperative abort, not a hard kill.
 
-Built-in commands include coreutils, `find`, `rg`, `grep`, `sed`, `awk`, `jq`,
+Built-in commands include coreutils, `find`, `rg`, `grep`, `sed`, `awk`,
 `yq`, `diff`, and `xargs`. There are no network, process, or link commands.
+`jq` is not just-bash's reimplementation but jq 1.8 compiled to WebAssembly
+(`workspace/jqCommand.ts`, backed by `jq-wasm`); input, `-f`, `--slurpfile`,
+and `--rawfile` files are read through the transaction. `WorkspaceBashFs`
+treats `/dev/null` as a sink.
 
 Workspace commands are declared in `workspace/commands/commands.ts` and
-`workspace/commands/jsonnet.ts` through a small registry
+`workspace/commands/jsonnet.ts`, `alerts.ts`, and `metricUsage.ts` through a small registry
 (`commands/registry.ts`) that provides option parsing, `--help`, and a
 declared effect (`local-read`, `local-stage`, `remote-read`, `remote-write`).
 The system prompt lists them from the same registry.
@@ -361,6 +372,11 @@ The system prompt lists them from the same registry.
 | `jsonnet fix FILE`                                 | Structural Grafonnet repair in place. The vendored libraries are read-only files under `/lib/jsonnet/<import path>`.            |
 | `workspace status\|diff\|discard`                  | Staged resource changes, usage, and limits.                                                                                     |
 | `workspace plan\|apply\|plans`                     | Freeze, approve, and apply changes (see [Dashboard Changes](#dashboard-changes-plan-and-apply)).                                |
+| `grafana open dashboard UID\|explore EXPR\|/PATH`  | Open a dashboard, a Prometheus Explore query, or a Grafana-relative path in the browser.                                        |
+| `grafana-dashboard screenshot UID\|PATH`           | Render the saved dashboard or one panel with the image renderer; the image is attached to the bash result.                      |
+| `grafana-dashboard add-panel\|set-panel PATH`      | Typed panel edits on any dashboard file (working copy or live): title, queries by refId, unit, type, position; classic and v2.  |
+| `grafana-usage dashboard\|search\|related`         | Dashboard-derived Prometheus metric usage and related metrics (see [Metrics](#metrics-and-prometheus)).                         |
+| `grafana-alert find\|get`                          | Read-only alert rules linked to a panel, with PromQL checks (see [Alerting Commands](#alerting-commands)).                      |
 
 Commands reach Grafana through the `WorkspaceBroker` in
 `workspace/grafanaBroker.ts`: dashboards through `getBackendSrv()` and the
@@ -374,8 +390,7 @@ specs, and legacy `/api/dashboards/uid` responses. It covers collapsed and
 expanded rows, v2 rows and tabs (as a row path with grid positions), hidden
 targets that expressions depend on, and saved variable values with Prometheus
 escaping. It was ported from the `grafana-inspect` tool in the dotfiles
-repository. The typed tools `find_panel_alert_rules` and the dashboard
-metric-usage tools read panels
+repository. `grafana-alert find` and `grafana-usage` read panels
 through its `walkClassicPanels` view, which maps v2 panels to classic panel
 objects.
 
@@ -468,13 +483,14 @@ service, so queries run as the current Grafana user and respect datasource
 visibility.
 
 Dashboard-derived metric context is in
-`src/pages/Chat/tools/dashboardMetricContext.ts`:
+`src/pages/Chat/tools/dashboardMetricContext.ts`, exposed as `grafana-usage`:
 
-- `inspect_dashboard_metric_usage`: extract Prometheus metric usage, labels,
-  grouping labels, functions, panel locations, and relations from one dashboard.
-- `search_dashboard_metric_usage`: search visible dashboards and build a compact
+- `grafana-usage dashboard UID|PATH`: extract Prometheus metric usage, labels,
+  grouping labels, functions, panel locations, and relations from one
+  dashboard working copy, including unsaved local edits.
+- `grafana-usage search [QUERY]`: search visible dashboards and build a compact
   metric usage corpus.
-- `get_metric_neighborhood`: rank metrics related to seed metrics using
+- `grafana-usage related METRIC...`: rank metrics related to seed metrics using
   dashboard co-usage, shared panels, shared dashboards, metric families, and
   label overlap.
 
@@ -489,14 +505,15 @@ Important safety and cost controls:
 - The system prompt requires checking labels with `grafana-prom labels` or
   `series` before using them, and validating PromQL with concrete selectors.
 
-## Alerting Tools
+## Alerting Commands
 
-Alert tools are in `src/pages/Chat/tools/alerts.ts` and are strictly read-only:
+Alert lookups are in `src/pages/Chat/tools/alerts.ts`, exposed as
+`grafana-alert`, and are strictly read-only:
 
-- `find_panel_alert_rules`: reads AlertRule resources from
+- `grafana-alert find --dashboard UID --panel ID`: reads AlertRule resources from
   `/apis/rules.alerting.grafana.app/v0alpha1` and links them to a panel through
   `spec.panelRef` and the `__dashboardUid__`/`__panelId__` annotations.
-- `get_alert_rule`: reads one AlertRule and returns a normalized expression
+- `grafana-alert get NAME`: reads one AlertRule and returns a normalized expression
   plus `prometheusChecks` PromQL suggestions the model runs with
   `grafana-prom query` to compare alert conditions against panel data.
 
@@ -509,7 +526,7 @@ read-only troubleshooting.
 The app supports three dashboard paths:
 
 1. Read-only inspection: working copies with `read`/`rg`/`jq`,
-   `grafana-dashboard inspect` and `data`, and `screenshot_dashboard`.
+   `grafana-dashboard inspect`, `data`, and `screenshot`.
 2. Durable changes: edit working copies, then plan and apply.
 3. Ephemeral live edits to the currently open dashboard (variant only, see
    [Live Dashboard Editing](#live-dashboard-editing)).
@@ -572,42 +589,35 @@ The Jsonnet backend (`pkg/plugin/jsonnet_eval.go`) is stateless:
 
 ## Live Dashboard Editing
 
-In the `grafana-assistant-app` variant, the assistant can apply typed
-edits to the currently open dashboard through Grafana's restricted
-`dashboardMutationAPI`.
+In the `grafana-assistant-app` variant, the assistant edits the currently open
+dashboard as a file. `workspace/liveDashboard.ts` builds a `LiveDashboardBroker`
+on Grafana's restricted `dashboardMutationAPI`: `GET_SPEC` reads the whole
+unsaved dashboard as one v2 spec, and `APPLY_SPEC` (with `validate: true`)
+replaces it. The client comes from `useRestrictedGrafanaApis()` and is only
+present when Grafana runs with the `restrictedPluginApis` feature toggle,
+allow-lists the plugin ID, and offers both commands (Grafana 13.2+; `APPLY_SPEC`
+also needs the default-on `dashboardNewLayouts` toggle). Without it, nothing is
+mounted and the assistant falls back to working copies and plan/apply.
 
-The tools are in `src/pages/Chat/tools/dashboardMutation.ts`. The client comes
-from `useRestrictedGrafanaApis()` and is only present when Grafana runs with
-the `restrictedPluginApis` feature toggle and allow-lists the plugin ID. When
-the client is missing or reports no available commands, the tool factory
-returns no tools and the assistant falls back to read-only inspection and the
-durable plan/apply path. When the client is present, the session filesystem
-also mounts read-only JSON views of the unsaved dashboard under
-`/live/dashboard/`.
+- `/live/dashboard/dashboard.json` is a v2 resource envelope around the spec.
+  `metadata.resourceVersion` carries a hash of the spec it was read from.
+  `info.json` next to it (`GET_DASHBOARD_INFO`) is read-only.
+- The file is a writable generated file (`GeneratedFile.writable`): writes
+  stage a local overlay, stored like a `/tmp` file. It is committed with the
+  transaction and not persisted with the session. Reads return the overlay until
+  `live apply` or `live discard` drops it.
+- `grafana-dashboard inspect|validate|data|label-filter` work on the file like
+  on any working copy.
+- `live diff` compares the overlay with the current browser state. `live apply`
+  refuses when the open dashboard is a different one or when its current spec
+  hash differs from the file's revision (the user changed it in the browser),
+  unless `--force`. It runs local validation (structure including v2 variables,
+  PromQL syntax, datasource allow-list), then `APPLY_SPEC`. It drops the overlay,
+  so the next read shows the applied state with rekeyed element names.
 
-Read tools: `list_live_dashboard_panels`, `get_live_dashboard_layout`,
-`get_live_dashboard_info`, `list_live_dashboard_variables`,
-`get_live_dashboard_mutation_schema`.
-
-Typed write tools (each registered only when its underlying command is
-available): `rename_live_dashboard_panel`, `update_live_dashboard_panel_query`,
-`update_live_dashboard_panel_queries`,
-`apply_live_dashboard_prometheus_label_filter`, `add_live_dashboard_panel`, `move_or_resize_live_dashboard_panel`,
-`update_live_dashboard_settings`, `add_live_dashboard_variable`,
-`update_live_dashboard_variable`, plus a generic
-`apply_live_dashboard_mutation` escape hatch that rejects read commands.
-
-Safety flow:
-
-- Live write tools execute without an Assistant approval prompt because they
-  change only the currently open unsaved dashboard state. Persisting those
-  changes still goes through Grafana's normal dashboard save flow or the
-  plan/apply path.
-- Layout-affecting edits (`add_live_dashboard_panel`,
-  `move_or_resize_live_dashboard_panel`) attach screenshot verification: after
-  a successful mutation the tool renders the current dashboard through the
-  Grafana image renderer and appends the result (or a `skipped` status) to the
-  tool output.
+Live edits execute without an Assistant approval prompt because they change
+only the unsaved dashboard state. Persisting them still goes through Grafana's
+normal save flow or the plan/apply path.
 
 ## Model Limits And Context Compaction
 
@@ -707,11 +717,13 @@ and commands can do, not from per-turn tool selection:
 
 - The shell has no network, process, or link commands, and Python runs in a
   worker with no network access or JavaScript bridge.
-- The only remote write path is `workspace apply`. `write`, `edit`, bash, and
-  Python can only stage local changes.
+- The only remote write paths are `workspace apply` (saved dashboards, with
+  approval) and `live apply` (the unsaved browser dashboard). `write`, `edit`,
+  bash, and Python can only stage local changes.
 - Alert tools and dashboard metric tools are read-only.
-- Generated mounts (`meta.json`, the catalog, `/live`, `/artifacts`,
-  `/.agents/skills`) are read-only.
+- Generated mounts (`meta.json`, the catalog, `/live/dashboard/info.json`,
+  `/artifacts`, `/.agents/skills`) are read-only; `/live/dashboard/dashboard.json`
+  only stages a local overlay.
 - All Grafana calls run as the current user, so Grafana's own dashboard,
   folder, datasource, and alerting permissions apply.
 
@@ -727,8 +739,8 @@ The approval is bound to the plan digest, and the plan is re-checked for
 staleness after approval. It is still a UI callback in the browser, not a
 server-side approval bound to actor and expiry (see `ROADMAP.md`).
 
-Live dashboard tools do not require approval because they change only the
-unsaved browser state.
+`live apply` does not require approval because it changes only the unsaved
+browser state.
 
 ### Datasource Allow-List
 
@@ -769,7 +781,7 @@ tools are available.
 - Bash output is truncated at 32 KiB per stream; `read` returns windows of at
   most 2000 lines and 48 KiB.
 - Large tool outputs are stored as artifacts with bounded previews.
-- `read_artifact`, `read`, and `jq` let the model inspect slices or fields
+- `read` and `jq` over `/artifacts` let the model inspect slices or fields
   instead of re-reading bulky payloads.
 - Session artifacts are capped by count and byte size.
 - Workspace quotas bound staged files, and context compaction bounds each
@@ -868,7 +880,7 @@ Local Docker stack:
 
 - Grafana 13 by default.
 - Prometheus with synthetic demo metrics.
-- Grafana image renderer for screenshots and live-edit verification.
+- Grafana image renderer for screenshots.
 - Plugin provisioning with a local OpenAI-compatible base URL.
 - Prometheus datasource UID `prometheus`.
 
@@ -897,7 +909,8 @@ Use these patterns when extending the app:
 - Run Grafana calls as the current user through the workspace broker; do not
   add backend paths that write with the plugin service account.
 - Prefer JSON working copies for existing dashboards and Jsonnet rendered into
-  working copies for new ones; keep live edits typed and verified.
+  working copies for new ones; make live edits in `/live/dashboard/dashboard.json`
+  and verify them after `live apply`.
 - Keep custom skills non-secret and small enough to fit into model context.
 - Regenerate bundled skills after changing `.agents/skills`.
 - Use Grafana source or official docs when Grafana API behavior is unclear.

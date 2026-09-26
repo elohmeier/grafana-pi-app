@@ -11,7 +11,6 @@ import type { Model } from '@earendil-works/pi-ai';
 import type { DashboardMutationAPI, DataSourceApi } from '@grafana/data';
 import type { PiAppJsonData, PiAppThinkingLevel } from '../../../types';
 import type { SkillToolGroup } from '../skills/types';
-import type { ArtifactRuntime } from './artifacts';
 
 export type GrafanaToolConfig = Pick<PiAppJsonData, 'allowedPrometheusDatasourceUids'>;
 
@@ -31,39 +30,11 @@ export type GrafanaToolRuntimeToolUpdate = {
   partialResult: AgentToolResult<any>;
 };
 
-export type InvestigationReportStatus = 'active' | 'complete';
-
-export type InvestigationReport = {
-  id: string;
-  title: string;
-  status: InvestigationReportStatus;
-  scope: string[];
-  evidence: string[];
-  hypotheses: string[];
-  ruledOut: string[];
-  nextSteps: string[];
-  remediation: string[];
-  updatedAt: string;
-};
-
-export type InvestigationReportPatch = {
-  op: 'add' | 'replace' | 'remove';
-  path: string;
-  value?: unknown;
-};
-
-export type InvestigationReportRuntime = {
-  getReport: () => InvestigationReport | undefined;
-  setReport: (report: InvestigationReport) => void;
-};
-
 export type CreateGrafanaToolsOptions = GrafanaToolConfig & {
   runtime?: GrafanaToolRuntime;
   dashboardMutation?: DashboardMutationAPI;
   /** Session filesystem tools (read/write/edit/bash). */
   workspaceTools?: AgentTool[];
-  investigationReport?: InvestigationReportRuntime;
-  artifacts?: ArtifactRuntime;
 };
 
 export type ResourceCapableDataSource = DataSourceApi & {
@@ -89,6 +60,8 @@ export type PrometheusQuerySpec = {
   type?: 'instant' | 'range';
   start?: string;
   end?: string;
+  /** Range query resolution such as 30s or 5m. */
+  step?: string;
 };
 
 export type DashboardUidParams = {

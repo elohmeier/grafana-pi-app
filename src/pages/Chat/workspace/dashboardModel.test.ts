@@ -1,4 +1,4 @@
-import { inspectDashboard } from './dashboardModel';
+import { inspectDashboard, validateDashboardDocument } from './dashboardModel';
 
 describe('inspectDashboard', () => {
   it('summarizes v2 resources with variables, row paths, grid positions, and display settings', () => {
@@ -136,5 +136,44 @@ describe('inspectDashboard', () => {
         display: { unit: 'short', thresholds: ['0:green', '80:red'], thresholdsMode: 'absolute' },
       },
     ]);
+  });
+});
+
+describe('validateDashboardDocument v2 variables', () => {
+  const resource = (variables: unknown[]) =>
+    JSON.stringify({
+      apiVersion: 'dashboard.grafana.app/v2',
+      kind: 'Dashboard',
+      metadata: { name: 'live' },
+      spec: { title: 'Live', elements: {}, layout: { kind: 'GridLayout', spec: { items: [] } }, variables },
+    });
+
+  it('rejects classic templating entries and malformed query variables', async () => {
+    const report = await validateDashboardDocument(
+      resource([
+        { type: 'query', name: 'job', query: 'label_values(up, job)' },
+        { kind: 'QueryVariable', spec: { name: 'env', query: 'label_values(up, env)' } },
+      ])
+    );
+    expect(report.ok).toBe(false);
+    expect(report.errors.map((error) => error.path)).toEqual([
+      '.spec.variables[0].kind',
+      '.spec.variables[1].spec.query',
+    ]);
+  });
+
+  it('accepts a v2 query variable', async () => {
+    const report = await validateDashboardDocument(
+      resource([
+        {
+          kind: 'QueryVariable',
+          spec: {
+            name: 'job',
+            query: { kind: 'DataQuery', group: 'prometheus', spec: { query: 'label_values(up, job)' } },
+          },
+        },
+      ])
+    );
+    expect(report.errors).toEqual([]);
   });
 });

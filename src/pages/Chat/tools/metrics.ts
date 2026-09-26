@@ -46,6 +46,16 @@ export async function runPrometheusQuerySummaryOrValidationError(
   }
 }
 
+/** An explicit step such as 30s or 5m, bounded to 11,000 points like Prometheus; otherwise derived from the range. */
+function rangeInterval(step: string | undefined, timeRange: TimeRange) {
+  const stepMs = step ? durationToMs(step) : undefined;
+  if (!stepMs || stepMs <= 0) {
+    return chooseRangeInterval(timeRange);
+  }
+  const rangeMs = timeRange.to.valueOf() - timeRange.from.valueOf();
+  return rangeMs / stepMs > 11_000 ? chooseRangeInterval(timeRange) : step!;
+}
+
 async function runPrometheusQuerySummary(
   ds: ResourceCapableDataSource,
   querySpec: PrometheusQuerySpec,
@@ -54,7 +64,7 @@ async function runPrometheusQuerySummary(
   const queryType = querySpec.type ?? 'instant';
   const timeRange =
     queryType === 'range' ? makeTimeRange(querySpec.start ?? 'now-1h', querySpec.end ?? 'now') : getDefaultTimeRange();
-  const interval = queryType === 'range' ? chooseRangeInterval(timeRange) : '1m';
+  const interval = queryType === 'range' ? rangeInterval(querySpec.step, timeRange) : '1m';
   try {
     const response = await runPrometheusQuery(ds, querySpec.query, queryType, timeRange, interval, signal);
     const frames = response.data ?? [];
@@ -139,7 +149,7 @@ function failedPrometheusQuerySummary(
   const queryType = querySpec.type ?? 'instant';
   const timeRange =
     queryType === 'range' ? makeTimeRange(querySpec.start ?? 'now-1h', querySpec.end ?? 'now') : getDefaultTimeRange();
-  const interval = queryType === 'range' ? chooseRangeInterval(timeRange) : '1m';
+  const interval = queryType === 'range' ? rangeInterval(querySpec.step, timeRange) : '1m';
   const message = error instanceof Error ? error.message : String(error);
 
   return {

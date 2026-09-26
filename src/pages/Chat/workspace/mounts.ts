@@ -1,4 +1,3 @@
-import type { DashboardMutationAPI } from '@grafana/data';
 import type { ArtifactRuntime } from '../tools/artifacts';
 import { SKILLS_ROOT } from '../skills/prompt';
 import type { GrafanaSkill } from '../skills/types';
@@ -117,45 +116,6 @@ export function createCatalogMount(dashboards: DashboardBroker): GeneratedMount 
       '/grafana/catalog/dashboards.ndjson': { load: async (signal) => (await load(signal)).ndjson },
       '/grafana/catalog/coverage.json': { load: async (signal) => (await load(signal)).coverage },
     }),
-  };
-}
-
-/** Read-only view of the unsaved dashboard currently open in the browser. */
-export function createLiveDashboardMount(getApi: () => DashboardMutationAPI | undefined): GeneratedMount {
-  const commands: Record<string, string> = {
-    'info.json': 'GET_DASHBOARD_INFO',
-    'panels.json': 'LIST_PANELS',
-    'layout.json': 'GET_LAYOUT',
-    'variables.json': 'LIST_VARIABLES',
-  };
-  return {
-    root: '/live/dashboard',
-    description: 'Unsaved state of the dashboard open in the browser (read-only).',
-    files: () => {
-      const api = getApi();
-      if (!api) {
-        return {};
-      }
-      let available: string[] = [];
-      try {
-        available = api.getAvailableCommands().map((command) => String(command));
-      } catch {
-        return {};
-      }
-      const files: Record<string, GeneratedFile> = {};
-      for (const [name, command] of Object.entries(commands)) {
-        if (!available.includes(command)) {
-          continue;
-        }
-        files[`/live/dashboard/${name}`] = {
-          load: async () => {
-            const result = await api.execute({ type: command, payload: {} } as never);
-            return `${JSON.stringify({ source: 'live browser dashboard (unsaved state)', command, result }, null, 2)}\n`;
-          },
-        };
-      }
-      return files;
-    },
   };
 }
 

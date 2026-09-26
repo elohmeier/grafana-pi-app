@@ -1,38 +1,11 @@
-import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 import { config } from '@grafana/runtime';
-import { Type } from 'typebox';
+import type { DashboardImage } from '../workspace/broker';
 import { backendFetch } from './client';
 import { throwIfAborted } from './result';
 import type { ScreenshotParams } from './types';
 
-/** Screenshots through Grafana image rendering; dashboard reads and writes go through the session filesystem. */
-export function createDashboardScreenshotTools(): AgentTool[] {
-  return [grafanaScreenshotTool];
-}
-
-const grafanaScreenshotTool: AgentTool = {
-  name: 'screenshot_dashboard',
-  label: 'Render dashboard screenshot',
-  description: 'Render a dashboard or panel image using Grafana image rendering, if configured.',
-  parameters: Type.Object({
-    uid: Type.String({ description: 'Dashboard UID.' }),
-    panelId: Type.Optional(Type.Number({ description: 'Optional panel ID for d-solo rendering.' })),
-    from: Type.Optional(Type.String({ description: 'Render start time. Defaults to now-1h.' })),
-    to: Type.Optional(Type.String({ description: 'Render end time. Defaults to now.' })),
-    width: Type.Optional(Type.Number({ description: 'Image width. Defaults to 1200.' })),
-    height: Type.Optional(Type.Number({ description: 'Image height. Defaults to 700.' })),
-    theme: Type.Optional(Type.Union([Type.Literal('dark'), Type.Literal('light')], { description: 'Render theme.' })),
-  }),
-  async execute(_toolCallId, params, signal) {
-    const args = params as ScreenshotParams;
-    return renderDashboardScreenshot(args, signal);
-  },
-};
-
-export async function renderDashboardScreenshot(
-  args: ScreenshotParams,
-  signal?: AbortSignal
-): Promise<AgentToolResult<Record<string, unknown>>> {
+/** Renders a dashboard or panel through Grafana image rendering (requires the image renderer). */
+export async function renderDashboardScreenshot(args: ScreenshotParams, signal?: AbortSignal): Promise<DashboardImage> {
   throwIfAborted(signal);
   const dashboard = await backendFetch<{ meta: { slug: string } }>(
     `/api/dashboards/uid/${encodeURIComponent(args.uid)}`
@@ -61,18 +34,11 @@ export async function renderDashboardScreenshot(
     throw new Error(`Grafana render failed (${response.status}). Is image rendering configured? ${errorText}`);
   }
 
-  const data = arrayBufferToBase64(await response.arrayBuffer());
   return {
-    content: [
-      { type: 'text', text: `Rendered ${args.uid}${args.panelId ? ` panel ${args.panelId}` : ''}.` },
-      { type: 'image', data, mimeType: response.headers.get('content-type') || 'image/png' },
-    ],
-    details: {
-      uid: args.uid,
-      panelId: args.panelId,
-      width,
-      height,
-    },
+    data: arrayBufferToBase64(await response.arrayBuffer()),
+    mimeType: response.headers.get('content-type') || 'image/png',
+    width,
+    height,
   };
 }
 

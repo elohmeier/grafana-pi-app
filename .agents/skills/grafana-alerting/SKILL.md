@@ -10,15 +10,15 @@ Use this skill when the user asks why an alert is firing, pending, warning, norm
 ## Operating Rules
 
 - Alert support is read-only. Do not create, edit, pause, silence, delete, or persist alerting resources.
-- Use only the App Platform AlertRule tools for Grafana-managed alert rules.
+- Use `grafana-alert` (App Platform AlertRule API) for Grafana-managed alert rules.
 - Compare the alert rule with the panel instead of assuming the panel state and alert state use the same query.
 
 ## Workflow
 
 1. Identify the dashboard UID, panel ID, panel title, datasource UID, and time range from sidebar or user context.
-2. Use `find_panel_alert_rules` to find linked rules by `spec.panelRef.dashboardUID`/`spec.panelRef.panelID` and by Grafana's dashboard link annotations `__dashboardUid__`/`__panelId__`.
-3. If needed, call `get_alert_rule` for the exact rule.
-4. Inspect dashboard context when the panel query, field thresholds, transformations, or time range matter.
+2. Run `grafana-alert find --dashboard UID --panel ID` to find linked rules by `spec.panelRef.dashboardUID`/`spec.panelRef.panelID` and by Grafana's dashboard link annotations `__dashboardUid__`/`__panelId__`. Filter with jq, for example `| jq '.matches[] | {score, reasons, rule: .rule.name, condition: .rule.alertCondition}'`.
+3. If needed, run `grafana-alert get NAME` for the exact rule.
+4. Inspect the panel with `grafana-dashboard inspect /grafana/dashboards/<uid>/dashboard.json --panel ID` when the panel query, field thresholds, transformations, or time range matter.
 5. Run the alert rule `prometheusChecks` with `grafana-prom query` (use `--from` matching the rule's relative time range).
 6. Compare alert evidence against panel evidence:
    - datasource UID

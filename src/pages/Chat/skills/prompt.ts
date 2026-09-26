@@ -39,16 +39,13 @@ function renderDashboardEditingCapability(liveDashboardEditingAvailable: boolean
 
   if (liveDashboardEditingAvailable) {
     return `## Dashboard Editing Capability
-Live dashboard editing is available for the currently loaded dashboard.
-- For on-the-fly panel or dashboard edits, prefer typed live tools such as rename_live_dashboard_panel, update_live_dashboard_panel_query, update_live_dashboard_panel_queries, apply_live_dashboard_prometheus_label_filter, add_live_dashboard_panel, move_or_resize_live_dashboard_panel, update_live_dashboard_settings, add_live_dashboard_variable, and update_live_dashboard_variable.
-- Call list_live_dashboard_panels, get_live_dashboard_layout, get_live_dashboard_info, or list_live_dashboard_variables first when you need exact element names, layout paths, dashboard UID, or variable names.
-- For many query edits with known replacements, use update_live_dashboard_panel_queries instead of repeated single-panel calls.
-- For a dashboard-wide Prometheus variable and label filter, use apply_live_dashboard_prometheus_label_filter; it discovers, prevalidates, applies, and verifies the selected queries internally.
-- For other multi-edit requests, keep an internal checklist of every requested edit and continue until all requested mutations and verification calls are complete.
-- Verify the changed panel, layout, dashboard settings, or variable list after the requested mutation sequence.
-- add_live_dashboard_panel and move_or_resize_live_dashboard_panel automatically attach screenshot verification when Grafana image rendering is configured.
-- Use apply_live_dashboard_mutation only for advanced commands that do not have a typed tool.
-- Use the session filesystem (dashboard.json working copies, the jsonnet command, workspace plan/apply) for durable saved changes, not for small live edits to the current dashboard unless the user asks for that path.`;
+Live dashboard editing is available for the dashboard open in the browser.
+- /live/dashboard/dashboard.json is its unsaved state as a v2 dashboard resource. Edit it like a working copy (edit, jq, python3, \`grafana-dashboard label-filter\`), inspect it with \`grafana-dashboard inspect|data\`, and apply it with \`live apply\`. Live edits need no approval and are not saved; the user saves in Grafana.
+- Change or add panels with \`grafana-dashboard set-panel\` and \`grafana-dashboard add-panel\` (titles, queries, units, types, positions) instead of hand-editing the v2 JSON.
+- For a variable that filters panel queries, go straight to \`grafana-dashboard label-filter /live/dashboard/dashboard.json --label LABEL --variable-query 'label_values(METRIC, LABEL)' [--current VALUE]\` instead of writing the v2 variable by hand.
+- Edits are not visible in the browser until \`live apply\` succeeds; it validates first, so run it once after the last edit instead of a separate validate.
+- Read the file again after \`live apply\`: element names can be rekeyed. If apply reports that the dashboard changed in the browser, run \`live discard\`, read the file again, and redo the edit.
+- Use /grafana/dashboards/<uid>/dashboard.json with workspace plan/apply for durable saved changes, not for live edits to the current dashboard unless the user asks for that path.`;
   }
 
   return `## Dashboard Editing Capability

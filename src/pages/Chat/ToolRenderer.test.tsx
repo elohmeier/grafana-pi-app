@@ -1048,6 +1048,33 @@ describe('ToolRenderer', () => {
     expect(container.textContent).not.toContain('"changes"');
   });
 
+  it('renders images attached to bash results', () => {
+    const { container } = render(
+      <ToolResultMessageBody
+        toolName="bash"
+        content={[
+          { type: 'text', text: '{}\n[image] Screenshot checkout (attached below)\n[exit 0]' },
+          { type: 'image', mimeType: 'image/png', data: 'aW1n' },
+        ]}
+        details={{
+          command: 'grafana-dashboard screenshot checkout',
+          cwd: '/workspace',
+          exitCode: 0,
+          stdout: '{}\n',
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          timedOut: false,
+          changes: [],
+          images: [{ title: 'Screenshot checkout', mimeType: 'image/png' }],
+          durationMs: 5,
+        }}
+      />
+    );
+
+    expect(container.querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,aW1n');
+  });
+
   it('renders timed-out bash results with discarded changes and open stderr', () => {
     const { container } = render(
       <ToolResultMessageBody

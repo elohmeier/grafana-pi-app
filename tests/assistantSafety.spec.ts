@@ -84,17 +84,23 @@ test.describe('assistant safety workflows', () => {
         body:
           llmRequests.length === 1
             ? toolCallResponse(
-                'update_report',
+                'write',
                 {
-                  title,
-                  patch: [
-                    { op: 'add', path: '/scope/-', value: 'vm-web-01 latency spike over the last 6h' },
-                    { op: 'add', path: '/evidence/-', value: 'HTTP 500s are concentrated on /render/report' },
-                    { op: 'add', path: '/hypotheses/-', value: 'CPU saturation may be increasing request latency' },
-                    { op: 'add', path: '/nextSteps/-', value: 'Validate node_load1 and CPU idle for vm-web-01' },
-                  ],
+                  path: '/session/report.md',
+                  content: [
+                    `# ${title}`,
+                    '',
+                    '## Scope',
+                    '- vm-web-01 latency spike over the last 6h',
+                    '## Evidence',
+                    '- HTTP 500s are concentrated on /render/report',
+                    '## Hypotheses',
+                    '- CPU saturation may be increasing request latency',
+                    '## Next checks',
+                    '- Validate node_load1 and CPU idle for vm-web-01',
+                  ].join('\n'),
                 },
-                'call_update_report'
+                'call_report'
               )
             : textResponse('Investigation report updated.'),
       });
@@ -117,7 +123,7 @@ test.describe('assistant safety workflows', () => {
       await expect(report.getByText('Validate node_load1 and CPU idle for vm-web-01')).toBeVisible();
       await expect(page.getByText('Investigation report updated.')).toBeVisible();
 
-      expect(llmRequests[0].context.tools.map((tool: any) => tool.name)).toContain('update_report');
+      expect(llmRequests[0].context.tools.map((tool: any) => tool.name)).not.toContain('update_report');
     } finally {
       await page.unroute(LLM_ROUTE).catch(() => undefined);
     }

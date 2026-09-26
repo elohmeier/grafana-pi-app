@@ -24,4 +24,4 @@ Chat users can pick one of the configured models. The assistant page does not ex
 
 During chat, the assistant works in a session filesystem with `read`, `write`, `edit`, and `bash` tools. It edits dashboard working copies or renders Jsonnet source into them, then `workspace plan` and `workspace apply` write the changes to Grafana only after you approve the exact diff. Writes run as your Grafana user.
 
-For existing dashboards, the assistant can use `inspect_dashboard_metric_usage`, `search_dashboard_metric_usage`, and `get_metric_neighborhood` to extract Prometheus metric usage, labels, grouping labels, functions, and panel co-usage from dashboards before broader metric scans. It reads dashboard structure with `grafana-dashboard inspect` and checks what panels show with `grafana-dashboard data`.
+For existing dashboards, the assistant can use `grafana-usage dashboard|search|related` to extract Prometheus metric usage, labels, grouping labels, functions, and panel co-usage from dashboards before broader metric scans. It reads dashboard structure with `grafana-dashboard inspect` and checks what panels show with `grafana-dashboard data`.

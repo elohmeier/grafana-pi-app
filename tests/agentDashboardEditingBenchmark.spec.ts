@@ -4,10 +4,12 @@ import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { testIds } from '../src/components/testIds';
 import {
+  bashCalls,
   fetchSavedDashboard,
   findBudgetError,
   findFinalAssistantError,
   findFinalAssistantText,
+  isSuccessfulBash,
   workspaceApplyCalls,
 } from './benchmarkOutcomes';
 
@@ -44,11 +46,14 @@ type BenchmarkRun = {
 
 type BenchmarkQuality = {
   maxToolCalls: number;
-  requiredTools?: string[];
-  forbiddenTools?: string[];
+  /** Each pattern must match the command of a successful bash call. */
+  requiredCommands?: RegExp[];
+  /** No bash call may match these patterns. */
+  forbiddenCommands?: RegExp[];
   requiredTranscript?: string[];
   requiredTranscriptAny?: string[];
-  requireFailedTool?: string;
+  /** A bash call matching this pattern must fail (non-zero exit). */
+  requireFailedCommand?: RegExp;
 };
 
 type BenchmarkReportIds = {
@@ -83,7 +88,7 @@ test.describe('dashboard live editing benchmark', () => {
         `This open dashboard has ${panelCount} Prometheus panels (Batch panel 01 through Batch panel ${String(
           panelCount
         ).padStart(2, '0')}).`,
-        'Add a multi-value "Environment" variable named env from label_values(http_requests_total, env) with an All option (all value .*) and prod selected,',
+        'Add a multi-value "Environment" variable named env from label_values(enterprise_http_requests_total, env) with an All option (all value .*) and prod selected,',
         'then filter every panel query by env=~"$env", replacing any existing env matcher.',
         'Change all panels in one dashboard-wide operation instead of editing panels one by one, and keep the change unsaved.',
         'When the change is verified, answer exactly: BATCH_LIVE_EDIT_DONE.',
@@ -101,15 +106,13 @@ test.describe('dashboard live editing benchmark', () => {
         reportIds: { uid },
         quality: {
           maxToolCalls: 8,
-          // The expressions verified below come from the dashboard-wide operation's result.
-          requiredTools: ['apply_live_dashboard_prometheus_label_filter'],
-          forbiddenTools: ['update_live_dashboard_panel_query', 'update_live_dashboard_panel_queries'],
+          requiredCommands: [/\blive\s+apply\b/],
           requiredTranscript: ['BATCH_LIVE_EDIT_DONE'],
         },
       });
       await expectSavedDashboardUnchanged(page, uid, savedVersion);
 
-      const panelExpressions = readPrometheusLabelFilterExpressions(run);
+      const panelExpressions = await readLiveDashboardExpressions(page);
       const missingEnvFilter = panelExpressions.filter((expr) => !expr.includes('env=~"$env"'));
       if (panelExpressions.length < panelCount) {
         throw new Error(`Expected at least ${panelCount} live panel expressions, got ${panelExpressions.length}.`);
@@ -160,6 +163,7 @@ test.describe('dashboard live editing benchmark', () => {
         reportIds: { uid, originalPanelTitle, editedPanelTitle, addedPanelTitle },
         quality: {
           maxToolCalls: 14,
+          requiredCommands: [/\blive\s+apply\b/],
           requiredTranscript: [editedPanelTitle, addedPanelTitle, 'LIVE_EDIT_BENCHMARK_DONE'],
         },
       });
@@ -173,7 +177,7 @@ test.describe('dashboard live editing benchmark', () => {
     }
   });
 
-  test('recovers after a failed typed live edit', async ({ page }, testInfo) => {
+  test('recovers after a failed live edit', async ({ page }, testInfo) => {
     const timeoutMs = readPositiveInteger(process.env.BENCH_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
     const suffix = Date.now().toString(36);
     const uid = `typed-live-recovery-${suffix}`;
@@ -209,8 +213,9 @@ test.describe('dashboard live editing benchmark', () => {
         reportIds: { uid, originalPanelTitle, editedPanelTitle },
         quality: {
           maxToolCalls: 10,
+          requiredCommands: [/\blive\s+apply\b/],
           requiredTranscript: ['LIVE_EDIT_RECOVERY_DONE'],
-          requireFailedTool: 'rename_live_dashboard_panel',
+          requireFailedCommand: /\bpanel-does-not-exist\b/,
         },
       });
 
@@ -244,20 +249,7 @@ test.describe('dashboard live editing benchmark', () => {
       testInfo,
       reportIds: { uid: 'no-active-dashboard' },
       quality: {
-        forbiddenTools: [
-          'list_live_dashboard_panels',
-          'get_live_dashboard_layout',
-          'rename_live_dashboard_panel',
-          'update_live_dashboard_panel_query',
-          'update_live_dashboard_panel_queries',
-          'apply_live_dashboard_prometheus_label_filter',
-          'add_live_dashboard_panel',
-          'move_or_resize_live_dashboard_panel',
-          'update_live_dashboard_settings',
-          'add_live_dashboard_variable',
-          'update_live_dashboard_variable',
-          'apply_live_dashboard_mutation',
-        ],
+        forbiddenCommands: [/\blive\s+apply\b/],
         maxToolCalls: 6,
         requiredTranscriptAny: [
           'I cannot directly rename',
@@ -628,15 +620,19 @@ function findQualityError(run: BenchmarkRun, quality: BenchmarkQuality) {
   const toolNames = observedToolNames(run);
   const assistantTranscript = transcriptAfterPrompt(run);
 
-  for (const requiredTool of quality.requiredTools ?? []) {
-    if (!toolNames.includes(requiredTool)) {
-      return `assistant did not call required tool ${requiredTool}`;
+  const commands = bashCalls(run.events);
+  for (const required of quality.requiredCommands ?? []) {
+    if (!commands.some((call) => isSuccessfulBash(call) && required.test(call.command))) {
+      return `assistant did not successfully run a command matching ${required}`;
     }
   }
 
-  const forbidden = toolNames.find((name) => quality.forbiddenTools?.includes(name ?? ''));
+  const forbidden = commands.find((call) => quality.forbiddenCommands?.some((pattern) => pattern.test(call.command)));
   if (forbidden) {
-    return `assistant used forbidden tool ${forbidden}`;
+    return `assistant ran a forbidden command: ${truncateOneLine(forbidden.command, 200)}`;
+  }
+  if (toolNames.some((name) => !['read', 'write', 'edit', 'bash'].includes(name))) {
+    return `assistant used an unexpected tool: ${toolNames.join(', ')}`;
   }
 
   // Live edits must stay unsaved: no durable write through the session workspace.
@@ -650,12 +646,17 @@ function findQualityError(run: BenchmarkRun, quality: BenchmarkQuality) {
     return budgetError;
   }
 
-  if (quality.requireFailedTool) {
-    const failed = hasFailedTool(run, quality.requireFailedTool);
-    const transcriptFailure =
-      assistantTranscript.toLowerCase().includes('failed') || assistantTranscript.toLowerCase().includes('not found');
-    if (!failed && !transcriptFailure) {
-      return `assistant did not visibly hit the expected failed ${quality.requireFailedTool} call`;
+  if (quality.requireFailedCommand) {
+    // The failure counts when the call exits non-zero or its output shows it (`cmd 2>&1; echo "EXIT=$?"` exits 0).
+    const failed = commands.some(
+      (call) =>
+        quality.requireFailedCommand!.test(call.command) &&
+        (call.isError ||
+          (call.exitCode ?? 0) !== 0 ||
+          /\bEXIT\s*[=:]\s*[1-9]|\bno panel\b|\berror\b/i.test(`${call.stdout}\n${call.stderr}`))
+    );
+    if (!failed) {
+      return `assistant did not visibly hit the expected failed command ${quality.requireFailedCommand}`;
     }
   }
 
@@ -675,12 +676,6 @@ function findQualityError(run: BenchmarkRun, quality: BenchmarkQuality) {
   return undefined;
 }
 
-function hasFailedTool(run: BenchmarkRun, toolName: string) {
-  return run.events.some(
-    (event) => event.type === 'tool_execution_end' && event.toolName === toolName && event.isError
-  );
-}
-
 function observedToolNames(run: BenchmarkRun) {
   const eventToolNames = run.events
     .filter((event) => event.type === 'tool_execution_end')
@@ -689,20 +684,26 @@ function observedToolNames(run: BenchmarkRun) {
   return eventToolNames.length > 0 ? eventToolNames : run.domToolNames;
 }
 
-function readPrometheusLabelFilterExpressions(run: BenchmarkRun) {
-  const result = [...run.events]
-    .reverse()
-    .find(
-      (event) =>
-        event.type === 'tool_execution_end' && event.toolName === 'apply_live_dashboard_prometheus_label_filter'
-    )?.result;
-  if (!isRecord(result) || !isRecord(result.details) || !Array.isArray(result.details.expectedQueries)) {
-    return [];
-  }
-  return result.details.expectedQueries
-    .filter(isRecord)
-    .map((query) => query.expression)
-    .filter((expression): expression is string => typeof expression === 'string');
+/** PromQL expressions of the unsaved dashboard in the browser (Grafana's current scene save model). */
+async function readLiveDashboardExpressions(page: Page) {
+  const model = await page.evaluate(() => {
+    const scene = (window as unknown as { __grafanaSceneContext?: { getSaveModel?: () => unknown } })
+      .__grafanaSceneContext;
+    return scene?.getSaveModel?.();
+  });
+  const expressions: string[] = [];
+  const visit = (value: unknown) => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+    } else if (isRecord(value)) {
+      if (typeof value.expr === 'string') {
+        expressions.push(value.expr);
+      }
+      Object.values(value).forEach(visit);
+    }
+  };
+  visit(model);
+  return expressions;
 }
 
 function transcriptAfterPrompt(run: BenchmarkRun) {

@@ -3,9 +3,12 @@ import { createTwoFilesPatch } from 'diff';
 import { Type } from 'typebox';
 import { textResult, throwIfAborted } from '../tools/result';
 import { contentRevision } from './hash';
+import { LIVE_DASHBOARD_PATH } from './liveDashboard';
 import { normalizeWorkspacePath, truncateUtf8, utf8ByteLength } from './paths';
-import { runWorkspaceBash, type WorkspaceBashResult, type WorkspaceShellDeps } from './shell';
+import { formatBashResult, runWorkspaceBash, type WorkspaceShellDeps } from './shell';
 import { WorkspaceError, type SessionWorkspace } from './workspace';
+
+export { formatBashResult };
 
 export const WORKSPACE_TOOL_NAMES = ['read', 'write', 'edit', 'bash'] as const;
 
@@ -200,31 +203,24 @@ function makeBashTool(deps: WorkspaceShellDeps): AgentTool {
     async execute(_toolCallId, params, signal) {
       throwIfAborted(signal);
       const args = params as BashParams;
-      const result = await runWorkspaceBash(deps, args, signal);
-      return textResult(formatBashResult(result), { ...result });
+      const bash = await runWorkspaceBash(deps, args, signal);
+      const { images, ...result } = bash;
+      const text = textResult(formatBashResult(bash), {
+        ...result,
+        ...(images ? { images: images.map(({ title, mimeType }) => ({ title, mimeType })) } : {}),
+      });
+      if (!images) {
+        return text;
+      }
+      return {
+        ...text,
+        content: [
+          ...text.content,
+          ...images.map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType })),
+        ],
+      };
     },
   };
-}
-
-export function formatBashResult(result: WorkspaceBashResult) {
-  const parts: string[] = [];
-  if (result.stdout) {
-    parts.push(result.stdout.replace(/\n$/, ''));
-    if (result.stdoutTruncated) {
-      parts.push('[stdout truncated; redirect to a file and read it in windows]');
-    }
-  }
-  if (result.stderr) {
-    parts.push(`[stderr]\n${result.stderr.replace(/\n$/, '')}`);
-    if (result.stderrTruncated) {
-      parts.push('[stderr truncated]');
-    }
-  }
-  if (result.changes.length > 0) {
-    parts.push(`[files] ${result.changes.map((change) => `${change.change} ${change.path}`).join(', ')}`);
-  }
-  parts.push(`[exit ${result.exitCode}]`);
-  return parts.join('\n');
 }
 
 export function applyTextEdits(path: string, content: string, edits: EditParams['edits']) {
@@ -321,6 +317,9 @@ function assertRevision(path: string, content: string | undefined, revision: str
 }
 
 function stagingNote(workspace: SessionWorkspace, path: string) {
+  if (path === LIVE_DASHBOARD_PATH) {
+    return '\nStaged locally only. Run `live diff` to review and `live apply` to update the dashboard open in the browser.';
+  }
   const target = workspace.classify(path);
   return target.type === 'resource'
     ? '\nStaged locally only. Validate with `grafana-dashboard validate`, then `workspace plan` and `workspace apply <plan-id>` to request approval.'

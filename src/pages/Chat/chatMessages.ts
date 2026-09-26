@@ -1,5 +1,42 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, Message, ToolCall } from '@earendil-works/pi-ai';
+import { formatBashResult, type WorkspaceBashResult } from './workspace/shell';
+
+/** A shell command the user ran directly in the session filesystem (`!` in the composer). */
+export type UserShellMessage = {
+  role: 'userShell';
+  /** What the model sees: the command and its formatted output. */
+  content: Array<{ type: 'text'; text: string }>;
+  result: Omit<WorkspaceBashResult, 'images'>;
+  timestamp: number;
+};
+
+declare module '@earendil-works/pi-agent-core' {
+  interface CustomAgentMessages {
+    userShell: UserShellMessage;
+  }
+}
+
+/** Composer input that starts with `!` runs in the session shell instead of prompting the model. */
+export function parseUserShellInput(input: string) {
+  const trimmed = input.trim();
+  return trimmed.startsWith('!') ? trimmed.slice(1).trim() : undefined;
+}
+
+export function createUserShellMessage(result: WorkspaceBashResult): UserShellMessage {
+  const { images: _images, ...rest } = result;
+  return {
+    role: 'userShell',
+    content: [
+      {
+        type: 'text',
+        text: `The user ran this command in the session shell (not a request; use the output as context):\n$ ${result.command}\n${formatBashResult(rest)}`,
+      },
+    ],
+    result: rest,
+    timestamp: Date.now(),
+  };
+}
 
 export function convertChatMessagesToLlm(messages: AgentMessage[]): Message[] {
   const pendingToolCallIds = new Set<string>();
@@ -8,6 +45,11 @@ export function convertChatMessagesToLlm(messages: AgentMessage[]): Message[] {
   for (const message of messages) {
     if (message.role === 'user') {
       converted.push(message);
+      continue;
+    }
+
+    if (message.role === 'userShell') {
+      converted.push({ role: 'user', content: message.content, timestamp: message.timestamp });
       continue;
     }
 
@@ -38,7 +80,9 @@ export function convertChatMessagesToLlm(messages: AgentMessage[]): Message[] {
 }
 
 export function hasPersistableMessages(messages: AgentMessage[]) {
-  return messages.some((message) => message.role === 'user' || message.role === 'assistant');
+  return messages.some(
+    (message) => message.role === 'user' || message.role === 'assistant' || message.role === 'userShell'
+  );
 }
 
 function shouldHideAssistantFromLlm(message: AssistantMessage) {

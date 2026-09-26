@@ -5,6 +5,7 @@ import { test, expect } from './fixtures';
 import { testIds } from '../src/components/testIds';
 import {
   alertRulesFingerprint,
+  bashCalls,
   dashboardWriteAttempts,
   findBudgetError,
   findFinalAssistantError,
@@ -13,6 +14,7 @@ import {
   formatLiveEvent,
   formatToolTimeline,
   hasSuccessfulPromEvidence,
+  isSuccessfulBash,
   readPositiveInteger,
   stagedGrafanaPaths,
   summarizeToolCalls,
@@ -23,7 +25,6 @@ import {
 const DEFAULT_TIMEOUT_MS = 240_000;
 const DEFAULT_MAX_TOOL_CALLS = 14;
 const OUTPUT_DIR = path.join(process.cwd(), 'test-results', 'alert-troubleshooting-benchmark');
-const ALERT_LOOKUP_TOOLS = new Set(['find_panel_alert_rules', 'get_alert_rule']);
 
 test.describe.configure({ mode: 'serial' });
 test.setTimeout(readPositiveInteger(process.env.BENCH_TEST_TIMEOUT_MS, DEFAULT_TIMEOUT_MS + 90_000));
@@ -374,11 +375,11 @@ function findQualityError(
     return budgetError;
   }
 
-  const alertLookup = summarizeToolCalls(events).some(
-    (call) => ALERT_LOOKUP_TOOLS.has(call.name) && call.status === 'completed' && !call.isError
+  const alertLookup = bashCalls(events).some(
+    (call) => isSuccessfulBash(call) && /\bgrafana-alert\s+(find|get)\b/.test(call.command)
   );
   if (!alertLookup) {
-    return 'the linked alert rule was never looked up (find_panel_alert_rules or get_alert_rule)';
+    return 'the linked alert rule was never looked up (`grafana-alert find` or `grafana-alert get`)';
   }
   if (!hasSuccessfulPromEvidence(events)) {
     return 'no successful `grafana-prom query` evidence was found';

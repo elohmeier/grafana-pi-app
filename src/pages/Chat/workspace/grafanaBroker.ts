@@ -1,4 +1,11 @@
-import { config, getBackendSrv, isFetchError, type FetchResponse } from '@grafana/runtime';
+import { config, getBackendSrv, isFetchError, locationService, type FetchResponse } from '@grafana/runtime';
+import { findPanelAlertRules, getAlertRule } from '../tools/alerts';
+import {
+  getMetricNeighborhood,
+  inspectDashboardMetricUsage,
+  searchDashboardMetricUsage,
+} from '../tools/dashboardMetricContext';
+import { renderDashboardScreenshot } from '../tools/dashboards';
 import { formatBackendFetchError } from '../tools/client';
 import {
   getDatasourceResource,
@@ -50,6 +57,19 @@ export function createGrafanaWorkspaceBroker(toolConfig: GrafanaToolConfig): Wor
     prometheus: createPrometheusBroker(toolConfig),
     jsonnet: createJsonnetBroker(),
     promql: createPromqlParser(),
+    alerts: {
+      findPanelRules: (params, signal) => findPanelAlertRules(params, toolConfig, signal),
+      getRule: (params, signal) => getAlertRule(params, toolConfig, signal),
+    },
+    metricUsage: {
+      inspect: (params, options) => inspectDashboardMetricUsage(params, toolConfig, options),
+      search: (params, signal) => searchDashboardMetricUsage(params, toolConfig, signal),
+      neighborhood: (params, signal) => getMetricNeighborhood(params, toolConfig, signal),
+    },
+    ui: {
+      navigate: (path) => locationService.push(path),
+      screenshot: renderDashboardScreenshot,
+    },
   };
 }
 

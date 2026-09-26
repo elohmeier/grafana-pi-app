@@ -7,8 +7,15 @@ import {
   type DashboardValidationReport,
 } from '../dashboardModel';
 import { collectDashboardData } from '../dashboardData';
+import { applyDashboardLabelFilter } from '../dashboardLabelFilter';
+import { addPanel, setPanel, type PanelEditReport, type PanelQueryInput } from '../dashboardPanelEdit';
+import { LIVE_DASHBOARD_PATH } from '../liveDashboard';
 import { DashboardWalkError } from '../dashboardPanels';
+import { buildNavigationPath } from '../../tools/navigation';
+import { dashboardUid, grafanaAlertCommand } from './alerts';
 import { jsonnetCommand } from './jsonnet';
+import { liveCommand } from './live';
+import { grafanaUsageCommand } from './metricUsage';
 import { normalizeWorkspacePath, truncateUtf8 } from '../paths';
 import { PlanError, applyWorkspacePlan, createWorkspacePlan } from '../plans';
 import { DASHBOARDS_ROOT, isBaseLoaded } from '../workspace';
@@ -20,6 +27,7 @@ import {
   ok,
   stringOption,
   UsageError,
+  type OptionSpec,
   type ParsedArgs,
   type WorkspaceCommandContext,
   type WorkspaceCommandSpec,
@@ -27,6 +35,20 @@ import {
 
 const MAX_FETCH_PER_CALL = 20;
 const MAX_DIFF_BYTES = 60_000;
+
+const PANEL_CONTENT_OPTIONS: Record<string, OptionSpec> = {
+  title: { type: 'string', description: 'Panel title.' },
+  description: { type: 'string', description: 'Panel description.' },
+  type: { type: 'string', description: 'Visualization: timeseries, stat, gauge, table, bargauge, barchart, ...' },
+  unit: { type: 'string', description: 'Unit such as reqps, s, percentunit, bytes.' },
+  expr: { type: 'string[]', alias: 'e', description: 'PromQL expression (repeatable; refIds A, B, ...).' },
+  legend: { type: 'string[]', description: 'Legend format for the matching --expr (repeatable).' },
+  ds: { type: 'string', description: 'Prometheus datasource UID (default: the one the dashboard uses).' },
+  x: { type: 'number', description: 'Grid column, 0-23.' },
+  y: { type: 'number', description: 'Grid row.' },
+  w: { type: 'number', description: 'Width in grid columns, 1-24 (default 12 for new panels).' },
+  h: { type: 'number', description: 'Height in grid rows (default 8 for new panels).' },
+};
 
 export const grafanaCommand: WorkspaceCommandSpec = {
   name: 'grafana',
@@ -156,6 +178,57 @@ export const grafanaCommand: WorkspaceCommandSpec = {
         );
       },
     },
+    open: {
+      summary:
+        "Open a Grafana page in the user's browser: a dashboard, Prometheus Explore with a query, this chat, or a Grafana-relative path.",
+      usage:
+        'grafana open dashboard UID [--slug S] | explore EXPR [--ds UID] [--from now-1h] [--to now] | chat | /PATH',
+      effect: 'remote-read',
+      options: {
+        slug: { type: 'string', description: 'Dashboard URL slug.' },
+        ds: { type: 'string', description: 'Prometheus datasource UID for explore (default: first allowed).' },
+        from: { type: 'string', description: 'Explore range start.', default: 'now-1h' },
+        to: { type: 'string', description: 'Explore range end.', default: 'now' },
+      },
+      examples: [
+        'grafana open dashboard checkout-overview',
+        "grafana open explore 'sum(rate(http_requests_total[5m])) by (service)' --from now-6h",
+      ],
+      async run(parsed, ctx) {
+        const ui = ctx.broker.ui;
+        if (!ui) {
+          throw new Error('browser navigation is not available in this session');
+        }
+        const [target, ...rest] = parsed.positionals;
+        let path: string;
+        try {
+          if (target === 'dashboard') {
+            path = buildNavigationPath({ type: 'dashboard', uid: rest[0], slug: stringOption(parsed, 'slug') });
+          } else if (target === 'explore') {
+            const datasourceUid = stringOption(parsed, 'ds') ?? ctx.broker.prometheus?.datasources()[0]?.uid;
+            path = buildNavigationPath({
+              type: 'prometheus_explore',
+              datasourceUid,
+              query: rest.join(' '),
+              start: stringOption(parsed, 'from'),
+              end: stringOption(parsed, 'to'),
+            });
+          } else if (target === 'chat') {
+            path = buildNavigationPath({ type: 'app_chat' });
+          } else if (target?.startsWith('/')) {
+            path = buildNavigationPath({ type: 'relative', path: target });
+          } else {
+            throw new UsageError('TARGET must be dashboard, explore, chat, or a path starting with /');
+          }
+        } catch (error) {
+          throw error instanceof UsageError
+            ? error
+            : new UsageError(error instanceof Error ? error.message : String(error));
+        }
+        ui.navigate(path);
+        return json({ schemaVersion: 1, opened: path });
+      },
+    },
   },
 };
 
@@ -230,6 +303,136 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
         }
         const report = fixDashboardLayout(resource);
         if (report.changed) {
+          await ctx.tx.writeFile(path, `${JSON.stringify(resource, null, 2)}\n`);
+        }
+        return json({ schemaVersion: 1, path, ...report });
+      },
+    },
+    'add-panel': {
+      summary:
+        'Add a Prometheus panel to a dashboard file (working copy or /live/dashboard/dashboard.json) with schema-correct JSON for classic or v2. Placed at the bottom, next to/below another panel, or at explicit grid coordinates.',
+      usage:
+        'grafana-dashboard add-panel PATH --title TITLE --expr EXPR [--expr EXPR]... [--legend FMT]... [--type timeseries] [--unit UNIT] [--right-of ID | --below ID | --x X --y Y] [--w 12] [--h 8] [--row TITLE]',
+      effect: 'local-stage',
+      options: {
+        ...PANEL_CONTENT_OPTIONS,
+        'right-of': {
+          type: 'string',
+          description: 'Place to the right of this panel (id or element name), or below it if it does not fit.',
+        },
+        below: { type: 'string', description: 'Place directly below this panel.' },
+        row: { type: 'string', description: 'Row or tab title to add the panel to (default: the last one).' },
+      },
+      examples: [
+        "grafana-dashboard add-panel /live/dashboard/dashboard.json --title 'HTTP 5xx rate' --expr 'sum(rate(http_requests_total{status=~\"5..\"}[$__rate_interval]))' --unit reqps --right-of panel-1",
+      ],
+      async run(parsed, ctx) {
+        return editPanelFile(parsed, ctx, (resource) => {
+          const title = stringOption(parsed, 'title');
+          if (!title) {
+            throw new UsageError('--title is required');
+          }
+          return addPanel(resource, {
+            ...panelFields(parsed),
+            title,
+            queries: panelQueries(parsed),
+            rightOf: stringOption(parsed, 'right-of'),
+            below: stringOption(parsed, 'below'),
+            row: stringOption(parsed, 'row'),
+          });
+        });
+      },
+    },
+    'set-panel': {
+      summary:
+        'Change a panel in a dashboard file: title, description, visualization type, unit, queries by refId (unknown refIds are added), and grid position or size.',
+      usage:
+        'grafana-dashboard set-panel PATH --panel ID [--title T] [--type T] [--unit U] [--expr EXPR [--ref A]]... [--legend FMT]... [--x X] [--y Y] [--w W] [--h H]',
+      effect: 'local-stage',
+      options: {
+        panel: { type: 'string', description: 'Panel id (classic or v2) or v2 element name.' },
+        ...PANEL_CONTENT_OPTIONS,
+        ref: { type: 'string[]', description: 'refId for the matching --expr (default A, B, ... in order).' },
+      },
+      examples: [
+        "grafana-dashboard set-panel /live/dashboard/dashboard.json --panel panel-1 --title 'HTTP request rate' --x 0 --y 0 --w 12",
+      ],
+      async run(parsed, ctx) {
+        return editPanelFile(parsed, ctx, (resource) => {
+          const panel = stringOption(parsed, 'panel');
+          if (!panel) {
+            throw new UsageError('--panel is required');
+          }
+          const queries = listOption(parsed, 'expr').length > 0 ? panelQueries(parsed) : undefined;
+          return setPanel(resource, { panel, ...panelFields(parsed), ...(queries ? { queries } : {}) });
+        });
+      },
+    },
+    'label-filter': {
+      summary:
+        'Add a label matcher bound to a dashboard variable to every selected Prometheus query of a dashboard file, in place (PromQL-aware, works for classic and v2). With --variable-query it also adds or updates the query variable.',
+      usage:
+        'grafana-dashboard label-filter PATH --label LABEL [--var NAME] [--variable-query QUERY] [--panel ID]... [--ref REFID]...',
+      effect: 'local-stage',
+      options: {
+        label: { type: 'string', description: 'Prometheus label to filter on.' },
+        var: { type: 'string', description: 'Dashboard variable providing the value (default: the label name).' },
+        operator: { type: 'string', description: 'Matcher operator: =~, =, !=, or !~.', default: '=~' },
+        existing: {
+          type: 'string',
+          description: 'Existing matcher for the label: replace, keep, or error.',
+          default: 'replace',
+        },
+        panel: { type: 'string[]', description: 'Only this panel: id (classic) or element name (v2); repeatable.' },
+        ref: { type: 'string[]', description: 'Only queries with this refId; repeatable.' },
+        'variable-query': {
+          type: 'string',
+          description: 'Add or update a multi-value Prometheus query variable, e.g. "label_values(up, instance)".',
+        },
+        'variable-ds': { type: 'string', description: 'Datasource UID for the variable (default: from the queries).' },
+        'single-value': { type: 'boolean', description: 'Variable without multi-select and All option.' },
+        current: { type: 'string[]', description: 'Selected variable value (repeatable); default All.' },
+      },
+      examples: [
+        "grafana-dashboard label-filter /live/dashboard/dashboard.json --label instance --variable-query 'label_values(up, instance)'",
+        'grafana-dashboard label-filter /grafana/dashboards/checkout/dashboard.json --label env --panel 3 --panel 4',
+      ],
+      async run(parsed, ctx) {
+        const path = requirePath(parsed, ctx);
+        const label = stringOption(parsed, 'label');
+        if (!label) {
+          throw new UsageError('--label is required');
+        }
+        const operator = stringOption(parsed, 'operator') ?? '=~';
+        if (!['=~', '=', '!=', '!~'].includes(operator)) {
+          throw new UsageError('--operator must be one of =~, =, !=, !~');
+        }
+        const existing = stringOption(parsed, 'existing') ?? 'replace';
+        if (!['replace', 'keep', 'error'].includes(existing)) {
+          throw new UsageError('--existing must be replace, keep, or error');
+        }
+        const content = await ctx.tx.readFile(path);
+        let resource: Record<string, any>;
+        try {
+          resource = JSON.parse(content);
+        } catch (error) {
+          return fail(`${path}: invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        const singleValue = parsed.options['single-value'] === true;
+        const report = applyDashboardLabelFilter(resource, {
+          label,
+          variable: stringOption(parsed, 'var'),
+          operator: operator as '=~',
+          existing: existing as 'replace',
+          panels: listOption(parsed, 'panel'),
+          refIds: listOption(parsed, 'ref'),
+          variableQuery: stringOption(parsed, 'variable-query'),
+          variableDatasourceUid: stringOption(parsed, 'variable-ds'),
+          multi: !singleValue,
+          includeAll: !singleValue,
+          current: listOption(parsed, 'current'),
+        });
+        if (report.changed.length > 0 || report.variable) {
           await ctx.tx.writeFile(path, `${JSON.stringify(resource, null, 2)}\n`);
         }
         return json({ schemaVersion: 1, path, ...report });
@@ -358,6 +561,70 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
         );
       },
     },
+    screenshot: {
+      summary:
+        'Render the saved dashboard (or one panel) with Grafana image rendering and attach the image to this result. Needs the image renderer.',
+      usage:
+        'grafana-dashboard screenshot UID|PATH [--panel ID] [--from now-1h] [--to now] [--width 1200] [--height 700]',
+      effect: 'remote-read',
+      options: {
+        panel: { type: 'number', description: 'Render only this panel id.' },
+        from: { type: 'string', description: 'Range start.', default: 'now-1h' },
+        to: { type: 'string', description: 'Range end.', default: 'now' },
+        width: { type: 'number', description: 'Width in pixels, 300-2400.', default: 1200 },
+        height: { type: 'number', description: 'Height in pixels, 200-2400.', default: 700 },
+        theme: { type: 'string', description: 'dark or light.', default: 'dark' },
+      },
+      examples: ['grafana-dashboard screenshot checkout --panel 4 --from now-6h'],
+      async run(parsed, ctx) {
+        const screenshot = ctx.broker.ui?.screenshot;
+        if (!screenshot) {
+          throw new Error('dashboard rendering is not available in this session');
+        }
+        const arg = parsed.positionals[0];
+        if (!arg) {
+          throw new UsageError('UID or PATH is required');
+        }
+        const uid = dashboardUid(arg);
+        const panelId = typeof parsed.options.panel === 'number' ? parsed.options.panel : undefined;
+        const theme = stringOption(parsed, 'theme') === 'light' ? 'light' : 'dark';
+        const image = await screenshot(
+          {
+            uid,
+            panelId,
+            from: stringOption(parsed, 'from'),
+            to: stringOption(parsed, 'to'),
+            width: numberOption(parsed, 'width', 1200, 300, 2400),
+            height: numberOption(parsed, 'height', 700, 200, 2400),
+            theme,
+          },
+          ctx.signal
+        );
+        const title = `Screenshot ${uid}${panelId !== undefined ? ` panel ${panelId}` : ''}`;
+        const artifact = ctx.artifacts?.register({
+          kind: 'image',
+          title,
+          toolName: 'grafana-dashboard screenshot',
+          data: image.data,
+          mimeType: image.mimeType,
+          preview: { type: 'image', mimeType: image.mimeType, data: image.data },
+          summary: `${image.width}x${image.height} ${image.mimeType}`,
+          bytes: Math.floor((image.data.length * 3) / 4),
+        });
+        return {
+          ...json({
+            schemaVersion: 1,
+            uid,
+            ...(panelId !== undefined ? { panelId } : {}),
+            width: image.width,
+            height: image.height,
+            ...(artifact ? { artifact: `/artifacts/${artifact.id}.json` } : {}),
+            note: 'The image is attached to this result. It shows the saved dashboard, not local working-copy edits.',
+          }),
+          images: [{ data: image.data, mimeType: image.mimeType, title }],
+        };
+      },
+    },
   },
 };
 
@@ -452,18 +719,23 @@ export const grafanaPromCommand: WorkspaceCommandSpec = {
     },
     query: {
       summary:
-        'Run PromQL and print compact min/max/last summaries (never raw frames). Repeat -e to validate several expressions in one call.',
-      usage: 'grafana-prom query EXPR | -e EXPR [-e EXPR]... [--range] [--from now-1h] [--to now] [--ds UID]',
+        'Run PromQL and print {queryType, failed, results: [...]} with compact min/max/last summaries per expression (never raw frames). Repeat -e to validate several expressions in one call.',
+      usage:
+        'grafana-prom query EXPR | -e EXPR [-e EXPR]... [--range] [--from now-1h] [--to now] [--step 1m] [--ds UID]',
       effect: 'remote-read',
       options: {
         expr: { type: 'string[]', alias: 'e', description: 'PromQL expression (repeatable, max 10).' },
         range: { type: 'boolean', description: 'Run a range query instead of an instant query.' },
         from: { type: 'string', description: 'Range start (implies --range).' },
         to: { type: 'string', description: 'Range end (implies --range).' },
+        step: {
+          type: 'string',
+          description: 'Range resolution such as 30s or 5m (implies --range; default: derived from the range).',
+        },
         ds: { type: 'string', description: 'Prometheus datasource UID.' },
       },
       examples: [
-        "grafana-prom query 'sum(rate(http_requests_total[5m])) by (service)' --from now-6h",
+        "grafana-prom query 'sum(rate(http_requests_total[5m])) by (service)' --from now-6h | jq '.results[0].series'",
         "grafana-prom query -e 'up' -e 'sum(rate(http_requests_total[5m]))' --from now-1h | jq '.results[] | {query, totalSeries, validationError}'",
       ],
       async run(parsed, ctx) {
@@ -480,7 +752,8 @@ export const grafanaPromCommand: WorkspaceCommandSpec = {
         }
         const from = stringOption(parsed, 'from');
         const to = stringOption(parsed, 'to');
-        const type = parsed.options.range === true || from || to ? 'range' : 'instant';
+        const step = stringOption(parsed, 'step');
+        const type = parsed.options.range === true || from || to || step ? 'range' : 'instant';
         const summaries = [];
         for (const query of expressions) {
           const summary = await requireProm(ctx).query(
@@ -490,6 +763,7 @@ export const grafanaPromCommand: WorkspaceCommandSpec = {
               type,
               start: from ?? (type === 'range' ? 'now-1h' : undefined),
               end: to ?? (type === 'range' ? 'now' : undefined),
+              step,
             },
             ctx.signal
           );
@@ -503,9 +777,6 @@ export const grafanaPromCommand: WorkspaceCommandSpec = {
           summaries.push(artifact ? { ...summary, artifact: `/artifacts/${artifact.id}.json` } : summary);
         }
         const failed = summaries.filter((summary) => typeof summary.validationError === 'string').length;
-        if (summaries.length === 1) {
-          return json(summaries[0], failed ? 1 : 0);
-        }
         return json({ schemaVersion: 1, queryType: type, failed, results: summaries }, failed ? 1 : 0);
       },
     },
@@ -706,7 +977,65 @@ export const WORKSPACE_COMMANDS: readonly WorkspaceCommandSpec[] = [
   grafanaPromCommand,
   jsonnetCommand,
   workspaceCommand,
+  grafanaUsageCommand,
+  grafanaAlertCommand,
+  liveCommand,
 ];
+
+function panelQueries(parsed: ParsedArgs): PanelQueryInput[] {
+  const exprs = listOption(parsed, 'expr');
+  const legends = listOption(parsed, 'legend');
+  const refs = listOption(parsed, 'ref');
+  return exprs.map((expr, index) => ({
+    refId: refs[index] ?? String.fromCharCode(65 + index),
+    expr,
+    ...(legends[index] !== undefined ? { legendFormat: legends[index] } : {}),
+  }));
+}
+
+function panelFields(parsed: ParsedArgs) {
+  const number = (name: string) =>
+    typeof parsed.options[name] === 'number' ? (parsed.options[name] as number) : undefined;
+  return {
+    title: stringOption(parsed, 'title'),
+    description: stringOption(parsed, 'description'),
+    type: stringOption(parsed, 'type'),
+    unit: stringOption(parsed, 'unit'),
+    datasourceUid: stringOption(parsed, 'ds'),
+    x: number('x'),
+    y: number('y'),
+    w: number('w'),
+    h: number('h'),
+  };
+}
+
+/** Reads a dashboard file, applies one panel edit, and writes it back (local stage only). */
+async function editPanelFile(
+  parsed: ParsedArgs,
+  ctx: WorkspaceCommandContext,
+  edit: (resource: Record<string, any>) => PanelEditReport
+) {
+  const path = requirePath(parsed, ctx);
+  const content = await ctx.tx.readFile(path);
+  let resource: Record<string, any>;
+  try {
+    resource = JSON.parse(content);
+  } catch (error) {
+    return fail(`${path}: invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let report: PanelEditReport;
+  try {
+    report = edit(resource);
+  } catch (error) {
+    if (error instanceof UsageError) {
+      throw error;
+    }
+    return fail(error instanceof Error ? error.message : String(error));
+  }
+  await ctx.tx.writeFile(path, `${JSON.stringify(resource, null, 2)}\n`);
+  const next = path === LIVE_DASHBOARD_PATH ? 'live apply' : 'grafana-dashboard validate, then workspace plan';
+  return json({ schemaVersion: 1, path, ...report, next });
+}
 
 /** Reports a folder annotation that points at a folder the user cannot see (the write would fail). */
 async function checkFolder(content: string, report: DashboardValidationReport, ctx: WorkspaceCommandContext) {

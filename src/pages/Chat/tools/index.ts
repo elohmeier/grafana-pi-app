@@ -1,50 +1,23 @@
 import type { AgentTool } from '@earendil-works/pi-agent-core';
-import { createAlertTools } from './alerts';
-import { createArtifactTools } from './artifacts';
-import { createDashboardMetricContextTools } from './dashboardMetricContext';
-import { createLiveDashboardMutationTools } from './dashboardMutation';
-import { createDashboardScreenshotTools } from './dashboards';
-import { createInvestigationTools } from './investigation';
 import { filterAllowedPrometheusDatasourceSettings } from './metrics';
-import { createNavigationTools } from './navigation';
 import type { CreateGrafanaToolsOptions } from './types';
 
-export { artifactByteSize, artifactizeToolResult, createArtifactTools, readArtifact } from './artifacts';
+export { artifactByteSize } from './artifacts';
 export type { Artifact, ArtifactPreview, ArtifactRef, ArtifactRuntime } from './artifacts';
-export { createAlertTools } from './alerts';
-export { createDashboardMetricContextTools, extractDashboardMetricUsage } from './dashboardMetricContext';
+export { extractDashboardMetricUsage } from './dashboardMetricContext';
 export { getUnavailableDashboardDatasourceUids } from './dashboardPolicy';
-export { createLiveDashboardMutationTools, LIVE_DASHBOARD_WRITE_TOOLS } from './dashboardMutation';
 export { filterAllowedPrometheusDatasourceSettings };
 export { buildNavigationPath } from './navigation';
-export type {
-  CreateGrafanaToolsOptions,
-  GrafanaToolConfig,
-  GrafanaToolRuntime,
-  InvestigationReport,
-  InvestigationReportRuntime,
-  SkillToolGroup,
-} from './types';
+export type { CreateGrafanaToolsOptions, GrafanaToolConfig, GrafanaToolRuntime, SkillToolGroup } from './types';
 
 /**
- * The single assistant's fixed tool surface. The session filesystem tools
- * (read/write/edit/bash, including the grafana, grafana-prom,
- * grafana-dashboard, jsonnet, and workspace commands) cover discovery,
- * querying, and resource changes. The remaining typed tools cover
- * capabilities the shell does not provide yet. The list does not change
- * between turns.
+ * The single assistant's fixed tool surface: read, write, edit, and bash over
+ * the session filesystem. Discovery, queries, alerts, navigation, screenshots,
+ * live dashboard edits, and resource changes are shell commands. The list
+ * does not change between turns.
  */
 export function createGrafanaTools(options: CreateGrafanaToolsOptions = {}): AgentTool[] {
-  return dedupeTools([
-    ...(options.workspaceTools ?? []),
-    ...createDashboardMetricContextTools(options),
-    ...createAlertTools(options),
-    ...createLiveDashboardMutationTools(options.dashboardMutation),
-    ...createInvestigationTools(options.investigationReport),
-    ...createNavigationTools(),
-    ...createDashboardScreenshotTools(),
-    ...createArtifactTools(options.artifacts),
-  ]);
+  return dedupeTools([...(options.workspaceTools ?? [])]);
 }
 
 function dedupeTools(tools: readonly AgentTool[]) {
