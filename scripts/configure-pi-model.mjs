@@ -100,7 +100,7 @@ export function modelConfiguration({ settings, model }, options = {}) {
   const compat = { ...settings.compat, ...model.compat };
   const thinkingFormat =
     options['thinking-format'] ?? (protocol === 'responses' ? 'openai' : (compat.thinkingFormat ?? 'openai'));
-  if (!['openai', 'qwen', 'qwen-chat-template'].includes(thinkingFormat)) {
+  if (!['openai', 'qwen', 'qwen-chat-template', 'deepseek'].includes(thinkingFormat)) {
     throw new Error(
       `Pi thinking format ${thinkingFormat} is unsupported. Supply --thinking-format only if your endpoint supports it.`
     );
@@ -246,7 +246,7 @@ async function main() {
 Reads ~/.pi/agent/models.json (or PI_CODING_AGENT_DIR/models.json).
 Selects one default model, replacing Grafana's model list and shared endpoint/key.
 Options: --models-file PATH, --thinking off|low|medium|high|xhigh,
-         --thinking-format openai|qwen|qwen-chat-template,
+         --thinking-format openai|qwen|qwen-chat-template|deepseek,
          --context-window N, --max-output-tokens N (default: Pi's contextWindow/maxTokens),
          --base-url URL (also disables Docker loopback rewriting), --api-key-env NAME.
 Create a benchmark JSON profile with npm run benchmark:profile -- --provider NAME --model ID.

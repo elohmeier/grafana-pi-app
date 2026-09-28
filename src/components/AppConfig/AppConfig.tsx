@@ -598,6 +598,11 @@ const openAIProtocolOptions: Array<{ label: string; value: PiAppOpenAIProtocol; 
 ];
 
 const thinkingFormatOptions: Array<{ label: string; value: PiAppThinkingFormat; description: string }> = [
+  {
+    label: 'DeepSeek',
+    value: 'deepseek',
+    description: 'Send thinking.type and reasoning_effort, and preserve assistant reasoning.',
+  },
   { label: 'OpenAI', value: 'openai', description: 'Send reasoning_effort with Chat Completions.' },
   { label: 'Qwen', value: 'qwen', description: 'Send enable_thinking with Chat Completions.' },
   {

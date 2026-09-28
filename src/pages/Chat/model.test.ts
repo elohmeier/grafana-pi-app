@@ -10,7 +10,12 @@ describe('getConfiguredModels', () => {
   it('trims, dedupes, and normalizes model entries', () => {
     const models = getConfiguredModels({
       models: [
-        { id: ' gpt-4.1 ', name: ' GPT-4.1 ', thinkingLevel: 'minimal' as any, thinkingFormat: 'deepseek' as any },
+        {
+          id: ' gpt-4.1 ',
+          name: ' GPT-4.1 ',
+          thinkingLevel: 'minimal' as any,
+          thinkingFormat: 'unsupported-format' as any,
+        },
         { id: 'gpt-4.1' },
         { id: '' },
         { id: 'qwen', default: true, protocol: 'responses', thinkingLevel: 'medium' },
@@ -137,5 +142,22 @@ describe('model limits', () => {
     const model = createOpenAICompatibleModel({ openAIBaseUrl: 'http://x/v1' }, configured);
     expect(model.contextWindow).toBe(65536);
     expect(model.maxTokens).toBe(8192);
+  });
+});
+
+test('preserves DeepSeek format and assistant reasoning compatibility', () => {
+  const [configured] = getConfiguredModels({
+    models: [{ id: 'deepseek-v4-flash', thinkingFormat: 'deepseek', thinkingLevel: 'medium' }],
+  });
+  const model = createOpenAICompatibleModel(undefined, configured);
+  expect(model.api).toBe('openai-completions');
+  if (model.api !== 'openai-completions') {
+    throw new Error('Expected chat completions');
+  }
+  expect(model.compat).toMatchObject({
+    thinkingFormat: 'deepseek',
+    supportsReasoningEffort: true,
+    supportsDeveloperRole: false,
+    requiresReasoningContentOnAssistantMessages: true,
   });
 });

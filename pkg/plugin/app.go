@@ -112,6 +112,7 @@ const (
 	thinkingLevelHigh   = "high"
 	thinkingLevelXHigh  = "xhigh"
 
+	thinkingFormatDeepSeek         = "deepseek"
 	thinkingFormatOpenAI           = "openai"
 	thinkingFormatQwen             = "qwen"
 	thinkingFormatQwenChatTemplate = "qwen-chat-template"
@@ -333,7 +334,7 @@ func normalizeThinkingLevel(value string) string {
 
 func normalizeThinkingFormat(value string) string {
 	switch value {
-	case thinkingFormatQwen, thinkingFormatQwenChatTemplate:
+	case thinkingFormatQwen, thinkingFormatQwenChatTemplate, thinkingFormatDeepSeek:
 		return value
 	default:
 		return thinkingFormatOpenAI

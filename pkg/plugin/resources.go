@@ -49,6 +49,7 @@ type proxyTool struct {
 }
 
 type openAIChatRequest struct {
+	Thinking           *openAIThinking           `json:"thinking,omitempty"`
 	Model              string                    `json:"model"`
 	Messages           []openAIMessage           `json:"messages"`
 	Tools              []openAITool              `json:"tools,omitempty"`
@@ -61,16 +62,21 @@ type openAIChatRequest struct {
 	ChatTemplateKwargs *openAIChatTemplateKwargs `json:"chat_template_kwargs,omitempty"`
 }
 
+type openAIThinking struct {
+	Type string `json:"type"`
+}
+
 type openAIChatTemplateKwargs struct {
 	EnableThinking bool `json:"enable_thinking"`
 }
 
 type openAIMessage struct {
-	Role       string           `json:"role"`
-	Content    string           `json:"content"`
-	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string           `json:"tool_call_id,omitempty"`
-	Name       string           `json:"name,omitempty"`
+	ReasoningContent *string          `json:"reasoning_content,omitempty"`
+	Role             string           `json:"role"`
+	Content          string           `json:"content"`
+	ToolCalls        []openAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string           `json:"tool_call_id,omitempty"`
+	Name             string           `json:"name,omitempty"`
 }
 
 type openAITool struct {
@@ -254,6 +260,21 @@ func (a *App) buildOpenAIChatRequest(req proxyStreamRequest, model modelSettings
 	}
 	for _, message := range req.Context.Messages {
 		converted := convertMessage(message)
+		if converted.Role == "assistant" && model.ThinkingFormat == thinkingFormatDeepSeek {
+			var blocks []struct {
+				Type     string `json:"type"`
+				Thinking string `json:"thinking"`
+			}
+			_ = json.Unmarshal(message.Content, &blocks)
+			var reasoning strings.Builder
+			for _, block := range blocks {
+				if block.Type == "thinking" {
+					reasoning.WriteString(block.Thinking)
+				}
+			}
+			content := reasoning.String()
+			converted.ReasoningContent = &content
+		}
 		if converted.Role != "" {
 			messages = append(messages, converted)
 		}
@@ -282,6 +303,12 @@ func (a *App) buildOpenAIChatRequest(req proxyStreamRequest, model modelSettings
 
 func applyThinkingOptions(payload *openAIChatRequest, model modelSettings, requestedLevel string) {
 	level := effectiveThinkingLevel(model, requestedLevel)
+	if model.ThinkingFormat == thinkingFormatDeepSeek {
+		payload.Thinking = &openAIThinking{Type: "disabled"}
+		if level != thinkingLevelOff {
+			payload.Thinking.Type = "enabled"
+		}
+	}
 	if level == thinkingLevelOff {
 		return
 	}

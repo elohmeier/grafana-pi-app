@@ -55,7 +55,7 @@ func TestLoadSettingsNormalizesAccessPolicy(t *testing.T) {
 func TestLoadSettingsNormalizesModels(t *testing.T) {
 	jsonData, _ := json.Marshal(map[string]any{
 		"models": []map[string]any{
-			{"id": " gpt-4.1 ", "name": " GPT-4.1 ", "thinkingLevel": "minimal", "thinkingFormat": "deepseek", "protocol": "legacy"},
+			{"id": " gpt-4.1 ", "name": " GPT-4.1 ", "thinkingLevel": "minimal", "thinkingFormat": "unsupported-format", "protocol": "legacy"},
 			{"id": "gpt-4.1"},
 			{"id": ""},
 			{"id": "qwen", "default": true, "thinkingLevel": "medium", "thinkingFormat": "qwen-chat-template", "protocol": "responses"},

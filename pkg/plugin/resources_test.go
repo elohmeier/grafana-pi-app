@@ -855,3 +855,40 @@ func joinBodies(responses []*backend.CallResourceResponse) string {
 	}
 	return buffer.String()
 }
+
+func TestDeepSeekThinkingAndAssistantReplay(t *testing.T) {
+	app := App{}
+	model := modelSettings{ID: "deepseek-v4-flash", ThinkingLevel: thinkingLevelMedium, ThinkingFormat: thinkingFormatDeepSeek}
+	for _, level := range []string{thinkingLevelOff, thinkingLevelMedium} {
+		payload := app.buildOpenAIChatRequest(proxyStreamRequest{
+			Context: proxyContext{Messages: []proxyMessage{
+				{Role: "assistant", Content: json.RawMessage(`[{"type":"thinking","thinking":"Need a query."},{"type":"toolCall","id":"call_1","name":"query","arguments":{}}]`)},
+				{Role: "toolResult", ToolCallID: "call_1", Content: json.RawMessage(`"ok"`)},
+				{Role: "assistant", Content: json.RawMessage(`"Done"`)},
+			}},
+			Options: proxyOptions{Reasoning: level},
+		}, model)
+		wantType := "enabled"
+		if level == thinkingLevelOff {
+			wantType = "disabled"
+		}
+		if payload.Thinking == nil || payload.Thinking.Type != wantType {
+			t.Fatalf("wrong thinking control: %#v", payload.Thinking)
+		}
+		if level == thinkingLevelMedium && payload.ReasoningEffort != level {
+			t.Fatalf("missing reasoning effort: %#v", payload)
+		}
+		if level == thinkingLevelOff && payload.ReasoningEffort != "" {
+			t.Fatal("disabled thinking must omit reasoning effort")
+		}
+		if payload.Messages[0].ReasoningContent == nil || *payload.Messages[0].ReasoningContent != "Need a query." || len(payload.Messages[0].ToolCalls) != 1 {
+			t.Fatalf("lost reasoning or tool call: %#v", payload.Messages[0])
+		}
+		if payload.Messages[1].ReasoningContent != nil {
+			t.Fatal("tool results must not carry assistant reasoning")
+		}
+		if payload.Messages[2].ReasoningContent == nil || *payload.Messages[2].ReasoningContent != "" {
+			t.Fatal("assistant replay needs an explicit empty reasoning_content")
+		}
+	}
+}

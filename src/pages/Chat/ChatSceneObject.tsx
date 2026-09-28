@@ -248,7 +248,8 @@ export function ChatApp({
   const activeModel = useMemo(() => getActiveModel(jsonData, selectedModelId), [jsonData, selectedModelId]);
   const llmModel = useMemo(() => createOpenAICompatibleModel(jsonData, activeModel), [jsonData, activeModel]);
   const canCustomizeThinking = activeModel.thinkingLevel !== 'off';
-  const usesBinaryThinking = activeModel.protocol !== 'responses' && activeModel.thinkingFormat !== 'openai';
+  const usesBinaryThinking =
+    activeModel.protocol !== 'responses' && ['qwen', 'qwen-chat-template'].includes(activeModel.thinkingFormat);
   const thinkingLevel: PiAppThinkingLevel = !canCustomizeThinking
     ? 'off'
     : usesBinaryThinking

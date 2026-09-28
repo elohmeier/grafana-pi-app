@@ -69,7 +69,7 @@ test('rejects incompatible transports, headers, thinking mappings and secret-bea
     { oauth: 'radius' },
     { baseUrl: 'https://user:secret@example.test/v1' },
     { baseUrl: 'https://example.test/v1?key=secret' },
-    { compat: { thinkingFormat: 'deepseek' } },
+    { compat: { thinkingFormat: 'unsupported-format' } },
   ]) {
     assert.throws(() => modelConfiguration({ settings: { ...settings, ...changes }, model }));
   }
@@ -270,4 +270,22 @@ test('modelConfiguration preserves Pi model limits within half the context windo
   );
   assert.equal(overridden.models[0].contextWindow, 65536);
   assert.equal(overridden.models[0].maxOutputTokens, 8192);
+});
+
+test('imports DeepSeek thinking and model limits from Pi', () => {
+  const result = modelConfiguration({
+    settings: { ...settings, baseUrl: 'http://127.0.0.1:8000/v1', compat: { thinkingFormat: 'deepseek' } },
+    model: {
+      ...model,
+      id: 'deepseek-v4-flash',
+      contextWindow: 100000,
+      maxTokens: 16384,
+      thinkingLevelMap: { off: null, medium: 'medium' },
+    },
+  });
+  assert.equal(result.openAIBaseUrl, 'http://host.docker.internal:8000/v1');
+  assert.equal(result.models[0].thinkingFormat, 'deepseek');
+  assert.equal(result.models[0].thinkingLevel, 'medium');
+  assert.equal(result.models[0].contextWindow, 100000);
+  assert.equal(result.models[0].maxOutputTokens, 16384);
 });

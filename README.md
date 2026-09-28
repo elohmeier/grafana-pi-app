@@ -49,7 +49,7 @@ Configure the app plugin from Grafana's plugin settings page:
 - `models`: List of models chat users can pick from the assistant model selector. Each entry has an `id` (the upstream model ID), an optional display `name`, an optional `default` flag marking the model preselected for new chats, and per-model request settings:
   - `protocol`: Upstream API protocol, one of `auto`, `chat-completions`, or `responses`. `auto` starts with Chat Completions and switches to Responses only when the provider returns the specific `reasoning_effort` compatibility error that directs the caller to `/v1/responses`. Defaults to `auto`.
   - `thinkingLevel`: Optional model reasoning effort, one of `off`, `low`, `medium`, or `high`. Defaults to `off`.
-  - `thinkingFormat`: Chat Completions thinking parameter format, one of `openai`, `qwen`, or `qwen-chat-template`. Responses always uses `reasoning.effort`. Defaults to `openai`.
+  - `thinkingFormat`: Chat Completions thinking parameter format, one of `openai`, `qwen`, `qwen-chat-template`, or `deepseek`. Responses always uses `reasoning.effort`. Defaults to `openai`.
   - `contextWindow`: The endpoint's input-plus-output token capacity. Defaults to `131072`. The assistant compacts conversation history to fit it.
   - `maxOutputTokens`: Output tokens requested per model call. Defaults to `16384` and is capped at half the context window. The backend clamps every request's output budget to this value.
 
@@ -313,6 +313,21 @@ llama-server -hf ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M \
 ```
 
 The template supports `enable_thinking`, so the existing `qwen-chat-template` thinking format applies. The previous default, `unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL` with `--spec-type draft-mtp`, still works; set `PI_DEFAULT_MODEL` to its ID when using it.
+
+For a local DS4 server on port 8000, use these overrides in `.env` before running `mise run dev:reload:variant`:
+
+```dotenv
+OPENAI_API_KEY=dsv4-local
+PI_OPENAI_BASE_URL=http://host.docker.internal:8000/v1
+PI_OPENAI_PROTOCOL=chat-completions
+PI_DEFAULT_MODEL=deepseek-v4-flash
+PI_THINKING_LEVEL=medium
+PI_THINKING_FORMAT=deepseek
+PI_CONTEXT_WINDOW=100000
+PI_MAX_OUTPUT_TOKENS=16384
+```
+
+Start the host server with `./ds4-server --ctx 100000 --kv-disk-dir "$HOME/.cache/ds4/kv" --kv-disk-space-mb 8192`. The `deepseek` format sends explicit thinking controls and replays assistant reasoning during tool calls. For an already-running Grafana instance, `npm run dev:model -- --provider ds4 --model deepseek-v4-flash` imports the corresponding Pi configuration; keep the provisioning overrides above so restarts retain it.
 
 To generate a benchmark profile from a model already configured in Pi, reuse the provider/model IDs from `dev:model -- --list`:
 

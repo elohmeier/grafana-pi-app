@@ -139,7 +139,15 @@ export function createOpenAICompatibleModel(
     compat: {
       supportsUsageInStreaming: true,
       maxTokensField: 'max_tokens',
-      supportsReasoningEffort: configured.thinkingFormat === 'openai',
+      supportsReasoningEffort: ['openai', 'deepseek'].includes(configured.thinkingFormat),
+      ...(configured.thinkingFormat === 'deepseek'
+        ? {
+            supportsStore: false,
+            supportsDeveloperRole: false,
+            supportsStrictMode: false,
+            requiresReasoningContentOnAssistantMessages: true,
+          }
+        : {}),
       thinkingFormat: configured.thinkingFormat,
     },
   };
@@ -156,7 +164,7 @@ export function normalizeThinkingLevel(value?: string): PiAppThinkingLevel {
 }
 
 export function normalizeThinkingFormat(value?: string): PiAppThinkingFormat {
-  return value === 'qwen' || value === 'qwen-chat-template' ? value : DEFAULT_THINKING_FORMAT;
+  return value === 'qwen' || value === 'qwen-chat-template' || value === 'deepseek' ? value : DEFAULT_THINKING_FORMAT;
 }
 
 export function normalizeModelLimits(
