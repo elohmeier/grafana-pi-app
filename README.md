@@ -20,7 +20,7 @@ The [conversational alerting analysis](docs/alerting-chat-openclaw.md) covers Ma
 - Optionally runs as the `grafana-assistant-app` variant with Grafana's extension sidebar integration enabled.
 - In the `grafana-assistant-app` variant, edits the currently open unsaved dashboard as a file: `/live/dashboard/dashboard.json` holds its v2 spec, and `live apply` replaces the browser state through Grafana's restricted dashboard mutation API (`GET_SPEC`/`APPLY_SPEC`).
 - Compacts long conversations to fit each model's configured context window.
-- Stores chat sessions, including the session filesystem, per Grafana user with plugin user storage.
+- Stores chat sessions, including the session filesystem, per Grafana user in PostgreSQL when configured, with legacy plugin user storage retained for existing installations.
 
 The assistant can present captured files with `evidence show PATH --view table|json|text|image`; presentation never reruns a query. `/session/context.json` exposes read-only turn context, while `/session/receipts/` exposes save outcomes. Skill packages can include `scripts/` with shell, jq, and Python programs. Run `npm run test:shell-worker` after a frontend build to check the production worker, jq, filesystem RPC, and hard termination without Grafana.
 
@@ -68,6 +68,12 @@ Compose sets the model limits from `PI_CONTEXT_WINDOW` and `PI_MAX_OUTPUT_TOKENS
 When `OPENAI_API_KEY` is unset, Compose provides a local dummy key because llama-server only needs a bearer token-shaped value.
 
 Dashboard reads and writes run in the browser as the current Grafana user, so they follow that user's dashboard and folder permissions. `plugin.json` still declares dashboard and folder permissions for the plugin service account, but the backend no longer uses them. In local Docker, `docker-compose.yaml` starts Grafana image rendering so screenshots can run.
+
+## PostgreSQL session storage
+
+For HA deployments, the assistant can use Grafana's PostgreSQL database with a
+dedicated schema and role, or a separate database. See
+[session storage configuration and HA tests](docs/session-storage.md).
 
 ## Session filesystem and agent
 

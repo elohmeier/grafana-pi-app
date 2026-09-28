@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/elohmeier/grafana-pi-app/pkg/sessionstore"
+	"github.com/grafana/authlib/authn"
 	"github.com/grafana/authlib/authz"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
@@ -38,6 +40,11 @@ type App struct {
 	authzMu              sync.Mutex
 	authzToken           string
 	authzClient          authz.EnforcementClient
+	sessionMu            sync.Mutex
+	sessionStore         *sessionstore.Store
+	sessionKeys          authn.KeyRetriever
+	sessionKeysURL       string
+	disposed             bool
 }
 
 type appSettings struct {
@@ -49,6 +56,10 @@ type appSettings struct {
 	SystemPromptAddendum            string          `json:"systemPromptAddendum"`
 	OpenAIAPIKey                    string
 	PluginID                        string `json:"pluginId"`
+	SessionSchema                   string `json:"sessionSchema"`
+	SessionNamespace                string `json:"sessionNamespace"`
+	SessionPostgresDSN              string `json:"-"`
+	SessionGrafanaURL               string `json:"sessionGrafanaUrl"`
 }
 
 type modelSettings struct {
@@ -127,11 +138,27 @@ func NewApp(_ context.Context, settings backend.AppInstanceSettings) (instancemg
 // Dispose here tells plugin SDK that plugin wants to clean up resources when a new instance
 // created.
 func (a *App) Dispose() {
-	// cleanup
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	a.disposed = true
+	if a.sessionStore != nil {
+		a.sessionStore.Close()
+	}
 }
 
 // CheckHealth handles health checks sent from Grafana to the plugin.
-func (a *App) CheckHealth(_ context.Context, _ *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
+func (a *App) CheckHealth(ctx context.Context, _ *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
+	if a.settings.SessionPostgresDSN != "" {
+		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		s, err := a.getSessionStore(ctx)
+		if err == nil {
+			err = s.Ping(ctx)
+		}
+		if err != nil {
+			return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: "Session database is unavailable; check its configuration and schema permissions"}, nil
+		}
+	}
 	if a.settings.OpenAIAPIKey == "" {
 		return &backend.CheckHealthResult{
 			Status:  backend.HealthStatusError,
@@ -168,6 +195,22 @@ func loadSettings(settings backend.AppInstanceSettings) appSettings {
 	loaded.AccessMode = normalizeAccessMode(loaded.AccessMode)
 	loaded.AllowedUsers = normalizeAllowedUsers(loaded.AllowedUsers)
 	loaded.OpenAIAPIKey = settings.DecryptedSecureJSONData["openAIAPIKey"]
+	loaded.SessionPostgresDSN = settings.DecryptedSecureJSONData["sessionPostgresDsn"]
+	if value := os.Getenv("PI_SESSION_POSTGRES_DSN"); value != "" {
+		loaded.SessionPostgresDSN = value
+	}
+	if value := os.Getenv("PI_SESSION_SCHEMA"); value != "" {
+		loaded.SessionSchema = value
+	}
+	if loaded.SessionSchema == "" {
+		loaded.SessionSchema = "grafana_pi"
+	}
+	if value := os.Getenv("PI_SESSION_NAMESPACE"); value != "" {
+		loaded.SessionNamespace = value
+	}
+	if loaded.SessionNamespace == "" {
+		loaded.SessionNamespace = "default"
+	}
 	loaded.PluginID = strings.TrimSpace(loaded.PluginID)
 	if envPluginID := strings.TrimSpace(os.Getenv("PI_PLUGIN_ID")); envPluginID != "" {
 		loaded.PluginID = envPluginID

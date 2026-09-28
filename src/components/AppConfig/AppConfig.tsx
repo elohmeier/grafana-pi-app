@@ -270,6 +270,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
       enabled,
       pinned,
       jsonData: {
+        ...jsonData,
         openAIBaseUrl: state.openAIBaseUrl,
         models: serializeModels(state.models),
         isOpenAIAPIKeySet: true,

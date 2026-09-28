@@ -1,0 +1,18 @@
+apiVersion: 1
+apps:
+  - type: grafana-assistant-app
+    org_id: 1
+    disabled: false
+    jsonData:
+      accessMode: all
+      sessionSchema: grafana_pi
+      sessionNamespace: ha-test
+      sessionGrafanaUrl: http://localhost:3000/
+      openAIBaseUrl: http://host.docker.internal:8080/v1
+      isOpenAIAPIKeySet: true
+      models:
+        - id: test-model
+          default: true
+    secureJsonData:
+      sessionPostgresDsn: $__env{PI_SESSION_POSTGRES_DSN}
+      openAIAPIKey: local-test-key

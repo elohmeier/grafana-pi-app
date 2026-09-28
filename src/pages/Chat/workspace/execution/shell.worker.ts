@@ -3,6 +3,12 @@ import type { IFileSystem } from 'just-bash/browser';
 import { normalizeWorkspacePath } from '../paths';
 import { executeShell, type ShellInput } from './engine';
 
+// Lazy command chunks resolve relative to this worker asset, not the document.
+// Grafana's webpack default is a relative plugin path, which would otherwise
+// be appended a second time by importScripts inside the worker.
+declare let __webpack_public_path__: string;
+__webpack_public_path__ = new URL('.', self.location.href).href;
+
 type Reply = { id: number; value?: unknown; error?: { message: string; code?: string }; paths: string[] };
 const pending = new Map<number, { resolve: (value: any) => void; reject: (reason: Error) => void }>();
 let sequence = 0;

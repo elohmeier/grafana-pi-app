@@ -1,0 +1,60 @@
+# Isolated integration fixture; no production or normal development volumes.
+x-grafana: &grafana
+  image: grafana-pi-app-grafana-assistant-variant:latest
+  user: root
+  restart: on-failure
+  healthcheck:
+    test: ['CMD-SHELL', 'curl -fsS http://localhost:3000/api/health >/dev/null']
+    interval: 2s
+    timeout: 5s
+    retries: 30
+    start_period: 10s
+  volumes:
+    - ./dist:/var/lib/grafana/plugins/grafana-assistant-app:ro
+    - ./tests/session-storage/provisioning.yaml:/etc/grafana/provisioning/plugins/app.yaml:ro
+  environment: &environment
+    GF_DATABASE_TYPE: postgres
+    GF_DATABASE_HOST: postgres:5432
+    GF_DATABASE_NAME: grafana
+    GF_DATABASE_USER: grafana
+    GF_DATABASE_PASSWORD: grafana-test
+    GF_DATABASE_SSL_MODE: disable
+    GF_DATABASE_LOCKING_ATTEMPT_TIMEOUT_SEC: '60'
+    GF_SERVER_ROOT_URL: http://localhost:3002/
+    GF_SECURITY_ADMIN_USER: admin
+    GF_SECURITY_ADMIN_PASSWORD: admin
+    GF_AUTH_ANONYMOUS_ENABLED: 'false'
+    GF_AUTH_BASIC_ENABLED: 'true'
+    GF_PLUGINS_PREINSTALL_DISABLED: 'true'
+    GF_AUTH_MANAGED_SERVICE_ACCOUNTS_ENABLED: 'true'
+    GF_FEATURE_TOGGLES_ENABLE: externalServiceAccounts restrictedPluginApis
+    GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: grafana-assistant-app
+    PI_PLUGIN_ID: grafana-assistant-app
+    PI_SESSION_POSTGRES_DSN: postgres://pi_sessions:sessions-test@postgres:5432/grafana?sslmode=disable
+    PI_SESSION_SCHEMA: grafana_pi
+    PI_SESSION_NAMESPACE: ha-test
+    PI_SESSION_GRAFANA_URL: http://grafana-a:3000
+  depends_on:
+    postgres:
+      condition: service_healthy
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres-test
+    ports: ['127.0.0.1:55432:5432']
+    volumes:
+      - ./tests/session-storage/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 2s
+      retries: 30
+  grafana-a:
+    <<: *grafana
+    ports: ['127.0.0.1:3002:3000']
+  grafana-b:
+    <<: *grafana
+    ports: ['127.0.0.1:3003:3000']
+    environment:
+      <<: *environment
+      PI_SESSION_GRAFANA_URL: http://grafana-b:3000

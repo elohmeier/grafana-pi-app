@@ -90,17 +90,13 @@ import { createGrafanaWorkspaceBroker } from './workspace/grafanaBroker';
 import { migrateLegacyInvestigationReport, migrateLegacyJsonnetFiles, REPORT_PATH } from './workspace/migration';
 import { isCompactionState, type CompactionState } from './compaction';
 import { AssistantSession, type SessionSnapshot } from './session/AssistantSession';
+import { SessionRepository, type SessionMetadata } from './session/SessionRepository';
 import { compactArtifacts } from './session/artifactStore';
 import { createBrowserPythonRunner } from './workspace/python/pythonBrowserRunner';
 
 type ChatSceneObjectState = SceneObjectState;
 
-type SessionIndexItem = {
-  id: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
-};
+type SessionIndexItem = SessionMetadata;
 
 type StoredSession = SessionIndexItem & {
   messages: AgentMessage[];
@@ -139,7 +135,6 @@ type ChatLeaveGuardAction = {
 
 type ChatAppVariant = 'page' | 'sidebar';
 
-const SESSION_INDEX_KEY = 'sessions:index';
 const CHAT_SESSION_EXPORT_KIND = 'g42-pi-app.chat-session';
 const LEGACY_CHAT_SESSION_EXPORT_KINDS = ['grafana-pi-app.chat-session'];
 const CHAT_SESSION_EXPORT_SCHEMA_VERSION = 1;
@@ -152,7 +147,6 @@ const CHAT_SESSION_PARAM = 'session';
 const SIDEBAR_SESSION_MENU_LIMIT = 8;
 const ASSISTANT_SIDEBAR_PLUGIN_ID = 'grafana-assistant-app';
 const STREAMING_REVISION_WATCHDOG_MS = 80;
-const sessionKey = (id: string) => `sessions:${id}`;
 const THINKING_LEVEL_OPTIONS: Array<{
   description: string;
   label: string;
@@ -232,6 +226,10 @@ export function ChatApp({
   const canDockToSidebar = !isSidebarVariant && PLUGIN_ID === ASSISTANT_SIDEBAR_PLUGIN_ID;
   const styles = useStyles2(getStyles);
   const storage = usePluginUserStorage();
+  const repositoryRef = useRef<SessionRepository>(undefined);
+  if (repositoryRef.current == null) {
+    repositoryRef.current = new SessionRepository(storage);
+  }
   const { dashboardMutationAPI } = useRestrictedGrafanaApis();
   const liveDashboardEditingAvailable = hasActiveDashboardMutationCommands(dashboardMutationAPI);
   const pluginMeta = usePluginMeta();
@@ -337,6 +335,9 @@ export function ChatApp({
     ? buildToolConfirmation(pendingApproval.applyId, WORKSPACE_APPLY_APPROVAL, pendingApproval)
     : undefined;
   const [sessions, setSessions] = useState<SessionIndexItem[]>([]);
+  const [nextSessionCursor, setNextSessionCursor] = useState<string>();
+  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [saveState, setSaveState] = useState<{ id: string; status: 'saving' | 'saved' | 'error' }>();
   const [currentSessionId, setCurrentSessionId] = useState<string>();
   const [currentTitle, setCurrentTitle] = useState('New chat');
   const [error, setError] = useState<string>();
@@ -345,7 +346,7 @@ export function ChatApp({
   const unsubscribeRef = useRef<() => void>(undefined);
   const titleRef = useRef('New chat');
   const sessionsRef = useRef<SessionIndexItem[]>([]);
-  const storageRef = useRef(storage);
+  const saveSequenceRef = useRef(0);
   const runStatusRef = useRef<ChatRunStatus>(undefined);
   const importSessionInputRef = useRef<HTMLInputElement | null>(null);
   const messagesContainerRef = useRef<HTMLElement | null>(null);
@@ -435,17 +436,14 @@ export function ChatApp({
     [buildWorkspaceToolkit, isSidebarVariant, liveDashboardEditingAvailable, skills]
   );
 
-  const persistIndex = useCallback(
-    async (next: SessionIndexItem[]) => {
-      sessionsRef.current = next;
-      setSessions(next);
-      await storage.setItem(SESSION_INDEX_KEY, JSON.stringify(next));
-    },
-    [storage]
-  );
-
   const saveSession = useCallback(
-    async (id: string, title: string, messages: AgentMessage[], snapshot = sessionRef.current.snapshot(messages)) => {
+    async (
+      id: string,
+      title: string,
+      messages: AgentMessage[],
+      snapshot = sessionRef.current.snapshot(messages),
+      repository = repositoryRef.current!
+    ) => {
       if (!hasPersistableMessages(messages)) {
         return;
       }
@@ -462,12 +460,30 @@ export function ChatApp({
         ...snapshot,
         thinkingLevel: parseStoredThinkingLevel(snapshot.thinkingLevel),
       };
-      const next = [indexItem, ...sessionsRef.current.filter((session) => session.id !== id)].slice(0, 50);
-
-      await storage.setItem(sessionKey(id), JSON.stringify(stored));
-      await persistIndex(next);
+      const saveSequence = ++saveSequenceRef.current;
+      setSaveState({ id, status: 'saving' });
+      try {
+        const saved = await repository.save(stored);
+        const next = [saved, ...sessionsRef.current.filter((session) => session.id !== id)];
+        sessionsRef.current = next;
+        setSessions(next);
+        if (saveSequence === saveSequenceRef.current) {
+          setSaveState({ id, status: 'saved' });
+        }
+        if (sessionIdRef.current === id) {
+          setChatSessionParamInLocation(id);
+        }
+      } catch (err) {
+        if (saveSequence === saveSequenceRef.current) {
+          setSaveState({ id, status: 'error' });
+        }
+        if (saveSequence === saveSequenceRef.current && sessionIdRef.current === id) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+        throw err;
+      }
     },
-    [persistIndex, storage]
+    []
   );
 
   const handleAgentEvent = useCallback(
@@ -512,7 +528,10 @@ export function ChatApp({
       const runtime = buildSkillRuntime('');
       const id = sessionIdRef.current!;
       const title = titleRef.current;
-      sessionRef.current.persist = (snapshot: SessionSnapshot) => saveSession(id, title, snapshot.messages, snapshot);
+      const repository = repositoryRef.current!;
+      sessionRef.current.repository = repository;
+      sessionRef.current.persist = (snapshot: SessionSnapshot) =>
+        saveSession(id, title, snapshot.messages, snapshot, repository);
       const nextAgent = sessionRef.current.createAgent({
         messages,
         systemPrompt: runtime.systemPrompt,
@@ -643,7 +662,9 @@ export function ChatApp({
       setSelectedModelId(run.agent.state.model?.id || undefined);
       setSelectedThinkingLevel(parseStoredThinkingLevel(run.agent.state.thinkingLevel));
       sessionRef.current = run.session;
-      run.session.persist = (snapshot) => saveSession(run.id, run.title, snapshot.messages, snapshot);
+      repositoryRef.current = run.session.repository ?? repositoryRef.current;
+      run.session.persist = (snapshot) =>
+        saveSession(run.id, run.title, snapshot.messages, snapshot, run.session.repository);
       setSession(run.session);
       setRunStatusSnapshot(run.runStatus ?? (run.agent.state.isStreaming ? createInitialRunStatus() : undefined));
       autoScrollRef.current = true;
@@ -659,17 +680,13 @@ export function ChatApp({
       flushRevision();
 
       if (!run.agent.state.isStreaming && hasPersistableMessages(run.agent.state.messages)) {
-        void saveSession(run.id, run.title, run.agent.state.messages);
+        void run.session.flushSaves().catch((err) => setError(String(err)));
       }
 
       return true;
     },
     [flushRevision, handleAgentEvent, saveSession, setRunStatusSnapshot, stopCurrentAgentForSessionChange]
   );
-
-  useEffect(() => {
-    storageRef.current = storage;
-  }, [storage]);
 
   useEffect(() => {
     return () => {
@@ -793,9 +810,13 @@ export function ChatApp({
   const isBusy = isStreaming || userShellRunning;
   const isShellInput = parseUserShellInput(input) !== undefined;
   const hasDraft = Boolean(input.trim());
-  const chatLeaveDescription =
-    isStreaming || pendingToolConfirmation ? ACTIVE_CHAT_LEAVE_MESSAGE : DRAFT_CHAT_LEAVE_MESSAGE;
-  const isChatDirty = isStreaming || Boolean(pendingToolConfirmation) || hasDraft;
+  const hasUnsavedSession = Boolean(saveState && saveState.id === currentSessionId && saveState.status !== 'saved');
+  const chatLeaveDescription = hasUnsavedSession
+    ? 'This chat has changes that have not been confirmed saved. Export the session before leaving to keep a copy.'
+    : isStreaming || pendingToolConfirmation
+      ? ACTIVE_CHAT_LEAVE_MESSAGE
+      : DRAFT_CHAT_LEAVE_MESSAGE;
+  const isChatDirty = isStreaming || Boolean(pendingToolConfirmation) || hasDraft || hasUnsavedSession;
 
   const keepAutoScrollEnabled = useCallback(() => {
     setAutoScrollEnabled(true);
@@ -940,7 +961,9 @@ export function ChatApp({
       keepAutoScrollEnabled();
       try {
         const title = titleRef.current;
-        sessionRef.current.persist = (snapshot) => saveSession(sessionId!, title, snapshot.messages, snapshot);
+        const repository = repositoryRef.current!;
+        sessionRef.current.persist = (snapshot) =>
+          saveSession(sessionId!, title, snapshot.messages, snapshot, repository);
         const runtime = buildSkillRuntime(prompt);
         assistantTelemetry.recordPromptStart({
           prompt,
@@ -958,7 +981,7 @@ export function ChatApp({
         assistantTelemetry.recordTranscriptSnapshot(currentAgent.state.messages);
         emitBenchmarkTranscriptSnapshot(currentAgent.state.messages);
         if (sessionRef.current.agent === currentAgent && sessionIdRef.current === sessionId) {
-          await saveSession(sessionId, titleRef.current, currentAgent.state.messages);
+          await sessionRef.current.flushSaves();
         }
       } catch (err) {
         if (sessionRef.current.agent === currentAgent && sessionIdRef.current === sessionId) {
@@ -1037,13 +1060,12 @@ export function ChatApp({
 
   const loadSession = useCallback(
     async (id: string) => {
-      const raw = await storage.getItem(sessionKey(id));
-      if (!raw) {
+      const stored = await repositoryRef.current!.get<StoredSession>(id);
+      if (!stored) {
         setError('Session not found');
         return false;
       }
 
-      const stored = JSON.parse(raw) as StoredSession;
       stopCurrentAgentForSessionChange();
       dashboardLaunchRef.current = undefined;
       externalLaunchRef.current = undefined;
@@ -1077,7 +1099,6 @@ export function ChatApp({
       setRunStatusSnapshot,
       settleToolConfirmation,
       stopCurrentAgentForSessionChange,
-      storage,
     ]
   );
 
@@ -1145,14 +1166,16 @@ export function ChatApp({
     let mounted = true;
 
     async function loadInitialState() {
-      const raw = await storageRef.current.getItem(SESSION_INDEX_KEY);
-      const parsed = raw ? (JSON.parse(raw) as SessionIndexItem[]) : [];
+      const page = await repositoryRef.current!.list();
+      const parsed = page.items;
       if (!mounted) {
         return;
       }
 
       sessionsRef.current = parsed;
       setSessions(parsed);
+      setNextSessionCursor(page.nextCursor);
+      setSessionsLoading(false);
 
       const location = locationService.getLocation();
       const {
@@ -1226,6 +1249,7 @@ export function ChatApp({
         // Keep the original startup error visible below.
       }
       setError(message);
+      setSessionsLoading(false);
     });
 
     return () => {
@@ -1234,11 +1258,37 @@ export function ChatApp({
     };
   }, [initialConfigPending]);
 
+  const showLoadError = (err: unknown) => {
+    setError(err instanceof Error ? err.message : String(err));
+  };
+
   const deleteSession = async (id: string) => {
-    const next = sessions.filter((session) => session.id !== id);
-    await persistIndex(next);
-    if (id === currentSessionId) {
-      startNewSession();
+    try {
+      await repositoryRef.current!.delete(id, sessionsRef.current.find((item) => item.id === id)?.revision);
+      const next = sessionsRef.current.filter((session) => session.id !== id);
+      sessionsRef.current = next;
+      setSessions(next);
+      if (id === currentSessionId) {
+        startNewSession();
+      }
+    } catch (err) {
+      showLoadError(err);
+    }
+  };
+
+  const loadMoreSessions = async () => {
+    setSessionsLoading(true);
+    try {
+      const page = await repositoryRef.current!.list(nextSessionCursor);
+      const ids = new Set(sessionsRef.current.map((item) => item.id));
+      const next = [...sessionsRef.current, ...page.items.filter((item) => !ids.has(item.id))];
+      sessionsRef.current = next;
+      setSessions(next);
+      setNextSessionCursor(page.nextCursor);
+    } catch (err) {
+      showLoadError(err);
+    } finally {
+      setSessionsLoading(false);
     }
   };
 
@@ -1255,7 +1305,7 @@ export function ChatApp({
       return;
     }
 
-    requestGuardedAction(() => void loadSession(id), {
+    requestGuardedAction(() => void loadSession(id).catch(showLoadError), {
       title: 'Switch sessions?',
       description: chatLeaveDescription,
       confirmLabel: 'Discard and switch',
@@ -1543,7 +1593,9 @@ export function ChatApp({
         header={
           <div className={styles.sidebarSessionMenuHeader}>
             <span className={styles.sidebarSessionMenuTitle}>Sessions</span>
-            <span className={styles.sidebarSessionMenuMeta}>{sessions.length} saved</span>
+            <span className={styles.sidebarSessionMenuMeta}>
+              {sessionsLoading ? 'Loading…' : `${sessions.length}${nextSessionCursor ? '+' : ''} saved`}
+            </span>
           </div>
         }
       >
@@ -1561,14 +1613,14 @@ export function ChatApp({
             onClick={() => requestLoadSession(session.id)}
           />
         ))}
-        {sessions.length === 0 && <Menu.Item disabled label="No saved chats yet" />}
-        {sessions.length > SIDEBAR_SESSION_MENU_LIMIT && (
+        {sessions.length === 0 && !sessionsLoading && <Menu.Item disabled label="No saved chats yet" />}
+        {(sessions.length > SIDEBAR_SESSION_MENU_LIMIT || nextSessionCursor) && (
           <>
             <Menu.Divider />
             <Menu.Item
               disabled={isBusy}
               icon="external-link-alt"
-              label={`Open full page for ${sessions.length - SIDEBAR_SESSION_MENU_LIMIT} more`}
+              label="Open full page for more sessions"
               onClick={requestOpenFullPage}
             />
           </>
@@ -1661,7 +1713,9 @@ export function ChatApp({
           <div className={styles.sidebarHeader}>
             <div>
               <div className={styles.sidebarTitle}>Sessions</div>
-              <div className={styles.sidebarSubtle}>{sessions.length} saved</div>
+              <div className={styles.sidebarSubtle}>
+                {sessionsLoading ? 'Loading…' : `${sessions.length}${nextSessionCursor ? '+' : ''} saved`}
+              </div>
             </div>
             <div className={styles.sidebarActions}>
               <Button
@@ -1690,7 +1744,14 @@ export function ChatApp({
                 <span className={styles.sessionDate}>{formatDate(session.updatedAt)}</span>
               </button>
             ))}
-            {sessions.length === 0 && <div className={styles.sidebarSubtle}>No saved chats yet.</div>}
+            {sessions.length === 0 && !sessionsLoading && (
+              <div className={styles.sidebarSubtle}>No saved chats yet.</div>
+            )}
+            {nextSessionCursor && (
+              <Button disabled={sessionsLoading} variant="secondary" onClick={loadMoreSessions}>
+                Load more sessions
+              </Button>
+            )}
           </div>
         </aside>
       )}
@@ -1700,6 +1761,29 @@ export function ChatApp({
           <div className={styles.titleGroup}>
             <h2 className={styles.title}>{currentTitle}</h2>
             <Badge text={isStreaming ? streamingBadgeText : 'Ready'} color={isStreaming ? 'blue' : 'green'} />
+            {saveState && saveState.id === currentSessionId && (
+              <Badge
+                text={saveState.status === 'saving' ? 'Saving…' : saveState.status === 'saved' ? 'Saved' : 'Not saved'}
+                color={saveState.status === 'error' ? 'red' : 'blue'}
+              />
+            )}
+            {saveState?.status === 'error' && saveState.id === currentSessionId && (
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={isBusy}
+                onClick={() => {
+                  const currentAgent = sessionRef.current.agent;
+                  if (currentAgent && currentSessionId) {
+                    void saveSession(currentSessionId, titleRef.current, currentAgent.state.messages)
+                      .then(() => setError(undefined))
+                      .catch(showLoadError);
+                  }
+                }}
+              >
+                Retry save
+              </Button>
+            )}
           </div>
           <div className={styles.toolbarActions}>
             {isSidebarVariant && (

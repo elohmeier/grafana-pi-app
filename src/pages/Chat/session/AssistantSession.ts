@@ -21,6 +21,7 @@ import type { DashboardBroker } from '../workspace/broker';
 import type { GeneratedMount, PersistedWorkspace } from '../workspace/types';
 import type { Artifact } from '../domain/artifacts';
 import { ArtifactStore } from './artifactStore';
+import type { SessionRepository } from './SessionRepository';
 
 export type SessionSnapshot = {
   messages: AgentMessage[];
@@ -40,6 +41,7 @@ export class AssistantSession {
   compaction: { state?: CompactionState } = {};
   persist?: (snapshot: SessionSnapshot) => Promise<void>;
   persistenceError?: string;
+  repository?: SessionRepository;
   private saves: Promise<void> = Promise.resolve();
   private listeners = new Set<(event: AgentEvent, agent: Agent) => void>();
   private unsubscribeAgent?: () => void;
@@ -77,6 +79,13 @@ export class AssistantSession {
       this.persistenceError = error instanceof Error ? error.message : String(error);
     });
     return save;
+  }
+
+  async flushSaves() {
+    await this.saves;
+    if (this.persistenceError) {
+      throw new Error(this.persistenceError);
+    }
   }
 
   toolkit(options: SessionWorkspaceToolkitOptions) {

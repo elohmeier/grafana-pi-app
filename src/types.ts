@@ -39,6 +39,10 @@ export type PiAppModelConfig = {
 };
 
 export type PiAppJsonData = {
+  /** Optional PostgreSQL session store, configured through provisioning. */
+  sessionSchema?: string;
+  sessionNamespace?: string;
+  sessionGrafanaUrl?: string;
   openAIBaseUrl?: string;
   models?: PiAppModelConfig[];
   isOpenAIAPIKeySet?: boolean;
