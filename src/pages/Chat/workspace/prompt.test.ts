@@ -5,13 +5,13 @@ describe('workspace prompt section', () => {
     const text = renderWorkspacePromptSection({ pythonAvailable: true });
     expect(text).toContain('/grafana/dashboards/<uid>/dashboard.json');
     expect(text).toContain('/.agents/skills/<name>/SKILL.md');
-    expect(text).toContain('`workspace apply <plan-id>`');
+    expect(text).toContain('`workspace apply`');
     for (const command of [
       'grafana search',
       'grafana-prom query',
       'grafana-dashboard validate',
       'jsonnet',
-      'workspace plan',
+      'workspace apply',
     ]) {
       expect(text).toContain(command);
     }

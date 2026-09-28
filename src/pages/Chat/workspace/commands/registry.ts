@@ -1,4 +1,5 @@
-import type { ArtifactRuntime } from '../../tools/artifacts';
+import type { EvidencePresentation } from './evidence';
+import type { ArtifactRuntime } from '../../domain/artifacts';
 import type { WorkspaceApprovalService, WorkspaceBroker } from '../broker';
 import type { SessionWorkspace, WorkspaceTransaction } from '../workspace';
 
@@ -12,6 +13,7 @@ export type CommandResult = {
   exitCode: number;
   /** Images returned to the model with the bash result (for example dashboard screenshots). */
   images?: CommandImage[];
+  presentations?: EvidencePresentation[];
 };
 
 export type WorkspaceCommandContext = {

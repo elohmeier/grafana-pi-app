@@ -1,13 +1,3 @@
-export type SkillToolGroup =
-  | 'metrics'
-  | 'alerts'
-  | 'dashboardMetricContext'
-  | 'dashboardRead'
-  | 'liveDashboardEditing'
-  | 'investigation'
-  | 'skillResources'
-  | 'adHocDashboards';
-
 export type BundledSkillResource = {
   path: string;
   content: string;
@@ -30,14 +20,12 @@ export type GrafanaSkillActivation = {
 };
 
 export type GrafanaSkill = BundledGrafanaSkill & {
-  toolGroups: readonly SkillToolGroup[];
   activation?: GrafanaSkillActivation;
 };
 
 export type GrafanaSkillSelection = {
   activeSkills: GrafanaSkill[];
   activeSkillNames: string[];
-  toolGroups: SkillToolGroup[];
   explicitSkillNames: string[];
 };
 

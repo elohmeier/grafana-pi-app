@@ -115,11 +115,10 @@ export type PersistedWorkspace = {
     base?: { content?: string; meta: WorkspaceResourceMeta };
     overlay?: WorkspaceResourceEntry['overlay'];
   }>;
-  plans: WorkspacePlan[];
   journal: WorkspaceApplyRecord[];
 };
 
-export type WorkspacePlanOperation = {
+export type WorkspaceWriteOperation = {
   path: string;
   kind: WorkspaceResourceKind;
   uid: string;
@@ -137,20 +136,21 @@ export type WorkspacePlanOperation = {
   };
 };
 
-export type WorkspacePlan = {
+export type WorkspaceChanges = {
   id: string;
   createdAt: string;
   digest: string;
-  operations: WorkspacePlanOperation[];
+  operations: WorkspaceWriteOperation[];
   diff: string;
-  /** After-content per operation path, frozen at plan time. */
+  /** After-content per operation path, captured at apply time. */
   documents: Record<string, string | null>;
 };
 
 export type WorkspaceApplyOutcome = 'applied' | 'failed' | 'conflicted' | 'unknown' | 'not attempted';
 
 export type WorkspaceApplyRecord = {
-  planId: string;
+  applyId: string;
+  diff?: string;
   digest: string;
   startedAt: string;
   finishedAt?: string;
@@ -158,7 +158,7 @@ export type WorkspaceApplyRecord = {
   results: Array<{
     path: string;
     uid: string;
-    operation: WorkspacePlanOperation['operation'];
+    operation: WorkspaceWriteOperation['operation'];
     outcome: WorkspaceApplyOutcome;
     resourceVersion?: string;
     url?: string;

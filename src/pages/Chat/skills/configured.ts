@@ -1,5 +1,5 @@
 import type { PiAppCustomSkill, PiAppJsonData } from '../../../types';
-import type { BundledSkillResource, GrafanaSkill, GrafanaSkillActivation, SkillToolGroup } from './types';
+import type { BundledSkillResource, GrafanaSkill, GrafanaSkillActivation } from './types';
 
 export const CONFIGURABLE_SKILL_TOOL_GROUPS = [
   'metrics',
@@ -8,7 +8,7 @@ export const CONFIGURABLE_SKILL_TOOL_GROUPS = [
   'dashboardRead',
   'investigation',
   'skillResources',
-] as const satisfies readonly SkillToolGroup[];
+] as const satisfies readonly string[];
 
 export const CUSTOM_SKILL_CONFIG_LIMITS = {
   maxSkills: 20,
@@ -20,7 +20,7 @@ export const CUSTOM_SKILL_CONFIG_LIMITS = {
 
 export const CUSTOM_SKILL_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 
-const CONFIGURABLE_SKILL_TOOL_GROUP_SET = new Set<SkillToolGroup>(CONFIGURABLE_SKILL_TOOL_GROUPS);
+const CONFIGURABLE_SKILL_TOOL_GROUP_SET = new Set<string>(CONFIGURABLE_SKILL_TOOL_GROUPS);
 /**
  * Retired groups whose tools moved into the always-available session
  * filesystem (read/write/edit/bash with the `jsonnet` command). Accepted so
@@ -31,7 +31,6 @@ export const LEGACY_SKILL_TOOL_GROUPS: ReadonlySet<string> = new Set([
   'jsonnetDashboards',
   'subagents',
 ]);
-const DEFAULT_CONFIGURED_SKILL_TOOL_GROUPS: readonly SkillToolGroup[] = ['skillResources'];
 const CUSTOM_SKILL_FILE_PREFIX = 'plugin-config/customSkills';
 
 type ConfiguredSkillOptions = {
@@ -124,23 +123,8 @@ function normalizeConfiguredSkill(
     filePath: `${CUSTOM_SKILL_FILE_PREFIX}/${name}`,
     disableModelInvocation: customSkill.disableModelInvocation === true,
     resources: normalizeConfiguredSkillResources(customSkill.resources),
-    toolGroups: normalizeConfiguredSkillToolGroups(customSkill.toolGroups),
     activation: normalizeConfiguredSkillActivation(customSkill.activation),
   };
-}
-
-function normalizeConfiguredSkillToolGroups(value: unknown): readonly SkillToolGroup[] {
-  const groups = new Set<SkillToolGroup>(DEFAULT_CONFIGURED_SKILL_TOOL_GROUPS);
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      if (typeof item === 'string' && CONFIGURABLE_SKILL_TOOL_GROUP_SET.has(item as SkillToolGroup)) {
-        groups.add(item as SkillToolGroup);
-      }
-    }
-  }
-
-  return [...groups];
 }
 
 function normalizeConfiguredSkillActivation(value: unknown): GrafanaSkillActivation {
@@ -292,7 +276,7 @@ function validateCustomSkillToolGroups(value: unknown, label: string, errors: st
   for (const item of value) {
     if (
       typeof item !== 'string' ||
-      (!CONFIGURABLE_SKILL_TOOL_GROUP_SET.has(item as SkillToolGroup) && !LEGACY_SKILL_TOOL_GROUPS.has(item))
+      (!CONFIGURABLE_SKILL_TOOL_GROUP_SET.has(item) && !LEGACY_SKILL_TOOL_GROUPS.has(item))
     ) {
       errors.push(`${label}.toolGroups contains unsupported group ${JSON.stringify(item)}.`);
     }

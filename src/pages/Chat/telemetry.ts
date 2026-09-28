@@ -1,6 +1,6 @@
 import type { AgentEvent, AgentMessage } from '@earendil-works/pi-agent-core';
 import type { GrafanaSkill } from './skills';
-import { pluginResourceFetch } from './tools/client';
+import { pluginResourceFetch } from './domain/client';
 
 const TELEMETRY_BATCH_SIZE = 50;
 const TELEMETRY_FLUSH_MS = 1000;

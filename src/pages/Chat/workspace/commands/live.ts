@@ -103,6 +103,8 @@ export const liveCommand: WorkspaceCommandSpec = {
             'live apply: validation failed; nothing was applied\n'
           );
         }
+        // An explicit remote mutation is a commit boundary. Read commands never commit.
+        ctx.tx.checkpoint();
         const result = await live.apply(document.spec, ctx.signal);
         await ctx.tx.rm(LIVE_DASHBOARD_PATH, { force: true });
         ctx.tx.forgetGenerated(LIVE_DASHBOARD_PATH);
@@ -132,8 +134,7 @@ export const liveCommand: WorkspaceCommandSpec = {
 
 /** The staged overlay of the live file (from this invocation or committed earlier), if any. */
 function stagedDocument(ctx: WorkspaceCommandContext) {
-  ctx.tx.checkpoint();
-  const content = ctx.workspace.getScratchFile(LIVE_DASHBOARD_PATH)?.content;
+  const content = ctx.tx.stagedFile(LIVE_DASHBOARD_PATH);
   if (content === undefined) {
     return undefined;
   }

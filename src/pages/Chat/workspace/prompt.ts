@@ -9,17 +9,19 @@ You have four general tools over one persistent per-chat filesystem: read, write
 Layout:
 - /grafana/dashboards/<uid>/dashboard.json: local working copy of a Grafana dashboard resource ({apiVersion, kind, metadata, spec}). Reading it fetches the dashboard on first access. meta.json next to it is provider-owned (revision, folder, managed-by) and read-only.
 - /grafana/catalog/dashboards.ndjson and coverage.json: metadata-only dashboard catalog (loaded on first read; check coverage.json before claiming completeness).
-${options.liveDashboardMounted ? '- /live/dashboard/dashboard.json: unsaved state of the dashboard open in the browser (v2 resource, editable; `live diff`, then `live apply` updates the browser without saving). info.json next to it is read-only.\n' : ''}- /workspace (default cwd), /session (plan.md, findings.md, report.md), /tmp: scratch files. /session/report.md is shown to the user next to the chat. /workspace and /session persist with the chat; /tmp does not.
+${options.liveDashboardMounted ? '- /live/dashboard/dashboard.json: unsaved state of the dashboard open in the browser (v2 resource, editable; `live diff`, then `live apply` updates the browser without saving). info.json next to it is read-only.\n' : ''}- /workspace (default cwd), /session (findings.md, report.md, read-only context.json and receipts/), /tmp: scratch files. /session/report.md is shown to the user next to the chat. /workspace and /session persist with the chat; /tmp does not.
+- /session/context.json: read-only context captured for the current turn. /session/receipts: read-only save outcomes and complete diffs. Use \`evidence show PATH --view table|json|text|image\` to present captured results without another query.
 - /artifacts: earlier tool results (index.ndjson); /.agents/skills/<name>/SKILL.md: skill instructions and references. Both read-only.
 - /lib/jsonnet/<import path>: read-only vendored Jsonnet libraries (github.com/g42/pi-dashboard, github.com/grafana/grafonnet, ...); read them with cat, head, rg, and find.
 
 Rules:
-- Writes to dashboard.json only stage local changes. Nothing reaches Grafana until you run \`workspace plan\` and then \`workspace apply <plan-id>\`, which asks the user to approve the exact diff. Never claim a dashboard was changed before apply reports "applied".
+- The save workflow is direct apply. There is no workspace plan command or plan ID. Use workspace apply [--path PATH] after editing.
+- Writes to dashboard.json only stage local changes. Nothing reaches Grafana until you run \`workspace apply\`, which asks the user to approve the exact diff. Never claim a dashboard was changed before apply reports "applied".
 - \`rg\`, \`find\`, and \`grep\` only see hydrated dashboards; use \`grafana search\` or the catalog for remote discovery and report coverage honestly.
-- Bash variables and cwd reset between calls; files persist. Each bash call is one transaction: its file changes are committed when it ends and discarded on timeout, except that \`workspace\` commands first commit the writes made earlier in the same call.
-- Prefer edit for small precise changes, jq/python for structured bulk edits, and always run \`grafana-dashboard validate\` before \`workspace plan\`. After changing queries, run \`grafana-dashboard data PATH --panel ID\` to confirm the panels show data.
+- Bash variables and cwd reset between calls; files persist. Each bash call is one transaction: its file changes are committed when it ends and discarded on timeout, except at explicit \`workspace apply\` or \`live apply\` boundaries, which commit earlier writes.
+- Prefer edit for small precise changes, jq/python for structured bulk edits, and always run \`grafana-dashboard validate\` before \`workspace apply\`. After changing queries, run \`grafana-dashboard data PATH --panel ID\` to confirm the panels show data.
 - Durable dashboard changes always go through these files. Live edits of the dashboard open in the browser go through /live/dashboard/dashboard.json and \`live apply\`.
-- New dashboards: write helper-based Jsonnet under /workspace, render with \`jsonnet FILE --resource <uid> -o /grafana/dashboards/<uid>/dashboard.json\`, then \`grafana-dashboard fix\` and \`grafana-dashboard validate\` before planning.
+- New dashboards: write helper-based Jsonnet under /workspace, render with \`jsonnet FILE --resource <uid> -o /grafana/dashboards/<uid>/dashboard.json\`, then \`grafana-dashboard fix\` and \`grafana-dashboard validate\` before applying.
 
 Commands (run \`<command> --help\` for options):
 ${renderCommandReference(WORKSPACE_COMMANDS)}

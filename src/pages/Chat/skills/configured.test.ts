@@ -43,9 +43,7 @@ describe('configured Grafana skills', () => {
     expect(skills[1]).toMatchObject({
       name: 'team-runbook',
       filePath: 'plugin-config/customSkills/team-runbook',
-      toolGroups: expect.arrayContaining(['skillResources', 'metrics', 'dashboardRead']),
     });
-    expect(skills[1].toolGroups).not.toContain('adHocDashboards');
     expect(skills[1].resources['references/runbook.md']).toMatchObject({
       path: 'references/runbook.md',
       content: '# Runbook\n\nEscalate after 15 minutes.',
@@ -66,9 +64,8 @@ describe('configured Grafana skills', () => {
           name: 'grafana-dashboard',
           description: 'Bundled dashboard skill.',
           content: '# Bundled',
-          filePath: '.agents/skills/grafana-dashboard/SKILL.md',
+          filePath: 'assistant/skills/grafana-dashboard/SKILL.md',
           resources: {},
-          toolGroups: ['skillResources'],
         },
       ]
     );
@@ -145,8 +142,6 @@ describe('configured Grafana skills', () => {
       ],
     }).filter((candidate) => candidate.name === 'legacy-runbook');
 
-    expect(skill.toolGroups).toContain('metrics');
-    expect(skill.toolGroups).not.toContain('jsonnetFiles');
-    expect(skill.toolGroups).not.toContain('jsonnetDashboards');
+    expect(skill).not.toHaveProperty('toolGroups');
   });
 });

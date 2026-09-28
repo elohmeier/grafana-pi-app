@@ -231,7 +231,7 @@ test('workload gates reject empty and truncated answers, and require successful 
   assert.match(workloadQualityError('analysis', events), /PromQL evidence/);
   events[1].result.details.exitCode = 0;
   const apply = [
-    { type: 'tool_execution_start', toolName: 'bash', toolCallId: 'b', args: { command: 'workspace apply plan-1' } },
+    { type: 'tool_execution_start', toolName: 'bash', toolCallId: 'b', args: { command: 'workspace apply' } },
     { type: 'tool_execution_end', toolName: 'bash', toolCallId: 'b', result: { details: { exitCode: 0 } } },
   ];
   assert.match(workloadQualityError('analysis', [...apply, ...events]), /dashboard write/);

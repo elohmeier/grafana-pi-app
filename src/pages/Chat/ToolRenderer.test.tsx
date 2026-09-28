@@ -565,7 +565,7 @@ describe('ToolRenderer', () => {
     expect(container.textContent).toContain('artifact_1');
     expect(container.textContent).toContain('24 live dashboard panels summarized.');
     expect(container.textContent).toContain('250.0 KiB');
-    expect(container.textContent).toContain('read_artifact {"id":"artifact_1"}');
+    expect(container.textContent).toContain('read /artifacts/artifact_1.json');
     expect(container.textContent).not.toContain('Stored artifact [artifact: artifact_1]');
     expect(container.textContent).not.toContain(rawMarker);
     expect(container.textContent).not.toContain('"elements"');
@@ -596,7 +596,7 @@ describe('ToolRenderer', () => {
     expect(screen.queryByTestId('artifact-result')).not.toBeInTheDocument();
     expect(container.textContent).toContain('Artifact read | field | query_prometheus');
     expect(container.textContent).toContain('selected artifact value');
-    expect(container.textContent).not.toContain('read_artifact {"id":"artifact_1"}');
+    expect(container.textContent).not.toContain('read /artifacts/artifact_1.json');
   });
 
   it('renders jq null artifact reads without raw null fallback details', () => {
@@ -955,7 +955,7 @@ describe('ToolRenderer', () => {
               type: 'text',
               text:
                 'Updated /grafana/dashboards/abc/dashboard.json (120 bytes, revision 9f8e7d6c5b4a)\n' +
-                'Staged locally only. Validate with `grafana-dashboard validate`, then `workspace plan` and `workspace apply <plan-id>` to request approval.',
+                'Staged locally only. Validate with `grafana-dashboard validate`, then `workspace apply` to request approval.',
             },
           ]}
           details={{

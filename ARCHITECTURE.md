@@ -64,9 +64,9 @@ The main implementation areas are:
   tools, sidebar integration, and tests.
 - `src/pages/Chat/workspace/`: The session filesystem, its mounts and
   transactions, the `read`/`write`/`edit`/`bash` tools, shell commands
-  (`commands/`), plan/apply (`plans.ts`), the Grafana broker
+  (`commands/`), direct apply (`apply.ts`), the Grafana broker
   (`grafanaBroker.ts`), and CPython-WASM support (`python/`).
-- `src/pages/Chat/tools/`: Domain logic behind the shell commands (dashboard
+- `src/pages/Chat/domain/`: Domain logic behind the shell commands (dashboard
   metric usage, alerts, navigation, screenshots,
   artifacts) and shared Prometheus helpers.
 - `pkg/main.go`: Go backend entry point. Grafana starts this binary as the
@@ -75,9 +75,9 @@ The main implementation areas are:
   Jsonnet evaluation and structural repair (`jsonnet_eval.go`,
   `jsonnet_assets.go`, `jsonnet_ast_repair.go`), Jsonnet library browsing
   (`jsonnet_libs.go`), and telemetry metrics.
-- `.agents/skills/`: Repo-local skills bundled into the frontend
+- `assistant/skills/`: Product skills bundled into the frontend, outside coding-agent discovery
   (`grafana-dashboard`, `grafana-alerting`, `investigation`).
-- `scripts/generate-bundled-skills.mjs`: Converts `.agents/skills/**/SKILL.md`
+- `scripts/generate-bundled-skills.mjs`: Converts `assistant/skills/**/SKILL.md`
   into `src/pages/Chat/skills/bundledSkills.generated.ts`.
 - `scripts/package-plugin-variant.mjs`: Builds the `grafana-assistant-app`
   plugin ID variant with extension sidebar declarations.
@@ -163,49 +163,27 @@ chat can move between the full page and the sidebar without losing state.
 
 ## Chat And Agent Lifecycle
 
-The main file is `src/pages/Chat/ChatSceneObject.tsx`.
+`session/AssistantSession.ts` owns the Pi Agent, workspace, artifacts, compaction,
+approval channel, catalog cache, and serialized persistence queue. It exposes
+subscriptions and snapshots independently of React. The chat view injects the
+Grafana broker, storage adapter, current model, skills, and page context.
 
-On load:
+Page/sidebar handoffs share the same session instance through `chatRunRegistry.ts`.
+Artifacts and pending approvals are not copied or redirected through UI callbacks.
+The agent persists its captured state at completion even when no view is attached.
+React owns navigation, scrolling, the composer, session selection, and rendering.
 
-1. The UI reads plugin metadata and configuration with `usePluginMeta()`.
-2. It builds OpenAI-compatible Pi model objects from the admin-configured
-   model list, using the default entry until the user picks another model.
-3. It creates a Pi `streamFn` with `streamProxy`.
-4. It creates a new chat session, a `SessionWorkspace`, and an `Agent`.
-5. It loads the saved session index from Grafana plugin user storage.
+Each turn refreshes model settings, skill instructions, and the context snapshot.
+Tools are always `read`, `write`, `edit`, and `bash`. The catalog mount survives
+these refreshes and retains its TTL cache. `/session/context.json` contains the
+captured route, dashboard launch, capabilities, and visible Prometheus datasources.
+It is read-only, as are `/session/receipts/` and the other generated mounts.
 
-When a user submits a prompt:
-
-1. `submitPrompt` trims the input and creates a session title if needed.
-2. `buildSkillRuntime(prompt)` selects active skills, binds the session
-   workspace to the current Grafana capabilities
-   (`createSessionWorkspaceToolkit`), and builds the system prompt and the
-   fixed tool list.
-3. The agent's `systemPrompt`, `tools`, `model`, and `thinkingLevel` are
-   replaced in place for this turn, so the model selected in the chat composer
-   applies to the next request.
-4. `agent.prompt(prompt)` starts the Pi loop. Before each model request,
-   `transformContext` compacts the history when needed.
-5. The agent streams model events, tool calls, tool results, and final text.
-6. On `agent_end`, `saveSession` writes the chat session to plugin user
-   storage.
-
-Sessions store:
-
-- agent messages (the complete transcript),
-- selected model ID and thinking level,
-- the serialized session workspace (`/workspace` and `/session` files,
-  dashboard working copies with their fetched base, plans, and the apply
-  journal),
-- the compaction state (rolling summary and how many messages it covers),
-- artifacts and the artifact counter.
-
-Storage is per Grafana user through `usePluginUserStorage()`, capped at 50
-sessions. The app also supports chat import and export as JSON. Imported
-sessions are restored with `trusted: false`, which drops plans and the apply
-journal so approvals never carry over. Sessions from before the redesign that
-contain `virtualJsonnetFiles` have those files migrated into `/workspace`
-(`workspace/migration.ts`).
+Storage remains per Grafana user through plugin user storage, capped at 50 sessions.
+A session stores messages, model settings, artifacts, workspace files and overlays,
+apply receipts, and compaction state. No plans are stored. Older plan records are
+ignored on restore. Imported sessions discard the apply journal. Legacy Jsonnet
+sources and investigation reports still migrate into ordinary workspace files.
 
 ## LLM Streaming Boundary
 
@@ -267,8 +245,8 @@ Tools are defined as Pi `AgentTool` objects. Each tool has:
 - `parameters`: TypeBox schema used to validate arguments.
 - `execute`: code that runs after validation.
 
-The registry is `createGrafanaTools` in `src/pages/Chat/tools/index.ts`. It
-returns the same list on every turn:
+The factory is `createWorkspaceTools` in `workspace/tools.ts`. It returns the
+same list on every turn:
 
 - `read`, `write`, `edit`, `bash`: the session filesystem tools from
   `src/pages/Chat/workspace/tools.ts`. Discovery, PromQL queries, dashboard
@@ -283,7 +261,7 @@ returns the same list on every turn:
 Skills do not add or remove tools.
 
 Commands reach Grafana only through the typed `WorkspaceBroker` capabilities
-(`workspace/broker.ts`); the domain logic stays in `src/pages/Chat/tools/`. A
+(`workspace/broker.ts`); the domain logic stays in `src/pages/Chat/domain/`. A
 command can return images (`CommandResult.images`); the bash tool attaches
 them to its result after the text, so the model sees a screenshot like any
 other tool image. Commands with bulky output (`grafana-prom query`,
@@ -304,7 +282,7 @@ from local overlays and scratch files.
 | `/grafana/catalog/coverage.json`              | generated, read-only                 | Whether the catalog is complete, and its limit.                                                                                                                                                    |
 | `/live/dashboard/dashboard.json`, `info.json` | generated; `dashboard.json` writable | Unsaved state of the dashboard open in the browser as a v2 resource (variant only). Edits stage a non-persisted overlay that `live apply` applies to the browser.                                  |
 | `/workspace`                                  | scratch, persisted                   | Default working directory.                                                                                                                                                                         |
-| `/session`                                    | scratch, persisted                   | Durable notes, such as `plan.md` and `findings.md`.                                                                                                                                                |
+| `/session`                                    | scratch, persisted                   | Durable notes, such as `findings.md`.                                                                                                                                                              |
 | `/tmp`                                        | scratch                              | Not persisted; separate quota.                                                                                                                                                                     |
 | `/artifacts`                                  | generated, read-only                 | `index.ndjson` and one JSON file per artifact.                                                                                                                                                     |
 | `/.agents/skills`                             | generated, read-only                 | `SKILL.md` and resources of bundled and custom skills.                                                                                                                                             |
@@ -315,8 +293,9 @@ Invariants:
   copy-on-write `WorkspaceTransaction`. A tool call or bash invocation is one
   transaction: its changes are committed together, or discarded on timeout,
   cancellation, or a failed policy or quota check.
-- `workspace` subcommands call `checkpoint()` first, so they see and commit the
-  writes made earlier in the same bash invocation.
+- Read commands inspect `WorkspaceTransaction.view()` without committing. Only
+  explicit `workspace apply` and `live apply` cross a checkpoint boundary. A later
+  abort discards uncommitted writes and reports any earlier committed changes.
 - Paths are normalized and length-limited. Symlinks and hard links are rejected.
 - Default quotas (`DEFAULT_WORKSPACE_LIMITS` in `workspace/types.ts`): 512 KiB
   per file, 8 MiB for persisted scratch files plus overlays, 2 MiB for `/tmp`,
@@ -341,8 +320,9 @@ browser bundle (`just-bash/browser`) against the transaction through
 `WorkspaceBashFs`. Shell variables and the working directory reset per call;
 files persist. The default timeout is 30 seconds (maximum 120 seconds), output
 is truncated at 32 KiB per stream, and just-bash execution limits bound
-commands, loops, and `awk`/`sed` iterations. The interpreter runs on the
-main browser thread, so the timeout is a cooperative abort, not a hard kill.
+commands, loops, and `awk`/`sed` iterations. The interpreter and jq WASM run in a dedicated Web Worker. The host terminates
+the worker on timeout or cancellation. Filesystem RPC remains inside the host
+transaction; domain commands, Python, and approvals execute through host adapters.
 
 Built-in commands include coreutils, `find`, `rg`, `grep`, `sed`, `awk`,
 `yq`, `diff`, and `xargs`. There are no network, process, or link commands.
@@ -371,7 +351,7 @@ The system prompt lists them from the same registry.
 | `jsonnet [eval] FILE [-o OUT] [--resource UID]`    | Evaluate workspace Jsonnet in the backend. `--resource` wraps the result in a dashboard resource envelope.                      |
 | `jsonnet fix FILE`                                 | Structural Grafonnet repair in place. The vendored libraries are read-only files under `/lib/jsonnet/<import path>`.            |
 | `workspace status\|diff\|discard`                  | Staged resource changes, usage, and limits.                                                                                     |
-| `workspace plan\|apply\|plans`                     | Freeze, approve, and apply changes (see [Dashboard Changes](#dashboard-changes-plan-and-apply)).                                |
+| `workspace apply\|receipts`                        | Validate, approve, apply changes, and inspect receipts (see [Dashboard Changes](#dashboard-changes-direct-apply)).              |
 | `grafana open dashboard UID\|explore EXPR\|/PATH`  | Open a dashboard, a Prometheus Explore query, or a Grafana-relative path in the browser.                                        |
 | `grafana-dashboard screenshot UID\|PATH`           | Render the saved dashboard or one panel with the image renderer; the image is attached to the bash result.                      |
 | `grafana-dashboard add-panel\|set-panel PATH`      | Typed panel edits on any dashboard file (working copy or live): title, queries by refId, unit, type, position; classic and v2.  |
@@ -417,6 +397,20 @@ objects.
   reason. Query variables saved as All without known options are approximated
   as `.*`, and the output notes this.
 
+## Evidence Presentation
+
+`evidence show PATH --view table|json|text|image` captures a display value in a
+typed presentation event. The chat renders the captured value; display never
+queries a datasource or rereads a mutable file. Tables accept up to 100 object
+rows and text/JSON views up to 64 KiB; use jq to select a smaller file first.
+Images reference existing captured artifacts. Approvals and save outcomes remain
+independent of voluntary evidence presentation.
+
+Artifacts are owned by `session/ArtifactStore.ts`, retained by count and byte
+budget, and exposed completely through `/artifacts/<id>.json`. Large artifacts
+are no longer replaced by placeholder files. The generic read tool still windows
+large output, and shell pipelines can select fields before returning them.
+
 ## Python
 
 `python3` and `python` (`workspace/python/`) run CPython compiled to
@@ -436,9 +430,9 @@ Python is unavailable when the browser lacks `Worker` or `WebAssembly`.
 
 Skills are model-facing instructions. They do not change the tool list.
 
-Bundled skills live under `.agents/skills/`:
+Bundled skills live under `assistant/skills/`:
 
-- `grafana-dashboard`: dashboard, panel, Jsonnet, validation, plan/apply, and
+- `grafana-dashboard`: dashboard, panel, Jsonnet, validation, direct apply, and
   live-edit workflow.
 - `grafana-alerting`: read-only troubleshooting of Grafana-managed alert rules,
   especially rules linked to dashboard panels.
@@ -447,7 +441,7 @@ Bundled skills live under `.agents/skills/`:
 `npm run generate:skills` runs `scripts/generate-bundled-skills.mjs`, which:
 
 - validates each `SKILL.md`,
-- reads text resources from `references/`, `templates/`, and `assets/`,
+- reads text resources from `references/`, `templates/`, `assets/`, and `scripts/`,
 - writes `src/pages/Chat/skills/bundledSkills.generated.ts`.
 
 Skill selection is in `src/pages/Chat/skills/selection.ts`. Activation rules:
@@ -478,12 +472,12 @@ configurations keep working, but no group selects tools.
 
 Prometheus access is the `grafana-prom` command, backed by the Prometheus
 broker in `workspace/grafanaBroker.ts` and the helpers in
-`src/pages/Chat/tools/metrics.ts`. It uses Grafana's frontend datasource
+`src/pages/Chat/domain/metrics.ts`. It uses Grafana's frontend datasource
 service, so queries run as the current Grafana user and respect datasource
 visibility.
 
 Dashboard-derived metric context is in
-`src/pages/Chat/tools/dashboardMetricContext.ts`, exposed as `grafana-usage`:
+`src/pages/Chat/domain/dashboardMetricContext.ts`, exposed as `grafana-usage`:
 
 - `grafana-usage dashboard UID|PATH`: extract Prometheus metric usage, labels,
   grouping labels, functions, panel locations, and relations from one
@@ -507,7 +501,7 @@ Important safety and cost controls:
 
 ## Alerting Commands
 
-Alert lookups are in `src/pages/Chat/tools/alerts.ts`, exposed as
+Alert lookups are in `src/pages/Chat/domain/alerts.ts`, exposed as
 `grafana-alert`, and are strictly read-only:
 
 - `grafana-alert find --dashboard UID --panel ID`: reads AlertRule resources from
@@ -521,59 +515,28 @@ There are no alert create, update, pause, silence, or delete tools or
 commands. The system prompt and the `grafana-alerting` skill both mandate
 read-only troubleshooting.
 
-## Dashboard Changes: Plan And Apply
+## Dashboard Changes: Direct Apply
 
-The app supports three dashboard paths:
+The assistant edits `/grafana/dashboards/<uid>/dashboard.json` and runs
+`workspace apply [--path PATH]`. No planning mode or separate plan command exists.
 
-1. Read-only inspection: working copies with `read`/`rg`/`jq`,
-   `grafana-dashboard inspect`, `data`, and `screenshot`.
-2. Durable changes: edit working copies, then plan and apply.
-3. Ephemeral live edits to the currently open dashboard (variant only, see
-   [Live Dashboard Editing](#live-dashboard-editing)).
+`workspace/apply.ts` validates at most 50 selected overlays, captures their exact
+contents and base revisions, computes a digest, and requests approval with the
+complete unified diff. The timeout pauses during approval. After approval it
+checks that the working copies and base revisions still match the captured changes.
+It then writes as the current Grafana user with resourceVersion preconditions.
 
-Durable flow:
+Each operation produces `applied`, `conflicted`, `failed`, `unknown`, or
+`not attempted`. Successful writes reconcile the working copy. A repeated apply
+with no remaining changes is a no-op; partial retries consider only remaining
+staged changes. Apply receipts and full diffs are available under
+`/session/receipts/`; the journal retains up to 50 records with a 16 MiB budget
+(always retaining the newest receipt). Shell stdout contains compact outcomes and
+a diff path, not the full approval diff.
 
-```text
-user asks for a dashboard change
-  -> edit /grafana/dashboards/<uid>/dashboard.json
-     (existing dashboard), or write /workspace/*.jsonnet and run
-     jsonnet FILE --resource <uid> -o /grafana/dashboards/<uid>/dashboard.json
-     followed by grafana-dashboard fix (new dashboard)
-  -> grafana-dashboard validate
-  -> workspace plan        (validate + freeze, returns plan ID)
-  -> workspace apply <id>  (approval modal with diff, then conditional writes)
-```
-
-`workspace plan` (`workspace/plans.ts`):
-
-- collects staged overlays (all, or those selected with `--path`; at most 50
-  operations) and classifies each as create, update, or delete,
-- runs the dashboard validator (`workspace/dashboardModel.ts`) with the
-  datasource allow-list and managed-by policy, and refuses to plan on errors,
-- stores the exact documents, the base `resourceVersion`, before/after hashes,
-  and a bounded unified diff,
-- identifies the plan by a SHA-256 digest of its canonical content. Editing a
-  planned file afterwards makes the plan stale.
-
-`workspace apply` (`applyWorkspacePlan`):
-
-1. Rejects unknown or stale plans. An identical plan that was already fully
-   applied returns its earlier record.
-2. Requests approval through the `WorkspaceApprovalService`. In the UI, this
-   opens the existing confirmation modal with the plan summary and diff. The
-   bash timeout is paused while waiting; only the user's cancellation ends the
-   wait.
-3. Re-checks staleness after approval, because the files may have changed
-   while the modal was open.
-4. Writes each operation from the browser as the current user through
-   `/apis/dashboard.grafana.app/<version>/namespaces/<ns>/dashboards` (the
-   preferred version is discovered from the API group; dashboards whose stored
-   version cannot be converted are edited in that stored version). Updates and
-   deletes carry `resourceVersion` preconditions. A 409 or 412 response yields
-   `conflicted`; missing responses and 5xx errors yield `unknown`, and other errors yield `failed`.
-5. Journals each operation as `applied`, `conflicted`, `failed`, `unknown`, or
-   `not attempted`, and reconciles applied working copies with the new
-   snapshot.
+`workspace status`, `diff`, and `discard` operate on the transaction's staged view.
+Only explicit apply crosses a commit boundary. Remote effects cannot be rolled
+back by cancelling later shell commands; cancellation reports earlier commits.
 
 The Jsonnet backend (`pkg/plugin/jsonnet_eval.go`) is stateless:
 
@@ -597,7 +560,7 @@ replaces it. The client comes from `useRestrictedGrafanaApis()` and is only
 present when Grafana runs with the `restrictedPluginApis` feature toggle,
 allow-lists the plugin ID, and offers both commands (Grafana 13.2+; `APPLY_SPEC`
 also needs the default-on `dashboardNewLayouts` toggle). Without it, nothing is
-mounted and the assistant falls back to working copies and plan/apply.
+mounted and the assistant falls back to working copies and direct apply.
 
 - `/live/dashboard/dashboard.json` is a v2 resource envelope around the spec.
   `metadata.resourceVersion` carries a hash of the spec it was read from.
@@ -617,7 +580,7 @@ mounted and the assistant falls back to working copies and plan/apply.
 
 Live edits execute without an Assistant approval prompt because they change
 only the unsaved dashboard state. Persisting them still goes through Grafana's
-normal save flow or the plan/apply path.
+normal save flow or the direct-apply path.
 
 ## Model Limits And Context Compaction
 
@@ -649,7 +612,7 @@ state and the UI transcript stay complete.
    budget) are elided.
 4. If that is still too much, older messages are summarized by the current
    model into a rolling `<conversation_summary>`, extended incrementally. The
-   summarizer is told to keep identifiers, paths, queries, and plan IDs
+   summarizer is told to keep identifiers, paths, queries, and receipt IDs
    verbatim. Cuts are placed at message boundaries that do not separate tool
    calls from their results, and the latest message is never summarized.
 5. If summarization fails or the result is still too large, the oldest
@@ -659,7 +622,7 @@ The compaction state (summary, covered message count, and an anchor
 fingerprint that invalidates it when the history changes) is cached per
 session, shared across page/sidebar handoff, and persisted with the session.
 Compaction events are recorded for benchmarks. The system prompt asks the model
-to keep `/session/plan.md` and `/session/findings.md` for long tasks because
+to keep `/session/findings.md` for long tasks because
 those files survive compaction.
 
 ## Guardrails
@@ -732,10 +695,10 @@ and commands can do, not from per-turn tool selection:
 `workspace apply` requests approval through the `WorkspaceApprovalService`
 wired up in `ChatSceneObject.tsx`. It routes the request to the confirmation
 modal (`PERSISTENT_WRITE_TOOLS` contains only this apply approval) and shows the
-plan's operations and diff. Denying the modal records an unapproved journal
+captured changes' operations and diff. Denying the modal records an unapproved journal
 entry, and the command fails without writing anything.
 
-The approval is bound to the plan digest, and the plan is re-checked for
+The approval is bound to the change digest, and the captured changes are re-checked for
 staleness after approval. It is still a UI callback in the browser, not a
 server-side approval bound to actor and expiry (see `ROADMAP.md`).
 
@@ -750,7 +713,7 @@ The allow-list is enforced in the frontend:
 
 - `grafana-prom` and the dashboard metric context tools only discover and
   query allowed Prometheus datasources,
-- `grafana-dashboard validate` and `workspace plan` reject dashboards that
+- `grafana-dashboard validate` and `workspace apply` reject dashboards that
   reference disallowed datasource UIDs (built-in UIDs such as `__expr__` and
   `grafana` are exempt).
 
@@ -904,7 +867,7 @@ Use these patterns when extending the app:
   session filesystem. Add a typed tool only when the shell cannot express the
   capability well.
 - Keep the tool list fixed. Use skills for instructions, not for tool selection.
-- Keep remote writes behind `workspace plan` and an approved `workspace apply`
+- Keep remote writes behind an approved `workspace apply`
   with revision preconditions; everything else only stages local changes.
 - Run Grafana calls as the current user through the workspace broker; do not
   add backend paths that write with the plugin service account.
@@ -912,7 +875,7 @@ Use these patterns when extending the app:
   working copies for new ones; make live edits in `/live/dashboard/dashboard.json`
   and verify them after `live apply`.
 - Keep custom skills non-secret and small enough to fit into model context.
-- Regenerate bundled skills after changing `.agents/skills`.
+- Regenerate bundled skills after changing `assistant/skills`.
 - Use Grafana source or official docs when Grafana API behavior is unclear.
 - Use Pi source when agent event, stream, tool hook, or execution behavior is
   unclear.
@@ -930,11 +893,11 @@ For a quick onboarding path:
    (`buildSkillRuntime`, `buildAgent`, `saveSession`), sessions, approvals.
 6. `src/pages/Chat/systemPrompt.ts` and `src/pages/Chat/workspace/prompt.ts`:
    top-level behavior rules and the filesystem contract.
-7. `src/pages/Chat/tools/index.ts`: the fixed tool list.
+7. `src/pages/Chat/domain/index.ts`: the fixed tool list.
 8. `src/pages/Chat/workspace/workspace.ts` and `workspace/shell.ts`: the
    session filesystem, transactions, and bash.
-9. `src/pages/Chat/workspace/commands/commands.ts` and `workspace/plans.ts`:
-   commands and plan/apply.
+9. `src/pages/Chat/workspace/commands/commands.ts` and `workspace/apply.ts`:
+   commands and direct apply.
 10. `src/pages/Chat/compaction.ts`: context budgeting.
 11. `pkg/plugin/resources.go`: LLM proxy and resource routes.
 12. `pkg/plugin/jsonnet_eval.go`: stateless Jsonnet eval and repair routes.
@@ -950,13 +913,12 @@ checks around it:
 - Grafana user permissions,
 - app access checks,
 - datasource allow-lists,
-- validation before planning,
-- explicit approval of an exact, digest-bound plan,
+- validation before applying,
+- explicit approval of an exact, digest-bound change set,
 - revision preconditions on every update and delete,
 - bounded query output and workspace quotas.
 
-Known gaps: the bash interpreter runs on the main thread (only Python has a
-hard kill), approval is a browser callback rather than a server-side binding,
+Known gaps: live browser verification is still required for the worker host, approval is a browser callback rather than a server-side binding,
 and the datasource allow-list and dashboard validation run only in the
 frontend. When adding new capabilities, enforce safety in code and Grafana
 permissions, not only in prompts.

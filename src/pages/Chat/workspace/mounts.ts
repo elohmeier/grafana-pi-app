@@ -1,4 +1,4 @@
-import type { ArtifactRuntime } from '../tools/artifacts';
+import type { ArtifactRuntime } from '../domain/artifacts';
 import { SKILLS_ROOT } from '../skills/prompt';
 import type { GrafanaSkill } from '../skills/types';
 import type { DashboardBroker, JsonnetBroker } from './broker';
@@ -7,7 +7,6 @@ import type { GeneratedFile, GeneratedMount } from './types';
 const CATALOG_PAGE_SIZE = 1000;
 const CATALOG_MAX_DASHBOARDS = 5000;
 const CATALOG_TTL_MS = 5 * 60 * 1000;
-const MAX_ARTIFACT_FILE_BYTES = 256 * 1024;
 
 export function createSkillsMount(skills: readonly GrafanaSkill[]): GeneratedMount {
   return {
@@ -53,9 +52,7 @@ export function createArtifactsMount(artifacts: ArtifactRuntime): GeneratedMount
             const data =
               kind === 'image' ? { note: 'image artifact; pixel data is not available as text' } : artifact.data;
             const text = `${JSON.stringify({ id, kind, title, toolName, createdAt, summary, data }, null, 2)}\n`;
-            return text.length > MAX_ARTIFACT_FILE_BYTES
-              ? `${JSON.stringify({ id, kind, title, summary, truncated: true, note: 'artifact too large for the filesystem view' })}\n`
-              : text;
+            return text;
           },
         };
       }

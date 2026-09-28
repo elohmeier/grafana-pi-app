@@ -14,5 +14,4 @@ export type {
   GrafanaSkillContext,
   GrafanaSkill,
   GrafanaSkillSelection,
-  SkillToolGroup,
 } from './types';

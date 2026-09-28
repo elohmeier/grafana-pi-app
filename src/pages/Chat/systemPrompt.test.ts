@@ -3,7 +3,7 @@ import { BASE_SYSTEM_PROMPT } from './systemPrompt';
 describe('chat system prompt', () => {
   it('describes a single agent working through the session filesystem tools', () => {
     expect(BASE_SYSTEM_PROMPT).toContain('Your main tools are read, write, edit, and bash');
-    expect(BASE_SYSTEM_PROMPT).toContain('`workspace plan`, and `workspace apply <plan-id>`');
+    expect(BASE_SYSTEM_PROMPT).toContain('`workspace apply`');
     expect(BASE_SYSTEM_PROMPT).toContain('Alerting is read-only for you');
   });
 

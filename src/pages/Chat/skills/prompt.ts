@@ -45,13 +45,13 @@ Live dashboard editing is available for the dashboard open in the browser.
 - For a variable that filters panel queries, go straight to \`grafana-dashboard label-filter /live/dashboard/dashboard.json --label LABEL --variable-query 'label_values(METRIC, LABEL)' [--current VALUE]\` instead of writing the v2 variable by hand.
 - Edits are not visible in the browser until \`live apply\` succeeds; it validates first, so run it once after the last edit instead of a separate validate.
 - Read the file again after \`live apply\`: element names can be rekeyed. If apply reports that the dashboard changed in the browser, run \`live discard\`, read the file again, and redo the edit.
-- Use /grafana/dashboards/<uid>/dashboard.json with workspace plan/apply for durable saved changes, not for live edits to the current dashboard unless the user asks for that path.`;
+- Use /grafana/dashboards/<uid>/dashboard.json with workspace apply for durable saved changes, not for live edits to the current dashboard unless the user asks for that path.`;
   }
 
   return `## Dashboard Editing Capability
 Live dashboard editing is not available in this plugin/runtime context.
 - Do not claim that you can directly edit the currently open dashboard.
-- For dashboard changes, stage them in /grafana/dashboards/<uid>/dashboard.json and apply them with workspace plan/apply after user approval, or give clear manual edit guidance.`;
+- For dashboard changes, stage them in /grafana/dashboards/<uid>/dashboard.json and apply them with workspace apply after user approval, or give clear manual edit guidance.`;
 }
 
 function renderAvailableSkills(skills: readonly GrafanaSkill[]) {

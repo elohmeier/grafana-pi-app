@@ -4,6 +4,24 @@ Review date: 2026-09-25. Repository baseline: `4857f8c`, package version `4.0.0`
 This is a proposed breaking redesign, not a description of implemented features.
 The current implementation is documented in [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## Implementation update (2026-09-28)
+
+The frontend now uses direct `workspace apply` with complete-diff approval; there
+is no planning command, plan ID, or persisted plan catalog. Read-only workspace
+commands no longer commit staged writes. Apply receipts are read-only files.
+
+A UI-independent session owns the agent, artifacts, approval channel, compaction,
+and persistence queue. Page/sidebar handoffs share it. Bash and jq execute in a
+terminable worker; filesystem and command RPC remain mediated by the host.
+Evidence presentation uses `evidence show` over captured files. Context is exposed
+as read-only JSON, skill bundling accepts scripts, and PromQL accepts file/stdin
+batches. Domain command registrations are split into modules; obsolete tool
+factories and runtime skill tool groups are removed.
+
+The earlier review below is historical and includes superseded recommendations.
+Server hosting, server-enforced policy, restricted data sources, and broader
+compaction quality work remain separate follow-ups.
+
 ## Status (2026-09-25)
 
 Parts of this roadmap are now implemented. The findings table below describes

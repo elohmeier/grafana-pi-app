@@ -36,29 +36,27 @@ jest.mock('typebox', () => ({
   },
 }));
 
-import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { DataFrame, DataSourceInstanceSettings } from '@grafana/data';
 import { getBackendSrv } from '@grafana/runtime';
 import { of, throwError } from 'rxjs';
 import {
-  createGrafanaTools,
   buildNavigationPath,
   extractDashboardMetricUsage,
   filterAllowedPrometheusDatasourceSettings,
   getUnavailableDashboardDatasourceUids,
-} from './grafanaTools';
-import { findPanelAlertRules } from './tools/alerts';
+} from './domain';
+import { findPanelAlertRules } from './domain/alerts';
 import {
   getMetricNeighborhood,
   inspectDashboardMetricUsage,
   searchDashboardMetricUsage,
-} from './tools/dashboardMetricContext';
+} from './domain/dashboardMetricContext';
 import {
   getDatasourceResource,
   getPrometheusDatasource,
   getPrometheusDatasourceSettings,
   runPrometheusQuerySummaryOrValidationError,
-} from './tools/metrics';
+} from './domain/metrics';
 
 const datasourceSettings = [
   { name: 'Prometheus A', uid: 'prom-a', type: 'prometheus', isDefault: true },
@@ -726,50 +724,6 @@ describe('grafana datasource tool policy', () => {
     ]);
   });
 
-  it('returns one fixed tool list with session filesystem tools and without removed Grafana tools', () => {
-    const workspaceTools = ['read', 'write', 'edit', 'bash'].map(
-      (name) => ({ name, label: name, description: name, parameters: {}, execute: jest.fn() }) as unknown as AgentTool
-    );
-    const names = createGrafanaTools({ workspaceTools }).map((tool) => tool.name);
-
-    expect(names).toEqual(['read', 'write', 'edit', 'bash']);
-    expect(new Set(names).size).toBe(names.length);
-    for (const removed of [
-      'list_datasources',
-      'list_metrics',
-      'list_label_values',
-      'inspect_metric_series',
-      'query_prometheus',
-      'query_prometheus_raw',
-      'list_dashboards',
-      'get_dashboard',
-      'upload_dashboard',
-      'delete_dashboard',
-      'run_query_agent',
-      'run_dashboard_agent',
-      'run_investigation_agent',
-      'run_alert_agent',
-      'run_support_agent',
-      'run_navigation_agent',
-      'inspect_dashboard_metric_usage',
-      'search_dashboard_metric_usage',
-      'get_metric_neighborhood',
-      'find_panel_alert_rules',
-      'get_alert_rule',
-      'update_report',
-      'navigate',
-      'screenshot_dashboard',
-      'read_artifact',
-      'list_live_dashboard_panels',
-      'rename_live_dashboard_panel',
-      'apply_live_dashboard_prometheus_label_filter',
-      'apply_live_dashboard_mutation',
-    ]) {
-      expect(names).not.toContain(removed);
-    }
-    expect(createGrafanaTools({ workspaceTools }).map((tool) => tool.name)).toEqual(names);
-  });
-
   it('builds safe Grafana navigation paths', () => {
     expect(buildNavigationPath({ type: 'dashboard', uid: 'service-red', slug: 'Service RED' })).toBe(
       '/d/service-red/service-red'
@@ -799,35 +753,6 @@ describe('grafana datasource tool policy', () => {
     expect(() => buildNavigationPath({ type: 'relative', path: '//example.com' })).toThrow(
       'path must be a Grafana-relative path starting with /.'
     );
-  });
-
-  it('keeps raw dashboard upload/delete and Jsonnet tools out of the tool list', () => {
-    const names = createGrafanaTools().map((tool) => tool.name);
-
-    expect(names).not.toContain('inspect_dashboard_context');
-    expect(names).not.toContain('apply_live_dashboard_mutation');
-    for (const removed of [
-      'explore_metrics',
-      'design_dashboard',
-      'explore_jsonnet',
-      'write_dashboard_plan',
-      'write_jsonnet',
-      'edit_jsonnet',
-      'fix_jsonnet',
-      'read_jsonnet',
-      'render_dashboard',
-      'save_dashboard',
-      'list_jsonnet_libs',
-      'search_jsonnet_libs',
-      'read_jsonnet_lib',
-      'grafana_list_managed_dashboard_templates',
-      'read_managed_dashboard_template',
-      'search_grafonnet',
-      'read_grafonnet',
-      'list_grafonnet',
-    ]) {
-      expect(names).not.toContain(removed);
-    }
   });
 
   it('extracts dashboard metric usage with PromQL parser-backed labels and relations', () => {

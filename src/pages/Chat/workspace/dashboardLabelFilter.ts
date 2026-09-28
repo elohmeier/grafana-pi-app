@@ -1,4 +1,4 @@
-import { addPromqlLabelFilter, type ExistingPromqlMatcherStrategy } from '../tools/promqlLabelFilter';
+import { addPromqlLabelFilter, type ExistingPromqlMatcherStrategy } from '../domain/promqlLabelFilter';
 
 export type DashboardLabelFilterOptions = {
   label: string;

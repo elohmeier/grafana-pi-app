@@ -8,7 +8,6 @@ describe('Grafana skill selection', () => {
 
     expect(selection.activeSkillNames).toEqual([]);
     expect(selection.activeSkills).toEqual([]);
-    expect(selection.toolGroups).toEqual([]);
     expect(selection).not.toHaveProperty('supervisorOnly');
   });
 
@@ -51,7 +50,6 @@ describe('Grafana skill selection', () => {
     });
 
     expect(selection.activeSkillNames).toEqual(['grafana-dashboard', 'investigation']);
-    expect(selection.toolGroups).toEqual(expect.arrayContaining(['dashboardRead', 'liveDashboardEditing']));
   });
 
   it('does not activate dashboard context for empty prompts', () => {
@@ -67,7 +65,6 @@ describe('Grafana skill selection', () => {
     const selection = selectGrafanaSkills('show me SQL tables and query SELECT * FROM metrics', GRAFANA_SKILLS);
 
     expect(selection.activeSkillNames).toEqual([]);
-    expect(selection.toolGroups).toEqual([]);
   });
 
   it('renders only active skill instructions into the system prompt', () => {

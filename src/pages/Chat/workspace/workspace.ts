@@ -9,7 +9,6 @@ import {
   type WorkspaceChangeStatus,
   type WorkspaceFileChange,
   type WorkspaceLimits,
-  type WorkspacePlan,
   type WorkspaceResourceEntry,
   type WorkspaceResourceSnapshot,
   type WorkspaceScratchFile,
@@ -21,8 +20,8 @@ export const DASHBOARD_DOCUMENT = 'dashboard.json';
 export const DASHBOARD_META = 'meta.json';
 const PERSISTED_SCRATCH_MOUNTS = ['/workspace', '/session'];
 const RESOURCE_UID_PATTERN = /^[A-Za-z0-9_-]{1,40}$/;
-const MAX_PLANS = 20;
 const MAX_JOURNAL = 50;
+const MAX_JOURNAL_BYTES = 16 * 1024 * 1024;
 
 export type WorkspacePathClass =
   | { type: 'scratch'; mount: string }
@@ -69,7 +68,6 @@ export class SessionWorkspace {
   private dirs = new Set<string>();
   private resources = new Map<string, WorkspaceResourceEntry>();
   private generated: GeneratedMount[] = [];
-  private plans: WorkspacePlan[] = [];
   private journal: WorkspaceApplyRecord[] = [];
   private hydrator?: ResourceHydrator;
   private listeners = new Set<() => void>();
@@ -106,6 +104,10 @@ export class SessionWorkspace {
   }
 
   classify(path: string): WorkspacePathClass {
+    const generated = this.generated.find((mount) => isWithin(path, mount.root));
+    if (generated) {
+      return { type: 'generated', mount: generated.root };
+    }
     for (const mount of SCRATCH_MOUNTS) {
       if (isWithin(path, mount)) {
         return { type: 'scratch', mount };
@@ -333,6 +335,18 @@ export class SessionWorkspace {
     };
   }
 
+  /** Detached view for inspecting staged writes without committing them. */
+  snapshot() {
+    const copy = new SessionWorkspace(this.limits);
+    copy.files = new Map(this.files);
+    copy.dirs = new Set(this.dirs);
+    copy.resources = new Map(this.resources);
+    copy.generated = this.generated;
+    copy.hydrator = this.hydrator;
+    copy.journal = [...this.journal];
+    return copy;
+  }
+
   begin(options: { cwd?: string; signal?: AbortSignal } = {}) {
     return new WorkspaceTransaction(this, options.signal);
   }
@@ -383,23 +397,13 @@ export class SessionWorkspace {
     this.changed();
   }
 
-  // Plans and apply journal -------------------------------------------------
-
-  addPlan(plan: WorkspacePlan) {
-    this.plans = [...this.plans.filter((existing) => existing.id !== plan.id), plan].slice(-MAX_PLANS);
-    this.changed();
-  }
-
-  getPlan(id: string) {
-    return this.plans.find((plan) => plan.id === id);
-  }
-
-  listPlans() {
-    return [...this.plans];
-  }
+  // Apply journal ----------------------------------------------------------
 
   recordApply(record: WorkspaceApplyRecord) {
     this.journal = [...this.journal.filter((existing) => existing !== record), record].slice(-MAX_JOURNAL);
+    while (this.journal.length > 1 && utf8ByteLength(JSON.stringify(this.journal)) > MAX_JOURNAL_BYTES) {
+      this.journal.shift();
+    }
     this.changed();
   }
 
@@ -430,14 +434,13 @@ export class SessionWorkspace {
           : undefined,
         overlay: entry.overlay,
       })),
-      plans: this.plans,
       journal: this.journal,
     };
   }
 
   /**
    * Rebuilds a workspace from storage. Every path is re-validated. Imported
-   * sessions pass `trusted: false` so plans and the apply journal are dropped:
+   * sessions pass `trusted: false` so the apply journal is dropped:
    * approvals never carry over into another session.
    */
   static restore(persisted: unknown, options: { limits?: Partial<WorkspaceLimits>; trusted?: boolean } = {}) {
@@ -450,7 +453,12 @@ export class SessionWorkspace {
     for (const [rawPath, file] of Object.entries(data.files ?? {})) {
       try {
         const path = normalizeWorkspacePath(rawPath);
-        if (PERSISTED_SCRATCH_MOUNTS.some((mount) => isWithin(path, mount)) && typeof file?.content === 'string') {
+        if (
+          path !== '/session/context.json' &&
+          !isWithin(path, '/session/receipts') &&
+          PERSISTED_SCRATCH_MOUNTS.some((mount) => isWithin(path, mount)) &&
+          typeof file?.content === 'string'
+        ) {
           workspace.files.set(path, { content: file.content, mtime: Number(file.mtime) || Date.now() });
         }
       } catch {
@@ -480,7 +488,6 @@ export class SessionWorkspace {
       });
     }
     if (options.trusted !== false) {
-      workspace.plans = Array.isArray(data.plans) ? data.plans.slice(-MAX_PLANS) : [];
       workspace.journal = Array.isArray(data.journal) ? data.journal.slice(-MAX_JOURNAL) : [];
     }
     return workspace;
@@ -880,6 +887,40 @@ export class WorkspaceTransaction {
     return this.files.size > 0 || this.resources.size > 0 || this.dirsAdded.size > 0 || this.dirsRemoved.size > 0;
   }
 
+  /** Current invocation state, including writes not yet committed. */
+  view() {
+    this.assertOpen();
+    const view = this.workspace.snapshot();
+    view.applyCommitted(this.files, this.dirsAdded, this.dirsRemoved, this.resources);
+    return view;
+  }
+
+  stagedFile(path: string) {
+    this.assertOpen();
+    return this.scratchContent(normalizeWorkspacePath(path));
+  }
+
+  async discardResource(path: string) {
+    const target = this.workspace.classify(path);
+    if (target.type !== 'resource' && target.type !== 'resource-dir') {
+      throw new WorkspaceError('EPERM', `only resource working copies can be discarded: ${path}`);
+    }
+    const entry = this.view().getResource(target.uid);
+    if (!entry?.overlay) {
+      return false;
+    }
+    if (entry.base) {
+      await this.writeFile(entry.path, entry.base.content);
+    } else {
+      await this.rm(entry.path, { force: true });
+    }
+    return true;
+  }
+
+  committedChanges() {
+    return mergeChanges(this.checkpointed);
+  }
+
   /**
    * Validates the staged changes as a unit and applies them. Nothing is
    * applied if any check fails.
@@ -892,9 +933,8 @@ export class WorkspaceTransaction {
 
   /**
    * Validates and applies the changes staged so far while keeping the
-   * transaction open. Workspace commands that read committed state (status,
-   * diff, plan, apply) call this so they see earlier writes of the same bash
-   * invocation. Checkpointed changes are no longer discarded if the
+   * transaction open. Only explicit apply commands cross this boundary;
+   * status and diff use view() without committing. Checkpointed changes are no longer discarded if the
    * invocation later times out.
    */
   checkpoint(): WorkspaceFileChange[] {
@@ -1102,6 +1142,11 @@ export class WorkspaceTransaction {
       this.generatedFiles = this.workspace.generatedFiles();
     }
     return this.generatedFiles;
+  }
+
+  refreshGeneratedFiles() {
+    this.generatedFiles = undefined;
+    this.generatedCache.delete('/artifacts/index.ndjson');
   }
 
   /** Drops the cached content of a generated file so the next read loads it again (after a remote change). */

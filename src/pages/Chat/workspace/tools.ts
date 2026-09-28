@@ -1,7 +1,7 @@
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { createTwoFilesPatch } from 'diff';
 import { Type } from 'typebox';
-import { textResult, throwIfAborted } from '../tools/result';
+import { textResult, throwIfAborted } from '../domain/result';
 import { contentRevision } from './hash';
 import { LIVE_DASHBOARD_PATH } from './liveDashboard';
 import { normalizeWorkspacePath, truncateUtf8, utf8ByteLength } from './paths';
@@ -90,7 +90,7 @@ function makeWriteTool(workspace: SessionWorkspace): AgentTool {
     name: 'write',
     label: 'Write',
     description:
-      'Create or overwrite one file in the session filesystem. Writable locations: /workspace, /session, /tmp, and /grafana/dashboards/<uid>/dashboard.json (a local working copy; nothing reaches Grafana until `workspace plan` and an approved `workspace apply`). Parent directories are created automatically. Prefer edit for small changes to existing files.',
+      'Create or overwrite one file in the session filesystem. Writable locations: /workspace, /session, /tmp, and /grafana/dashboards/<uid>/dashboard.json (a local working copy; nothing reaches Grafana until an approved `workspace apply`). Parent directories are created automatically. Prefer edit for small changes to existing files.',
     executionMode: 'sequential',
     parameters: Type.Object({
       path: Type.String({ description: 'Absolute path, or relative to /workspace.' }),
@@ -322,7 +322,7 @@ function stagingNote(workspace: SessionWorkspace, path: string) {
   }
   const target = workspace.classify(path);
   return target.type === 'resource'
-    ? '\nStaged locally only. Validate with `grafana-dashboard validate`, then `workspace plan` and `workspace apply <plan-id>` to request approval.'
+    ? '\nStaged locally only. Validate with `grafana-dashboard validate`, then `workspace apply` to request approval.'
     : '';
 }
 

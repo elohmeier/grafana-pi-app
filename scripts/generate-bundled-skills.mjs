@@ -5,9 +5,9 @@ import path from 'node:path';
 import process from 'node:process';
 
 const repoRoot = process.cwd();
-const skillsRoot = path.join(repoRoot, '.agents', 'skills');
+const skillsRoot = path.join(repoRoot, 'assistant', 'skills');
 const outputFile = path.join(repoRoot, 'src', 'pages', 'Chat', 'skills', 'bundledSkills.generated.ts');
-const resourceDirectories = new Set(['references', 'templates', 'assets']);
+const resourceDirectories = new Set(['references', 'templates', 'assets', 'scripts']);
 const textExtensions = new Set([
   '.css',
   '.csv',
@@ -16,6 +16,9 @@ const textExtensions = new Set([
   '.libsonnet',
   '.md',
   '.promql',
+  '.sh',
+  '.jq',
+  '.py',
   '.txt',
   '.ts',
   '.tsx',

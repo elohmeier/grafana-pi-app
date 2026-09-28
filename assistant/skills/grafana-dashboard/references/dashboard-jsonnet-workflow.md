@@ -6,7 +6,7 @@ Use this sequence for Jsonnet dashboards:
 2. `write` the source to `/workspace/<name>.jsonnet`.
 3. `mkdir -p /grafana/dashboards/<uid> && jsonnet /workspace/<name>.jsonnet --resource <uid> -o /grafana/dashboards/<uid>/dashboard.json`
 4. `grafana-dashboard fix /grafana/dashboards/<uid>/dashboard.json` and `grafana-dashboard validate /grafana/dashboards/<uid>/dashboard.json`; repair errors in the Jsonnet with `edit` and re-run step 3.
-5. `workspace plan`, then `workspace apply <plan-id>` for create or update requests unless the user asked for a draft or preview only.
+5. `workspace apply` for create or update requests unless the user asked for a draft or preview only.
 
 `jsonnet FILE` without `-o` prints the evaluated JSON, which is useful with `jq` to inspect panels before rendering into the working copy.
 

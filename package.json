@@ -13,6 +13,7 @@
     "dev": "npm run generate:skills && webpack -w -c ./webpack.config.ts --env development",
     "test": "npm run generate:skills && jest --watch --onlyChanged",
     "test:ci": "npm run generate:skills && jest --passWithNoTests --maxWorkers 4",
+    "test:shell-worker": "node scripts/test-shell-worker.mjs",
     "typecheck": "npm run generate:skills && tsc --noEmit",
     "lint": "npm run generate:skills && eslint --cache .",
     "lint:fix": "npm run lint -- --fix && prettier --write --list-different .",

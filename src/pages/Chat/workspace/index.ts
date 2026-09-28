@@ -1,7 +1,7 @@
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { DashboardMutationAPI } from '@grafana/data';
 import type { GrafanaSkill } from '../skills/types';
-import type { ArtifactRuntime } from '../tools/artifacts';
+import type { ArtifactRuntime } from '../domain/artifacts';
 import type { WorkspaceApprovalService, WorkspaceBroker } from './broker';
 import { createArtifactsMount, createCatalogMount, createJsonnetLibraryMount, createSkillsMount } from './mounts';
 import { createPythonCommands, type PythonRunner } from './python/pythonCommand';
@@ -20,6 +20,8 @@ export type { WorkspaceApprovalRequest, WorkspaceApprovalService, WorkspaceBroke
 
 export type SessionWorkspaceToolkitOptions = {
   workspace: SessionWorkspace;
+  catalogMount?: GeneratedMount;
+  context?: Record<string, unknown>;
   broker: WorkspaceBroker;
   approvals?: WorkspaceApprovalService;
   artifacts?: ArtifactRuntime;
@@ -42,6 +44,35 @@ export function createSessionWorkspaceToolkit(options: SessionWorkspaceToolkitOp
   const live = options.getDashboardMutationAPI ? createLiveDashboardBroker(options.getDashboardMutationAPI) : undefined;
   const broker: WorkspaceBroker = live ? { ...options.broker, live } : options.broker;
   const mounts: GeneratedMount[] = [];
+  mounts.push({
+    root: '/session/context.json',
+    description: 'Read-only context captured for this turn.',
+    files: () => ({ '/session/context.json': { content: JSON.stringify(options.context ?? {}, null, 2) + '\n' } }),
+  });
+  mounts.push({
+    root: '/session/receipts',
+    description: 'Read-only apply outcome journal.',
+    files: () =>
+      Object.fromEntries([
+        [
+          '/session/receipts/index.ndjson',
+          {
+            content:
+              workspace
+                .applyJournal()
+                .map(({ diff: _diff, ...receipt }) => JSON.stringify(receipt))
+                .join('\n') + '\n',
+          },
+        ],
+        ...workspace
+          .applyJournal()
+          .filter((receipt) => receipt.applyId)
+          .flatMap((receipt) => [
+            [`/session/receipts/${receipt.applyId}.json`, { content: JSON.stringify(receipt, null, 2) + '\n' }],
+            [`/session/receipts/${receipt.applyId}.diff`, { content: receipt.diff ?? '' }],
+          ]),
+      ]),
+  });
   if (options.skills) {
     mounts.push(createSkillsMount(options.skills));
   }
@@ -49,7 +80,7 @@ export function createSessionWorkspaceToolkit(options: SessionWorkspaceToolkitOp
     mounts.push(createArtifactsMount(options.artifacts));
   }
   if (broker.dashboards) {
-    mounts.push(createCatalogMount(broker.dashboards));
+    mounts.push(options.catalogMount ?? createCatalogMount(broker.dashboards));
     const dashboards = broker.dashboards;
     workspace.setHydrator((_kind, uid, signal) => dashboards.get(uid, signal));
   }

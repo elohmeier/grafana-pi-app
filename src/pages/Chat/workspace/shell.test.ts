@@ -128,9 +128,9 @@ describe('workspace bash', () => {
 
   it('prints generated help for registered commands', async () => {
     const { run } = setup();
-    const help = await run('grafana --help && workspace plan --help');
+    const help = await run('grafana --help && workspace apply --help');
     expect(help.stdout).toContain('grafana search [QUERY]');
-    expect(help.stdout).toContain('Usage: workspace plan');
+    expect(help.stdout).toContain('Usage: workspace apply');
     const unknown = await run('grafana nope');
     expect(unknown.exitCode).toBe(2);
   });
@@ -172,19 +172,18 @@ describe('workspace commands', () => {
     expect(report.levels.policy).toBe('failed');
   });
 
-  it('plans, requests approval, and applies with revision preconditions', async () => {
+  it('validates, requests approval, and applies with revision preconditions', async () => {
     const { run, approvals, store, workspace, calls } = setup();
     await run(
       `jq '.spec.title = "Checkout v2"' /grafana/dashboards/checkout/dashboard.json > /tmp/c && mv /tmp/c /grafana/dashboards/checkout/dashboard.json`
     );
-    const plan = await run('workspace plan');
-    expect(plan.exitCode).toBe(0);
-    const planId = JSON.parse(plan.stdout).planId;
-
-    const apply = await run(`workspace apply ${planId}`);
+    const apply = await run('workspace apply');
     expect(apply.exitCode).toBe(0);
     expect((approvals.request.mock.calls[0] as unknown[])[0]).toEqual(
-      expect.objectContaining({ planId, diff: expect.stringContaining('+    "title": "Checkout v2"') })
+      expect.objectContaining({
+        applyId: expect.any(String),
+        diff: expect.stringContaining('+    "title": "Checkout v2"'),
+      })
     );
     expect(calls).toContain('update:checkout@101');
     expect(store.get('checkout')?.resource.spec.title).toBe('Checkout v2');
@@ -193,40 +192,43 @@ describe('workspace commands', () => {
       String(store.get('checkout')?.resourceVersion)
     );
 
-    // Applying the same plan again is idempotent.
-    const again = await run(`workspace apply ${planId}`);
+    // Applying with no remaining changes is idempotent.
+    const again = await run('workspace apply');
     expect(again.exitCode).toBe(0);
     expect(calls.filter((call) => call.startsWith('update:'))).toHaveLength(1);
   });
 
-  it('invalidates plans when the working copy changes and reports remote conflicts', async () => {
-    const { run, touch } = setup();
+  it('rejects changes during approval and reports remote conflicts', async () => {
+    const { run, touch, approvals, workspace, calls } = setup();
     await run(`sed -i 's/"Payments"/"Payments 2"/' /grafana/dashboards/payments/dashboard.json`);
-    const planId = JSON.parse((await run('workspace plan')).stdout).planId;
-    await run(`sed -i 's/"Payments 2"/"Payments 3"/' /grafana/dashboards/payments/dashboard.json`);
-    const stale = await run(`workspace apply ${planId}`);
+    approvals.request.mockImplementationOnce(async () => {
+      const tx = workspace.begin();
+      const path = '/grafana/dashboards/payments/dashboard.json';
+      await tx.writeFile(path, (await tx.readFile(path)).replace('Payments 2', 'Payments 3'));
+      tx.commit();
+      return { approved: true };
+    });
+    const stale = await run('workspace apply');
     expect(stale.exitCode).toBe(1);
-    expect(stale.stderr).toMatch(/stale/);
-
-    const fresh = JSON.parse((await run('workspace plan')).stdout).planId;
+    expect(stale.stderr).toMatch(/changed while waiting/);
+    expect(calls.some((call) => call.startsWith('update:'))).toBe(false);
     touch('payments');
-    const conflicted = await run(`workspace apply ${fresh}`);
+    const conflicted = await run('workspace apply');
     expect(conflicted.exitCode).toBe(1);
     expect(JSON.parse(conflicted.stdout).results[0]).toEqual(expect.objectContaining({ outcome: 'conflicted' }));
   });
 
-  it('refuses to plan invalid documents and honours denied approvals', async () => {
+  it('refuses to apply invalid documents and honours denied approvals', async () => {
     const { run, approvals, calls } = setup();
     await run(`echo '{"broken":' > /grafana/dashboards/checkout/dashboard.json`);
-    const invalid = await run('workspace plan');
+    const invalid = await run('workspace apply');
     expect(invalid.exitCode).toBe(1);
     expect(invalid.stderr).toMatch(/invalid JSON/);
 
     await run('workspace discard /grafana/dashboards/checkout/dashboard.json');
     await run(`sed -i 's/"Checkout"/"Checkout!"/' /grafana/dashboards/checkout/dashboard.json`);
     approvals.request.mockResolvedValueOnce({ approved: false });
-    const planId = JSON.parse((await run('workspace plan')).stdout).planId;
-    const denied = await run(`workspace apply ${planId}`);
+    const denied = await run('workspace apply');
     expect(denied.exitCode).toBe(1);
     expect(denied.stderr).toMatch(/not approved/);
     expect(calls.some((call) => call.startsWith('update:'))).toBe(false);
@@ -241,9 +243,7 @@ describe('workspace commands', () => {
       spec: { title: 'New', panels: [PANEL] },
     });
     await run(`mkdir -p /grafana/dashboards/new-dash && echo '${doc}' > /grafana/dashboards/new-dash/dashboard.json`);
-    const plan = JSON.parse((await run('workspace plan')).stdout);
-    expect(plan.operations).toEqual([expect.objectContaining({ operation: 'create', uid: 'new-dash' })]);
-    const apply = await run(`workspace apply ${plan.planId}`);
+    const apply = await run('workspace apply');
     expect(apply.exitCode).toBe(0);
     expect(store.get('new-dash')?.resource.spec.title).toBe('New');
   });
@@ -258,12 +258,11 @@ describe('workspace commands', () => {
 });
 
 describe('workspace persistence', () => {
-  it('round-trips scratch files, overlays, and plans but drops /tmp and unmodified bases', async () => {
+  it('round-trips scratch files, and overlays but drops /tmp and unmodified bases', async () => {
     const { run, workspace } = setup();
     await run('echo keep > /workspace/a.txt; echo drop > /tmp/b.txt; echo plan > /session/plan.md');
     await run('grafana fetch payments');
     await run(`sed -i 's/"Checkout"/"Checkout!"/' /grafana/dashboards/checkout/dashboard.json`);
-    await run('workspace plan');
 
     const persisted = JSON.parse(JSON.stringify(workspace.serialize()));
     const payments = persisted.resources.find((resource: { uid: string }) => resource.uid === 'payments');
@@ -274,7 +273,7 @@ describe('workspace persistence', () => {
     expect(restored.getScratchFile('/session/plan.md')?.content).toBe('plan\n');
     expect(restored.getScratchFile('/tmp/b.txt')).toBeUndefined();
     expect(restored.status()).toEqual([expect.objectContaining({ uid: 'checkout', change: 'modified' })]);
-    expect(restored.listPlans()).toHaveLength(1);
+    expect(restored.serialize()).not.toHaveProperty('plans');
   });
 });
 
@@ -407,11 +406,10 @@ describe('approval waits', () => {
   it('does not count time waiting for approval against the bash timeout', async () => {
     const { run, approvals, calls } = setup();
     await run(`sed -i 's/"Checkout"/"Checkout slow"/' /grafana/dashboards/checkout/dashboard.json`);
-    const planId = JSON.parse((await run('workspace plan')).stdout).planId;
     approvals.request.mockImplementationOnce(
       () => new Promise((resolve) => setTimeout(() => resolve({ approved: true }), 1500))
     );
-    const result = await run(`workspace apply ${planId}`, { timeoutMs: 1000 });
+    const result = await run('workspace apply', { timeoutMs: 1000 });
     expect(result.timedOut).toBe(false);
     expect(result.exitCode).toBe(0);
     expect(calls).toContain('update:checkout@101');
@@ -446,7 +444,7 @@ describe('workspace commands inside one bash call', () => {
       spec: { title: 'Same call', panels: [PANEL] },
     });
     const result = await run(
-      `mkdir -p /grafana/dashboards/same-call && echo '${doc}' > /grafana/dashboards/same-call/dashboard.json && id=$(workspace plan | jq -r .planId) && workspace apply "$id" | jq -r '.results[0].outcome'`
+      `mkdir -p /grafana/dashboards/same-call && echo '${doc}' > /grafana/dashboards/same-call/dashboard.json && workspace apply | jq -r '.results[0].outcome'`
     );
     expect(result.stderr).toBe('');
     expect(result.stdout).toBe('applied\n');

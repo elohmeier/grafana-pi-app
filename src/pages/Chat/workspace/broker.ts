@@ -1,10 +1,10 @@
-import type { AlertRuleParams, PanelAlertRuleSearchParams } from '../tools/alerts';
+import type { AlertRuleParams, PanelAlertRuleSearchParams } from '../domain/alerts';
 import type {
   DashboardMetricContextParams,
   DashboardMetricSearchParams,
   MetricNeighborhoodParams,
-} from '../tools/dashboardMetricContext';
-import type { ScreenshotParams } from '../tools/types';
+} from '../domain/dashboardMetricContext';
+import type { ScreenshotParams } from '../domain/types';
 import type { PromqlParser } from './promqlCheck';
 import type { WorkspaceResourceSnapshot } from './types';
 
@@ -195,7 +195,7 @@ export type PrometheusBroker = {
 
 /** Approval requests go to the authenticated UI, outside model-controlled tools. */
 export type WorkspaceApprovalRequest = {
-  planId: string;
+  applyId: string;
   digest: string;
   title: string;
   summary: string;

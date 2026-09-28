@@ -1,0 +1,70 @@
+jest.mock('typebox', () => ({
+  Type: Object.fromEntries(
+    ['Array', 'Boolean', 'Number', 'Object', 'Optional', 'String'].map((name) => [
+      name,
+      (...args: unknown[]) => ({ args }),
+    ])
+  ),
+}));
+
+import { AssistantSession } from './AssistantSession';
+import { createFakeDashboardBroker } from '../workspace/testUtils';
+
+it('keeps catalog caches, artifacts, and pending approvals across view/toolkit changes', async () => {
+  const session = new AssistantSession();
+  const { broker, calls } = createFakeDashboardBroker([{ uid: 'one', title: 'One' }]);
+  const options = { workspace: session.workspace, broker, artifacts: session.artifacts };
+  const first = session.toolkit({ ...options, context: { route: '/first' } });
+  expect((await first.runShell('cat /grafana/catalog/dashboards.ndjson')).exitCode).toBe(0);
+  const second = session.toolkit({ ...options, context: { route: '/second' } });
+  expect((await second.runShell('cat /grafana/catalog/dashboards.ndjson')).exitCode).toBe(0);
+  expect(calls.filter((call) => call.startsWith('search:'))).toHaveLength(1);
+  expect(JSON.parse((await second.runShell('cat /session/context.json')).stdout)).toEqual({ route: '/second' });
+  expect((await second.runShell('echo forged > /session/context.json')).exitCode).not.toBe(0);
+
+  const request = {
+    applyId: 'apply-1',
+    digest: 'digest',
+    title: 'Save',
+    summary: 'One',
+    operations: [],
+    diff: 'complete',
+  };
+  const pending = session.approvals.request(request);
+  const listener = jest.fn();
+  const unsubscribe = session.approvals.subscribe(listener);
+  unsubscribe(); // A view detaches; the next view still sees the same pending decision.
+  expect(session.approvals.getSnapshot()).toBe(request);
+  session.approvals.settle(true);
+  await expect(pending).resolves.toEqual({ approved: true, reason: undefined });
+  expect(session.approvals.getSnapshot()).toBeUndefined();
+});
+
+it('does not retain an approval after cancellation', async () => {
+  const session = new AssistantSession();
+  const controller = new AbortController();
+  const pending = session.approvals.request(
+    { applyId: 'apply-1', digest: '', title: '', summary: '', operations: [], diff: '' },
+    controller.signal
+  );
+  controller.abort();
+  await expect(pending).resolves.toMatchObject({ approved: false });
+  expect(session.approvals.getSnapshot()).toBeUndefined();
+});
+
+it('serializes persistence with captured state independently of the view', async () => {
+  const session = new AssistantSession();
+  const seen: string[] = [];
+  session.persist = async (snapshot) => {
+    seen.push(snapshot.workspace.files['/session/note']?.content);
+  };
+  const first = session.workspace.begin();
+  await first.writeFile('/session/note', 'first');
+  first.commit();
+  const saving = session.save();
+  const second = session.workspace.begin();
+  await second.writeFile('/session/note', 'second');
+  second.commit();
+  await Promise.all([saving, session.save()]);
+  expect(seen).toEqual(['first', 'second']);
+});

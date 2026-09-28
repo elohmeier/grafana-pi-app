@@ -9,13 +9,13 @@ test.describe('assistant safety workflows', () => {
     const suffix = Date.now().toString(36);
     const deniedUid = `denied-e2e-${suffix}`;
     const approvedUid = `approved-e2e-${suffix}`;
-    // Stage the working copy with the write tool, then plan and apply it in a separate bash call.
+    // Stage the working copy with the write tool, then apply it in a separate bash call.
     const responses = [
       toolCallResponse('write', stagedDashboard(deniedUid, 'Denied E2E'), 'call_denied_write'),
-      toolCallResponse('bash', { command: planAndApplyCommand(deniedUid) }, 'call_denied_apply'),
+      toolCallResponse('bash', { command: applyCommand(deniedUid) }, 'call_denied_apply'),
       textResponse('Denied path handled.'),
       toolCallResponse('write', stagedDashboard(approvedUid, 'Approved E2E'), 'call_approved_write'),
-      toolCallResponse('bash', { command: planAndApplyCommand(approvedUid) }, 'call_approved_apply'),
+      toolCallResponse('bash', { command: applyCommand(approvedUid) }, 'call_approved_apply'),
       textResponse('Approved path handled.'),
     ];
     const llmRequests: any[] = [];
@@ -46,7 +46,7 @@ test.describe('assistant safety workflows', () => {
       await expect(page.getByText('Denied path handled.')).toBeVisible();
       expect((await page.request.get(`/api/dashboards/uid/${deniedUid}`)).status()).toBe(404);
 
-      // The denied change stays staged in the session; the plan is scoped to the new path.
+      // The denied change stays staged in the session; apply is scoped to the new path.
       await composer.fill('Create a dashboard for confirmation approval');
       await page.getByTestId(testIds.chat.send).click();
 
@@ -150,8 +150,8 @@ function stagedDashboard(uid: string, title: string) {
   return { path: dashboardPath(uid), content: `${JSON.stringify(resource, null, 2)}\n` };
 }
 
-function planAndApplyCommand(uid: string) {
-  return `plan=$(workspace plan --path ${dashboardPath(uid)} | jq -r .planId) && workspace apply "$plan"`;
+function applyCommand(uid: string) {
+  return `workspace apply --path ${dashboardPath(uid)}`;
 }
 
 function sseResponse(events: unknown[]) {

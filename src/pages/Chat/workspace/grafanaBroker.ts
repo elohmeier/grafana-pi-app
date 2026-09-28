@@ -1,19 +1,19 @@
 import { config, getBackendSrv, isFetchError, locationService, type FetchResponse } from '@grafana/runtime';
-import { findPanelAlertRules, getAlertRule } from '../tools/alerts';
+import { findPanelAlertRules, getAlertRule } from '../domain/alerts';
 import {
   getMetricNeighborhood,
   inspectDashboardMetricUsage,
   searchDashboardMetricUsage,
-} from '../tools/dashboardMetricContext';
-import { renderDashboardScreenshot } from '../tools/dashboards';
-import { formatBackendFetchError } from '../tools/client';
+} from '../domain/dashboardMetricContext';
+import { renderDashboardScreenshot } from '../domain/dashboards';
+import { formatBackendFetchError } from '../domain/client';
 import {
   getDatasourceResource,
   getPrometheusDatasource,
   getPrometheusDatasourceSettings,
   runPrometheusQuerySummaryOrValidationError,
-} from '../tools/metrics';
-import type { GrafanaToolConfig, PrometheusMetadataResponse } from '../tools/types';
+} from '../domain/metrics';
+import type { GrafanaToolConfig, PrometheusMetadataResponse } from '../domain/types';
 import { PLUGIN_ID } from '../../../constants';
 import type {
   DashboardBroker,

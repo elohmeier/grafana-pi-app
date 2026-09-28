@@ -1,6 +1,6 @@
 import { createAssistantTelemetryReporter, type AssistantTelemetryEvent } from './telemetry';
 
-jest.mock('./tools/client', () => ({
+jest.mock('./domain/client', () => ({
   pluginResourceFetch: jest.fn(),
 }));
 
@@ -29,7 +29,6 @@ describe('assistant telemetry reporter', () => {
           content: 'Runbook content',
           filePath: 'plugin-config/customSkills/team-runbook',
           resources: {},
-          toolGroups: ['skillResources'],
         },
       ],
       explicitSkillNames: ['team-runbook'],

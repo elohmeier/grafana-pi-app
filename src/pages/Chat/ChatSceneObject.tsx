@@ -33,13 +33,7 @@ import { useRestrictedGrafanaApis, type DashboardMutationAPI, type GrafanaTheme2
 import { PLUGIN_BASE_URL, PLUGIN_ID } from '../../constants';
 import { testIds } from '../../components/testIds';
 import { usePluginMeta } from '../../utils/utils.plugin';
-import {
-  createGrafanaTools,
-  artifactByteSize,
-  type Artifact,
-  type ArtifactRuntime,
-  type GrafanaToolRuntime,
-} from './grafanaTools';
+import type { Artifact } from './domain';
 import { formatAssistantError, type AssistantErrorView } from './llmErrors';
 import {
   createOpenAICompatibleModel,
@@ -48,12 +42,7 @@ import {
   type PiAppJsonData,
   type PiAppThinkingLevel,
 } from './model';
-import {
-  convertChatMessagesToLlm,
-  createUserShellMessage,
-  hasPersistableMessages,
-  parseUserShellInput,
-} from './chatMessages';
+import { createUserShellMessage, hasPersistableMessages, parseUserShellInput } from './chatMessages';
 import { getGrafanaSkills, renderGrafanaSystemPrompt, selectGrafanaSkills } from './skills';
 import {
   ContentBlocks,
@@ -95,27 +84,13 @@ import {
   runStatusText,
   type ChatRunStatus,
 } from './streamingStatus';
-import {
-  getChatRun,
-  isStoredChatRunAgent,
-  removeChatRun,
-  setChatRunConfirmationHandler,
-  storeChatRun,
-  type ChatRunSnapshot,
-  type ChatToolConfirmationHandler,
-} from './chatRunRegistry';
-import { createSessionWorkspaceToolkit, SessionWorkspace, type PersistedWorkspace } from './workspace';
-import type { WorkspaceApprovalRequest, WorkspaceApprovalService } from './workspace/broker';
+import { getChatRun, isStoredChatRunAgent, removeChatRun, storeChatRun, type ChatRunSnapshot } from './chatRunRegistry';
+import { SessionWorkspace, type PersistedWorkspace } from './workspace';
 import { createGrafanaWorkspaceBroker } from './workspace/grafanaBroker';
 import { migrateLegacyInvestigationReport, migrateLegacyJsonnetFiles, REPORT_PATH } from './workspace/migration';
-import {
-  buildSummarizerPrompt,
-  ContextCompactor,
-  estimateTextTokens,
-  isCompactionState,
-  SUMMARIZER_SYSTEM_PROMPT,
-  type CompactionState,
-} from './compaction';
+import { isCompactionState, type CompactionState } from './compaction';
+import { AssistantSession, type SessionSnapshot } from './session/AssistantSession';
+import { compactArtifacts } from './session/artifactStore';
 import { createBrowserPythonRunner } from './workspace/python/pythonBrowserRunner';
 
 type ChatSceneObjectState = SceneObjectState;
@@ -307,19 +282,16 @@ export function ChatApp({
     []
   );
   const sessionIdRef = useRef<string>(undefined);
-  const artifactsRef = useRef<Record<string, Artifact>>({});
-  const artifactCounterRef = useRef(0);
-  const [workspace, setWorkspaceState] = useState(() => new SessionWorkspace());
+  const [session, setSession] = useState(() => new AssistantSession());
+  const sessionRef = useRef(session);
+  const workspace = session.workspace;
   const [userShellRunning, setUserShellRunning] = useState(false);
-  const workspaceRef = useRef<SessionWorkspace>(workspace);
-  // Shared holder so a run handed off between page and sidebar keeps one compaction state.
-  const compactionRef = useRef<CompactionHolder>({});
   const dashboardLaunchRef = useRef<DashboardAssistantLaunch>(undefined);
   const externalLaunchRef = useRef<ExternalAssistantLaunch>(undefined);
   // The workspace instance changes with the session; state lets the report file subscription follow it.
   const replaceWorkspace = useCallback((next: SessionWorkspace) => {
-    workspaceRef.current = next;
-    setWorkspaceState(next);
+    sessionRef.current = new AssistantSession(next);
+    setSession(sessionRef.current);
   }, []);
   const subscribeWorkspace = useCallback(
     (listener: () => void) => {
@@ -355,49 +327,15 @@ export function ChatApp({
     };
   }, [pluginMetaJsonData.isOpenAIAPIKeySet]);
   const setArtifactSnapshots = useCallback((artifacts: Record<string, Artifact>, counter?: number) => {
-    const compacted = compactArtifacts(artifacts);
-    artifactsRef.current = compacted;
-    artifactCounterRef.current = counter ?? nextArtifactCounter(compacted);
+    sessionRef.current.artifacts.restore(artifacts, counter);
   }, []);
-  const clearArtifacts = useCallback(() => {
-    artifactsRef.current = {};
-    artifactCounterRef.current = 0;
-  }, []);
-  const artifactRuntime = useMemo<ArtifactRuntime>(
-    () => ({
-      register: (input) => {
-        const id = createArtifactId(artifactCounterRef.current + 1);
-        artifactCounterRef.current += 1;
-        const artifact: Artifact = {
-          id,
-          kind: input.kind,
-          title: input.title,
-          toolName: input.toolName,
-          createdAt: new Date().toISOString(),
-          bytes: input.bytes ?? artifactByteSize(input.data),
-          summary: input.summary,
-          data: input.data,
-          preview: input.preview,
-          mimeType: input.mimeType,
-          toolDetails: input.toolDetails,
-        };
-        artifactsRef.current = compactArtifacts({
-          ...artifactsRef.current,
-          [id]: artifact,
-        });
-        return artifact;
-      },
-      get: (id) => artifactsRef.current[id],
-      list: () => Object.values(artifactsRef.current).sort(compareArtifactsByCreatedAt),
-    }),
-    []
-  );
   const [agent, setAgent] = useState<Agent>();
-  const agentRef = useRef<Agent>(undefined);
   const { revision, flushRevision, scheduleRevision } = useFrameRevision();
   const [input, setInput] = useState('');
-  const [pendingToolConfirmation, setPendingToolConfirmationState] = useState<ToolConfirmationView>();
-  const pendingToolConfirmationRef = useRef<ToolConfirmationView>(undefined);
+  const pendingApproval = useSyncExternalStore(session.approvals.subscribe, session.approvals.getSnapshot);
+  const pendingToolConfirmation = pendingApproval
+    ? buildToolConfirmation(pendingApproval.applyId, WORKSPACE_APPLY_APPROVAL, pendingApproval)
+    : undefined;
   const [sessions, setSessions] = useState<SessionIndexItem[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>();
   const [currentTitle, setCurrentTitle] = useState('New chat');
@@ -415,7 +353,6 @@ export function ChatApp({
   const sidebarRouteRef = useRef<string | undefined>(sidebarRoute);
   const lastScrollTopRef = useRef(0);
   const touchStartYRef = useRef<number>(undefined);
-  const toolConfirmationResolverRef = useRef<(approved: boolean) => void>(undefined);
   const initialLoadStartedRef = useRef(false);
   const isChatDirtyRef = useRef(false);
   const pendingLeaveActionRef = useRef<() => void>(undefined);
@@ -423,22 +360,6 @@ export function ChatApp({
   const [leaveGuardAction, setLeaveGuardAction] = useState<ChatLeaveGuardAction>();
   const [blockedLocation, setBlockedLocation] = useState<ReturnType<typeof locationService.getLocation>>();
   const [isAutoScrollPaused, setIsAutoScrollPaused] = useState(false);
-
-  const setPendingToolConfirmation = useCallback(
-    (
-      next:
-        | ToolConfirmationView
-        | undefined
-        | ((current: ToolConfirmationView | undefined) => ToolConfirmationView | undefined)
-    ) => {
-      setPendingToolConfirmationState((current) => {
-        const value = typeof next === 'function' ? next(current) : next;
-        pendingToolConfirmationRef.current = value;
-        return value;
-      });
-    },
-    []
-  );
 
   const setRunStatusSnapshot = useCallback((next: ChatRunStatus | undefined) => {
     runStatusRef.current = next;
@@ -453,113 +374,30 @@ export function ChatApp({
     });
   }, []);
 
-  const settleToolConfirmation = useCallback(
-    (approved: boolean) => {
-      const resolve = toolConfirmationResolverRef.current;
-      if (!resolve) {
-        setPendingToolConfirmation(undefined);
-        return;
-      }
-      resolve?.(approved);
-    },
-    [setPendingToolConfirmation]
-  );
-
-  const requestToolConfirmation = useCallback<ChatToolConfirmationHandler>(
-    (toolCallId: string, toolName: string, args: unknown, signal?: AbortSignal) => {
-      const confirmation = buildToolConfirmation(toolCallId, toolName, args);
-      if (!confirmation) {
-        return Promise.resolve(undefined);
-      }
-
-      if (toolConfirmationResolverRef.current) {
-        return Promise.resolve({
-          block: true,
-          reason: `Persistent Grafana write tool ${toolName} was blocked because another approval is pending.`,
-        });
-      }
-
-      return new Promise((resolve) => {
-        let settled = false;
-        const finish = (approved: boolean) => {
-          if (settled) {
-            return;
-          }
-          settled = true;
-          signal?.removeEventListener('abort', handleAbort);
-          toolConfirmationResolverRef.current = undefined;
-          setPendingToolConfirmation(undefined);
-          resolve(
-            approved
-              ? undefined
-              : {
-                  block: true,
-                  reason: `User denied persistent Grafana write tool ${toolName}.`,
-                }
-          );
-        };
-        const handleAbort = () => finish(false);
-
-        toolConfirmationResolverRef.current = finish;
-        setPendingToolConfirmation(confirmation);
-
-        if (signal?.aborted) {
-          finish(false);
-        } else {
-          signal?.addEventListener('abort', handleAbort, { once: true });
-        }
-      });
-    },
-    [setPendingToolConfirmation]
-  );
-
-  const confirmToolCall = useCallback<NonNullable<GrafanaToolRuntime['beforeToolCall']>>(
-    ({ toolCall, args }, signal) => {
-      const handler = getChatRun(sessionIdRef.current)?.requestToolConfirmation ?? requestToolConfirmation;
-      return handler(toolCall.id, toolCall.name, args, signal);
-    },
-    [requestToolConfirmation]
-  );
+  const settleToolConfirmation = useCallback((approved: boolean) => sessionRef.current.approvals.settle(approved), []);
 
   const workspaceBroker = useMemo(() => createGrafanaWorkspaceBroker(jsonData), [jsonData]);
   const pythonRunner = useMemo(() => createBrowserPythonRunner(), []);
-  const workspaceApprovals = useMemo<WorkspaceApprovalService>(
-    () => ({
-      async request(approval: WorkspaceApprovalRequest, signal?: AbortSignal) {
-        // Resolve the handler at call time so approvals follow a run handed off between page and sidebar.
-        const handler = getChatRun(sessionIdRef.current)?.requestToolConfirmation ?? requestToolConfirmation;
-        const decision = await handler(
-          `${WORKSPACE_APPLY_APPROVAL}-${approval.planId}`,
-          WORKSPACE_APPLY_APPROVAL,
-          approval,
-          signal
-        );
-        return decision?.block ? { approved: false, reason: decision.reason } : { approved: true };
-      },
-    }),
-    [requestToolConfirmation]
-  );
-
   const buildWorkspaceToolkit = useCallback(
     () =>
-      createSessionWorkspaceToolkit({
-        workspace: workspaceRef.current,
+      sessionRef.current.toolkit({
+        workspace: sessionRef.current.workspace,
         broker: workspaceBroker,
-        approvals: workspaceApprovals,
-        artifacts: artifactRuntime,
+        approvals: sessionRef.current.approvals,
+        artifacts: sessionRef.current.artifacts,
         skills,
+        context: {
+          capturedAt: new Date().toISOString(),
+          page: buildAssistantSidebarPageContextSnapshot(sidebarRouteRef.current, { liveDashboardEditingAvailable }),
+          dashboardLaunch: dashboardLaunchRef.current,
+          externalLaunch: externalLaunchRef.current?.context,
+          capabilities: { liveDashboardEditingAvailable, python: Boolean(pythonRunner) },
+          datasources: workspaceBroker.prometheus?.datasources(),
+        },
         python: pythonRunner,
         getDashboardMutationAPI: liveDashboardEditingAvailable ? () => dashboardMutationAPI : undefined,
       }),
-    [
-      artifactRuntime,
-      dashboardMutationAPI,
-      liveDashboardEditingAvailable,
-      pythonRunner,
-      skills,
-      workspaceApprovals,
-      workspaceBroker,
-    ]
+    [dashboardMutationAPI, liveDashboardEditingAvailable, pythonRunner, skills, workspaceBroker]
   );
 
   const buildSkillRuntime = useCallback(
@@ -569,11 +407,7 @@ export function ChatApp({
         : undefined;
       const selection = selectGrafanaSkills(prompt, skills, sidebarPageContextSkillHints(sidebarPageContext));
       const workspaceToolkit = buildWorkspaceToolkit();
-      const tools = createGrafanaTools({
-        ...jsonData,
-        dashboardMutation: dashboardMutationAPI,
-        workspaceTools: workspaceToolkit.tools,
-      });
+      const tools = workspaceToolkit.tools;
       const systemPrompt = [
         renderGrafanaSystemPrompt({
           skills,
@@ -598,7 +432,7 @@ export function ChatApp({
         skillSelection: selection,
       };
     },
-    [buildWorkspaceToolkit, dashboardMutationAPI, isSidebarVariant, liveDashboardEditingAvailable, jsonData, skills]
+    [buildWorkspaceToolkit, isSidebarVariant, liveDashboardEditingAvailable, skills]
   );
 
   const persistIndex = useCallback(
@@ -611,7 +445,7 @@ export function ChatApp({
   );
 
   const saveSession = useCallback(
-    async (id: string, title: string, messages: AgentMessage[]) => {
+    async (id: string, title: string, messages: AgentMessage[], snapshot = sessionRef.current.snapshot(messages)) => {
       if (!hasPersistableMessages(messages)) {
         return;
       }
@@ -625,20 +459,15 @@ export function ChatApp({
       };
       const stored: StoredSession = {
         ...indexItem,
-        messages,
-        modelId: llmModel.id,
-        thinkingLevel,
-        artifacts: artifactsRef.current,
-        artifactCounter: artifactCounterRef.current,
-        workspace: workspaceRef.current.serialize(),
-        compaction: compactionRef.current.state,
+        ...snapshot,
+        thinkingLevel: parseStoredThinkingLevel(snapshot.thinkingLevel),
       };
       const next = [indexItem, ...sessionsRef.current.filter((session) => session.id !== id)].slice(0, 50);
 
       await storage.setItem(sessionKey(id), JSON.stringify(stored));
       await persistIndex(next);
     },
-    [llmModel.id, persistIndex, storage, thinkingLevel]
+    [persistIndex, storage]
   );
 
   const handleAgentEvent = useCallback(
@@ -661,88 +490,52 @@ export function ChatApp({
         }
         return next;
       });
-      if (event.type === 'agent_end') {
-        const sessionId = sessionIdRef.current;
-        if (sessionId) {
-          void saveSession(sessionId, titleRef.current, event.messages);
-        }
-      }
     },
-    [assistantTelemetry, flushRevision, saveSession, scheduleRevision, updateRunStatus]
+    [assistantTelemetry, flushRevision, scheduleRevision, updateRunStatus]
   );
 
-  const stopCurrentAgentForSessionChange = useCallback(
-    (options?: { preserveLiveRun?: boolean }) => {
-      toolConfirmationResolverRef.current?.(false);
-      toolConfirmationResolverRef.current = undefined;
-      setPendingToolConfirmation(undefined);
-      unsubscribeRef.current?.();
-      unsubscribeRef.current = undefined;
-      const currentAgent = agentRef.current;
-      const currentSessionId = sessionIdRef.current;
-      if (!options?.preserveLiveRun || !isStoredChatRunAgent(currentSessionId, currentAgent)) {
-        removeChatRun(currentSessionId);
-        currentAgent?.abort();
-      }
-    },
-    [setPendingToolConfirmation]
-  );
+  const stopCurrentAgentForSessionChange = useCallback((options?: { preserveLiveRun?: boolean }) => {
+    unsubscribeRef.current?.();
+    unsubscribeRef.current = undefined;
+    const currentAgent = sessionRef.current.agent;
+    const currentSessionId = sessionIdRef.current;
+    if (!options?.preserveLiveRun || !isStoredChatRunAgent(currentSessionId, currentAgent)) {
+      removeChatRun(currentSessionId);
+      sessionRef.current.approvals.settle(false);
+      currentAgent?.abort();
+    }
+  }, []);
 
   const buildAgent = useCallback(
     (messages: AgentMessage[] = []) => {
       stopCurrentAgentForSessionChange();
       const runtime = buildSkillRuntime('');
-      const compaction = compactionRef.current;
-      let nextAgent: Agent;
-      const compactor = new ContextCompactor({
-        initialState: compaction.state,
-        getBudget: () => ({
-          contextWindow: nextAgent.state.model.contextWindow,
-          maxOutputTokens: nextAgent.state.model.maxTokens,
-          fixedTokens: estimateTextTokens(
-            nextAgent.state.systemPrompt +
-              JSON.stringify(
-                nextAgent.state.tools.map((tool) => ({
-                  name: tool.name,
-                  description: tool.description,
-                  parameters: tool.parameters,
-                }))
-              )
-          ),
-        }),
-        summarize: (input, signal) => summarizeWithModel(streamFn, nextAgent.state.model, input, signal),
-        onStateChange: (state) => {
-          compaction.state = state;
-        },
-        onEvent: (event) =>
+      const id = sessionIdRef.current!;
+      const title = titleRef.current;
+      sessionRef.current.persist = (snapshot: SessionSnapshot) => saveSession(id, title, snapshot.messages, snapshot);
+      const nextAgent = sessionRef.current.createAgent({
+        messages,
+        systemPrompt: runtime.systemPrompt,
+        tools: runtime.tools,
+        model: llmModel,
+        thinkingLevel,
+        streamFn,
+        onCompaction: (event) =>
           recordSerializedBenchmarkEvent({ type: 'context_compaction', timestamp: Date.now(), ...event }),
       });
-      nextAgent = new Agent({
-        initialState: {
-          systemPrompt: runtime.systemPrompt,
-          model: llmModel,
-          thinkingLevel,
-          messages,
-          tools: runtime.tools,
-        },
-        convertToLlm: convertChatMessagesToLlm,
-        transformContext: compactor.transform,
-        streamFn,
-        beforeToolCall: confirmToolCall,
-      });
 
-      unsubscribeRef.current = nextAgent.subscribe((event) => handleAgentEvent(event, nextAgent));
+      unsubscribeRef.current = sessionRef.current.subscribe(handleAgentEvent);
 
       setAgent(nextAgent);
-      agentRef.current = nextAgent;
+      sessionRef.current.agent = nextAgent;
       flushRevision();
       return nextAgent;
     },
     [
       buildSkillRuntime,
-      confirmToolCall,
       flushRevision,
       handleAgentEvent,
+      saveSession,
       llmModel,
       stopCurrentAgentForSessionChange,
       streamFn,
@@ -761,9 +554,7 @@ export function ChatApp({
     setSelectedModelId(undefined);
     setSelectedThinkingLevel(undefined);
     replaceWorkspace(new SessionWorkspace());
-    compactionRef.current = {};
     setRunStatusSnapshot(undefined);
-    clearArtifacts();
     autoScrollRef.current = true;
     setIsAutoScrollPaused(false);
     setCurrentSessionId(id);
@@ -773,14 +564,7 @@ export function ChatApp({
     setToolRuns({});
     settleToolConfirmation(false);
     buildAgent([]);
-  }, [
-    replaceWorkspace,
-    buildAgent,
-    clearArtifacts,
-    setRunStatusSnapshot,
-    settleToolConfirmation,
-    stopCurrentAgentForSessionChange,
-  ]);
+  }, [replaceWorkspace, buildAgent, setRunStatusSnapshot, settleToolConfirmation, stopCurrentAgentForSessionChange]);
 
   const startDashboardLaunchSession = useCallback(
     (launch: DashboardAssistantLaunch) => {
@@ -792,10 +576,7 @@ export function ChatApp({
       sessionIdRef.current = id;
       titleRef.current = title;
       replaceWorkspace(new SessionWorkspace());
-      compactionRef.current = {};
-      compactionRef.current = {};
       setRunStatusSnapshot(undefined);
-      clearArtifacts();
       autoScrollRef.current = true;
       setIsAutoScrollPaused(false);
       setCurrentSessionId(id);
@@ -806,14 +587,7 @@ export function ChatApp({
       settleToolConfirmation(false);
       buildAgent([]);
     },
-    [
-      replaceWorkspace,
-      buildAgent,
-      clearArtifacts,
-      setRunStatusSnapshot,
-      settleToolConfirmation,
-      stopCurrentAgentForSessionChange,
-    ]
+    [replaceWorkspace, buildAgent, setRunStatusSnapshot, settleToolConfirmation, stopCurrentAgentForSessionChange]
   );
 
   const startExternalAssistantLaunchSession = useCallback(
@@ -826,10 +600,7 @@ export function ChatApp({
       sessionIdRef.current = id;
       titleRef.current = title;
       replaceWorkspace(new SessionWorkspace());
-      compactionRef.current = {};
-      compactionRef.current = {};
       setRunStatusSnapshot(undefined);
-      clearArtifacts();
       autoScrollRef.current = true;
       setIsAutoScrollPaused(false);
       setCurrentSessionId(id);
@@ -840,18 +611,11 @@ export function ChatApp({
       settleToolConfirmation(false);
       buildAgent([]);
     },
-    [
-      replaceWorkspace,
-      buildAgent,
-      clearArtifacts,
-      setRunStatusSnapshot,
-      settleToolConfirmation,
-      stopCurrentAgentForSessionChange,
-    ]
+    [replaceWorkspace, buildAgent, setRunStatusSnapshot, settleToolConfirmation, stopCurrentAgentForSessionChange]
   );
 
   const preserveCurrentRunForHandoff = useCallback(() => {
-    const currentAgent = agentRef.current;
+    const currentAgent = sessionRef.current.agent;
     const id = sessionIdRef.current;
     if (!currentAgent || !id) {
       return false;
@@ -862,31 +626,26 @@ export function ChatApp({
       title: titleRef.current,
       agent: currentAgent,
       dashboardLaunch: dashboardLaunchRef.current,
-      workspace: workspaceRef.current,
-      compaction: compactionRef.current,
-      artifacts: { ...artifactsRef.current },
-      artifactCounter: artifactCounterRef.current,
+      session: sessionRef.current,
       toolRuns,
       runStatus: runStatusRef.current,
-      requestToolConfirmation,
     });
     return true;
-  }, [requestToolConfirmation, toolRuns]);
+  }, [toolRuns]);
 
   const attachLiveRun = useCallback(
     (run: ChatRunSnapshot) => {
       stopCurrentAgentForSessionChange();
-      setChatRunConfirmationHandler(run.id, requestToolConfirmation);
       dashboardLaunchRef.current = run.dashboardLaunch;
       externalLaunchRef.current = undefined;
       sessionIdRef.current = run.id;
       titleRef.current = run.title;
       setSelectedModelId(run.agent.state.model?.id || undefined);
       setSelectedThinkingLevel(parseStoredThinkingLevel(run.agent.state.thinkingLevel));
-      replaceWorkspace(run.workspace ?? new SessionWorkspace());
-      compactionRef.current = run.compaction ?? {};
+      sessionRef.current = run.session;
+      run.session.persist = (snapshot) => saveSession(run.id, run.title, snapshot.messages, snapshot);
+      setSession(run.session);
       setRunStatusSnapshot(run.runStatus ?? (run.agent.state.isStreaming ? createInitialRunStatus() : undefined));
-      setArtifactSnapshots(run.artifacts, run.artifactCounter);
       autoScrollRef.current = true;
       setIsAutoScrollPaused(false);
       setCurrentSessionId(run.id);
@@ -894,9 +653,8 @@ export function ChatApp({
       setError(undefined);
       setInput('');
       setToolRuns(run.toolRuns);
-      settleToolConfirmation(false);
-      unsubscribeRef.current = run.agent.subscribe((event) => handleAgentEvent(event, run.agent));
-      agentRef.current = run.agent;
+      unsubscribeRef.current = run.session.subscribe(handleAgentEvent);
+      sessionRef.current.agent = run.agent;
       setAgent(run.agent);
       flushRevision();
 
@@ -906,17 +664,7 @@ export function ChatApp({
 
       return true;
     },
-    [
-      replaceWorkspace,
-      flushRevision,
-      handleAgentEvent,
-      requestToolConfirmation,
-      saveSession,
-      setArtifactSnapshots,
-      setRunStatusSnapshot,
-      settleToolConfirmation,
-      stopCurrentAgentForSessionChange,
-    ]
+    [flushRevision, handleAgentEvent, saveSession, setRunStatusSnapshot, stopCurrentAgentForSessionChange]
   );
 
   useEffect(() => {
@@ -1037,7 +785,7 @@ export function ChatApp({
 
   const abortAgent = useCallback(() => {
     settleToolConfirmation(false);
-    agentRef.current?.abort();
+    sessionRef.current.agent?.abort();
     flushRevision();
   }, [flushRevision, settleToolConfirmation]);
 
@@ -1101,7 +849,9 @@ export function ChatApp({
         return true;
       }
 
-      const isActive = Boolean(agentRef.current?.state.isStreaming || toolConfirmationResolverRef.current);
+      const isActive = Boolean(
+        sessionRef.current.agent?.state.isStreaming || sessionRef.current.approvals.getSnapshot()
+      );
       pendingLeaveActionRef.current = undefined;
       setBlockedLocation(location);
       setLeaveGuardAction({
@@ -1166,7 +916,7 @@ export function ChatApp({
   // after `setInput(...)` would still see the previous value).
   const submitPromptText = useCallback(
     async (prompt: string) => {
-      const currentAgent = agentRef.current;
+      const currentAgent = sessionRef.current.agent;
       if (!currentAgent || !prompt || currentAgent.state.isStreaming) {
         return;
       }
@@ -1189,6 +939,8 @@ export function ChatApp({
       setRunStatusSnapshot(createInitialRunStatus());
       keepAutoScrollEnabled();
       try {
+        const title = titleRef.current;
+        sessionRef.current.persist = (snapshot) => saveSession(sessionId!, title, snapshot.messages, snapshot);
         const runtime = buildSkillRuntime(prompt);
         assistantTelemetry.recordPromptStart({
           prompt,
@@ -1205,15 +957,15 @@ export function ChatApp({
         await currentAgent.prompt(prompt);
         assistantTelemetry.recordTranscriptSnapshot(currentAgent.state.messages);
         emitBenchmarkTranscriptSnapshot(currentAgent.state.messages);
-        if (agentRef.current === currentAgent && sessionIdRef.current === sessionId) {
+        if (sessionRef.current.agent === currentAgent && sessionIdRef.current === sessionId) {
           await saveSession(sessionId, titleRef.current, currentAgent.state.messages);
         }
       } catch (err) {
-        if (agentRef.current === currentAgent && sessionIdRef.current === sessionId) {
+        if (sessionRef.current.agent === currentAgent && sessionIdRef.current === sessionId) {
           setError(err instanceof Error ? err.message : String(err));
         }
       } finally {
-        if (agentRef.current === currentAgent && sessionIdRef.current === sessionId) {
+        if (sessionRef.current.agent === currentAgent && sessionIdRef.current === sessionId) {
           dashboardLaunchRef.current = undefined;
           externalLaunchRef.current = undefined;
           setRunStatusSnapshot(undefined);
@@ -1237,7 +989,7 @@ export function ChatApp({
   // result is appended to the transcript, so the agent sees it on the next prompt.
   const runUserShellCommand = useCallback(
     async (command: string) => {
-      const currentAgent = agentRef.current;
+      const currentAgent = sessionRef.current.agent;
       if (!currentAgent || !command || currentAgent.state.isStreaming || userShellRunning) {
         return;
       }
@@ -1258,7 +1010,7 @@ export function ChatApp({
       keepAutoScrollEnabled();
       try {
         const result = await buildWorkspaceToolkit().runShell(command);
-        if (agentRef.current !== currentAgent || sessionIdRef.current !== sessionId) {
+        if (sessionRef.current.agent !== currentAgent || sessionIdRef.current !== sessionId) {
           return;
         }
         currentAgent.state.messages = [...currentAgent.state.messages, createUserShellMessage(result)];
@@ -1301,10 +1053,10 @@ export function ChatApp({
       setSelectedThinkingLevel(parseStoredThinkingLevel(stored.thinkingLevel));
       setChatSessionParamInLocation(id);
       const restoredWorkspace = SessionWorkspace.restore(stored.workspace);
-      compactionRef.current = { state: isCompactionState(stored.compaction) ? stored.compaction : undefined };
       migrateLegacyJsonnetFiles(restoredWorkspace, stored.virtualJsonnetFiles);
       migrateLegacyInvestigationReport(restoredWorkspace, stored.investigationReport);
       replaceWorkspace(restoredWorkspace);
+      sessionRef.current.compaction = { state: isCompactionState(stored.compaction) ? stored.compaction : undefined };
       setRunStatusSnapshot(undefined);
       setArtifactSnapshots(stored.artifacts ?? {}, stored.artifactCounter);
       keepAutoScrollEnabled();
@@ -1511,7 +1263,7 @@ export function ChatApp({
   };
 
   const openFullPage = useCallback(async () => {
-    const currentAgent = agentRef.current;
+    const currentAgent = sessionRef.current.agent;
     const sessionId = sessionIdRef.current;
     let url = `${PLUGIN_BASE_URL}/chat`;
 
@@ -1549,7 +1301,7 @@ export function ChatApp({
   };
 
   const dockToSidebar = useCallback(async () => {
-    const currentAgent = agentRef.current;
+    const currentAgent = sessionRef.current.agent;
     const currentSessionId = sessionIdRef.current;
     const targetRoute = getAssistantDockRoute() ?? '/';
     const request = { path: targetRoute };
@@ -1594,7 +1346,7 @@ export function ChatApp({
         return;
       }
 
-      const currentAgent = agentRef.current;
+      const currentAgent = sessionRef.current.agent;
       const currentSessionId = sessionIdRef.current;
 
       try {
@@ -1648,7 +1400,7 @@ export function ChatApp({
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.stopPropagation();
 
-      const currentAgent = agentRef.current;
+      const currentAgent = sessionRef.current.agent;
       const sessionId = sessionIdRef.current;
       if (!currentAgent || !sessionId || currentAgent.state.isStreaming) {
         return;
@@ -1676,10 +1428,10 @@ export function ChatApp({
           modelId: llmModel.id,
           thinkingLevel,
           messages,
-          artifacts: artifactsRef.current,
-          artifactCounter: artifactCounterRef.current,
-          workspace: workspaceRef.current.serialize(),
-          compaction: compactionRef.current.state,
+          artifacts: sessionRef.current.artifacts.snapshot(),
+          artifactCounter: sessionRef.current.artifacts.counter,
+          workspace: sessionRef.current.workspace.serialize(),
+          compaction: sessionRef.current.compaction.state,
         },
       };
 
@@ -1694,7 +1446,7 @@ export function ChatApp({
   );
 
   const openImportSessionPicker = useCallback(() => {
-    if (agentRef.current?.state.isStreaming) {
+    if (sessionRef.current.agent?.state.isStreaming) {
       return;
     }
 
@@ -1715,7 +1467,7 @@ export function ChatApp({
         return;
       }
 
-      if (agentRef.current?.state.isStreaming) {
+      if (sessionRef.current.agent?.state.isStreaming) {
         setError('Cannot import a session while the assistant is streaming.');
         return;
       }
@@ -1732,10 +1484,12 @@ export function ChatApp({
         setSelectedModelId(imported.modelId || undefined);
         setSelectedThinkingLevel(parseStoredThinkingLevel(imported.thinkingLevel));
         const importedWorkspace = SessionWorkspace.restore(imported.workspace, { trusted: false });
-        compactionRef.current = { state: isCompactionState(imported.compaction) ? imported.compaction : undefined };
         migrateLegacyJsonnetFiles(importedWorkspace, imported.virtualJsonnetFiles);
         migrateLegacyInvestigationReport(importedWorkspace, imported.investigationReport);
         replaceWorkspace(importedWorkspace);
+        sessionRef.current.compaction = {
+          state: isCompactionState(imported.compaction) ? imported.compaction : undefined,
+        };
         setRunStatusSnapshot(undefined);
         setArtifactSnapshots(imported.artifacts ?? {}, imported.artifactCounter);
         keepAutoScrollEnabled();
@@ -2482,7 +2236,7 @@ function buildToolConfirmation(toolCallId: string, toolName: string, args: unkno
       description:
         'The assistant wants to write these staged workspace changes to Grafana as you. Each change is applied only if the dashboard has not changed since it was fetched. Approve only if the diff matches what you asked for.',
       fields: compactConfirmationFields([
-        confirmationField('Plan', stringValue(record.planId)),
+        confirmationField('Apply', stringValue(record.applyId)),
         confirmationField(
           'Changes',
           operations
@@ -2496,7 +2250,7 @@ function buildToolConfirmation(toolCallId: string, toolName: string, args: unkno
         ),
         confirmationField('Digest', stringValue(record.digest)?.slice(0, 16)),
       ]),
-      args: { planId: record.planId, digest: record.digest, operations },
+      args: { applyId: record.applyId, digest: record.digest, operations },
       diff: stringValue(record.diff),
     };
   }
@@ -2630,47 +2384,6 @@ function createSessionId() {
   }
 
   return `session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-const MAX_SESSION_ARTIFACTS = 40;
-const MAX_SESSION_ARTIFACT_BYTES = 8 * 1024 * 1024;
-
-function createArtifactId(index: number) {
-  return `artifact_${Math.max(1, Math.floor(index))}`;
-}
-
-function nextArtifactCounter(artifacts: Record<string, Artifact>) {
-  return Object.keys(artifacts).reduce((max, id) => {
-    const match = /^artifact_(\d+)$/.exec(id);
-    return match ? Math.max(max, Number(match[1])) : max;
-  }, 0);
-}
-
-function compactArtifacts(artifacts: Record<string, Artifact>) {
-  const sorted = Object.values(artifacts).sort(compareArtifactsByCreatedAt);
-  const kept: Record<string, Artifact> = {};
-  let totalBytes = 0;
-
-  for (const artifact of sorted) {
-    if (Object.keys(kept).length >= MAX_SESSION_ARTIFACTS) {
-      break;
-    }
-    const artifactBytes = Math.max(0, artifact.bytes || artifactByteSize(artifact.data));
-    if (totalBytes > 0 && totalBytes + artifactBytes > MAX_SESSION_ARTIFACT_BYTES) {
-      continue;
-    }
-    kept[artifact.id] = {
-      ...artifact,
-      bytes: artifactBytes,
-    };
-    totalBytes += artifactBytes;
-  }
-
-  return kept;
-}
-
-function compareArtifactsByCreatedAt(left: Artifact, right: Artifact) {
-  return Date.parse(right.createdAt) - Date.parse(left.createdAt);
 }
 
 function reduceToolRuns(state: ToolRunState, event: AgentEvent): ToolRunState {
@@ -3923,30 +3636,3 @@ const getStyles = (theme: GrafanaTheme2) => ({
     color: theme.colors.text.primary,
   }),
 });
-
-type CompactionHolder = { state?: CompactionState };
-
-async function summarizeWithModel(
-  streamFn: StreamFn,
-  model: Agent['state']['model'],
-  input: { previousSummary?: string; transcript: string },
-  signal?: AbortSignal
-) {
-  const stream = await streamFn(
-    model,
-    {
-      systemPrompt: SUMMARIZER_SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: buildSummarizerPrompt(input), timestamp: Date.now() }],
-    },
-    { maxTokens: Math.min(4096, model.maxTokens || 4096), signal }
-  );
-  const message = await stream.result();
-  if (message.stopReason === 'error' || message.stopReason === 'aborted') {
-    throw new Error(message.errorMessage || `summarization ${message.stopReason}`);
-  }
-  return message.content
-    .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n')
-    .trim();
-}

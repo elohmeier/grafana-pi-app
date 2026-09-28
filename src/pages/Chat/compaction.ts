@@ -373,10 +373,10 @@ Write a dense, factual summary in markdown with these sections (omit empty ones)
 - User goal and constraints: what the user asked for, explicit requirements, preferences, and decisions.
 - State of work: what is done, what is in progress, and the next steps.
 - Grafana facts: datasource UIDs, dashboard UIDs and titles, panel titles, metric names, label names/values, validated PromQL (with whether it returned data), time ranges.
-- Files and changes: session filesystem paths written or edited, staged dashboard changes, plan IDs and their status, apply outcomes (applied, conflicted, denied), resource revisions.
+- Files and changes: session filesystem paths written or edited, staged dashboard changes, receipt IDs and their status, apply outcomes (applied, conflicted, denied), resource revisions.
 - Open issues: errors, unverified assumptions, and pending approvals.
 
-Rules: keep identifiers, paths, queries, and plan IDs verbatim. Do not invent facts. Prefer bullet points. If a previous summary is given, merge it with the new transcript into one updated summary; do not drop still-relevant facts.`;
+Rules: keep identifiers, paths, queries, and receipt IDs verbatim. Do not invent facts. Prefer bullet points. If a previous summary is given, merge it with the new transcript into one updated summary; do not drop still-relevant facts.`;
 
 export function buildSummarizerPrompt(input: { previousSummary?: string; transcript: string }) {
   return [

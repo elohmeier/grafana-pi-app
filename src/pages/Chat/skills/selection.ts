@@ -1,5 +1,5 @@
 import { GRAFANA_SKILLS } from './catalog';
-import type { GrafanaSkill, GrafanaSkillContext, GrafanaSkillSelection, SkillToolGroup } from './types';
+import type { GrafanaSkill, GrafanaSkillContext, GrafanaSkillSelection } from './types';
 
 const DASHBOARD_INTENT =
   /\b(dashboard|dashboards|panel|panels|row|rows|variable|variables|jsonnet|render|save|sync|grafana view)\b/i;
@@ -48,13 +48,9 @@ export function selectGrafanaSkills(
   }
 
   const activeSkills = [...activeNames].map((name) => skillByName.get(name)).filter(isSkill);
-  // Tools are a fixed set; tool groups remain only as descriptive skill metadata.
-  const toolGroups = unionToolGroups(activeSkills);
-
   return {
     activeSkills,
     activeSkillNames: activeSkills.map((skill) => skill.name),
-    toolGroups,
     explicitSkillNames,
   };
 }
@@ -108,21 +104,6 @@ function shouldActivateConfiguredSkill(prompt: string, skill: GrafanaSkill) {
   }
 
   return false;
-}
-
-function unionToolGroups(
-  skills: readonly GrafanaSkill[],
-  initialGroups: readonly SkillToolGroup[] = []
-): SkillToolGroup[] {
-  const groups = new Set<SkillToolGroup>(initialGroups);
-
-  for (const skill of skills) {
-    for (const group of skill.toolGroups) {
-      groups.add(group);
-    }
-  }
-
-  return [...groups];
 }
 
 function isSkill(skill: GrafanaSkill | undefined): skill is GrafanaSkill {

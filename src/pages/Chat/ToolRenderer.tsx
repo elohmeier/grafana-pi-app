@@ -1,10 +1,11 @@
+import { EvidenceView, evidencePresentations } from './session/EvidenceView';
 import React, { useMemo, useState } from 'react';
 import { css, cx, keyframes } from '@emotion/css';
 import type { AgentToolResult } from '@earendil-works/pi-agent-core';
 import { renderMarkdown, type GrafanaTheme2, type IconName } from '@grafana/data';
 import { Badge, Icon, LinkButton, Spinner, type BadgeColor, useStyles2 } from '@grafana/ui';
 import { structuredPatch } from 'diff';
-import type { ArtifactPreview, ArtifactRef } from './tools';
+import type { ArtifactPreview, ArtifactRef } from './domain';
 import {
   highlightJsonnetLines,
   shouldHighlightJsonnet,
@@ -2292,6 +2293,9 @@ function asWorkspaceToolResult(
       return (
         <>
           <WorkspaceBashResultView result={workspaceBashResultFromRecord(details)} />
+          {evidencePresentations(details.presentations).map((evidence, i) => (
+            <EvidenceView key={i} evidence={evidence} />
+          ))}
           {images.length > 0 && <ContentBlocks content={images} />}
         </>
       );
@@ -2507,7 +2511,10 @@ function WorkspaceBashResultView({ result }: { result: WorkspaceBashResult }) {
       {result.discardedChanges && (
         <div className={styles.notice}>
           <strong>discarded</strong>
-          <span>File changes from this command were discarded: {result.discardedChanges}</span>
+          <span>
+            Uncommitted file changes were discarded (earlier apply boundaries remain committed):{' '}
+            {result.discardedChanges}
+          </span>
         </div>
       )}
       {result.stdout && (
@@ -2620,7 +2627,7 @@ function ArtifactResultView({ artifact, preview }: { artifact: ArtifactRef; prev
           { label: 'ID', value: <code>{artifact.id}</code> },
           { label: 'Tool', value: artifact.toolName },
           { label: 'Size', value: formatBytes(artifact.bytes) },
-          { label: 'Read', value: <code>{`read_artifact {"id":"${artifact.id}"}`}</code> },
+          { label: 'Read', value: <code>{`read /artifacts/${artifact.id}.json`}</code> },
         ]}
       />
       {preview?.type === 'text' && <ArtifactTextPreview preview={preview} />}

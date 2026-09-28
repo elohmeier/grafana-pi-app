@@ -13,12 +13,12 @@ Use this skill when the user asks for a dashboard, panel, row, variable, live da
 - Inspect available metrics before selecting panel queries (`grafana-prom metrics`, `grafana-prom series`), and look at how existing dashboards use them (`grafana-usage search`, `grafana-usage related METRIC`, `grafana-usage dashboard UID`).
 - Validate dashboard rate/trend PromQL with a range query (`grafana-prom query EXPR --from now-6h`) matching the dashboard time range. Use instant validation only for current-value stat/table evidence.
 - Treat `validationError` or zero-series validation results as unusable panel evidence. Do not apply a dashboard with requested panels silently omitted; report the exact unvalidated signal instead.
-- When a supervisor task provides explicit panel queries and says they were already validated from tool evidence with non-zero series and no `validationError`, treat that as a validated handoff. Do not redo broad metric discovery or revalidate every query; write, validate, plan, and apply.
+- When a supervisor task provides explicit panel queries and says they were already validated from tool evidence with non-zero series and no `validationError`, treat that as a validated handoff. Do not redo broad metric discovery or revalidate every query; write, validate, and apply.
 - For on-the-fly edits to the currently open dashboard, edit `/live/dashboard/dashboard.json` and run `live apply` when that file exists.
-- Durable changes are files: `/grafana/dashboards/<uid>/dashboard.json` is a local working copy of a dashboard resource. Nothing reaches Grafana until `workspace plan` and an approved `workspace apply <plan-id>`.
+- Durable changes are files: `/grafana/dashboards/<uid>/dashboard.json` is a local working copy of a dashboard resource. Nothing reaches Grafana until an approved `workspace apply`.
 - Prefer helper-based Jsonnet for new generated dashboards and direct JSON edits (`edit`, `jq`, `python3`) for changes to existing dashboards.
 - Keep generated dashboards focused. A small useful dashboard is better than a broad dashboard with speculative panels.
-- For create or update requests, plan and apply after validation unless the user explicitly asks for a draft, preview, live-edit, or no-save workflow.
+- For create or update requests, apply after validation unless the user explicitly asks for a draft, preview, live-edit, or no-save workflow.
 
 ## Live Editing Workflow
 
@@ -39,8 +39,8 @@ Use this skill when the user asks for a dashboard, panel, row, variable, live da
    Fix Jsonnet errors with `edit` and re-run; `jsonnet fix FILE` repairs common invalid constructors as a visible edit.
 4. Run `grafana-dashboard fix PATH` (panel ids and grid layout) and `grafana-dashboard validate PATH`; fix every reported error. Add `--server` to dry-run the save in Grafana (permissions, strict decoding, and whether the dashboard changed since it was fetched).
 5. Run `grafana-dashboard data PATH --panel ID` for panels whose queries, variables, or transformations changed. It runs the queries as the user and applies the panel's transformations, units, and reducers; treat `empty`, `error`, or `skipped` as findings to fix or report, not as success. For empty panels, read `executedQueries`: it shows the query as Grafana ran it, for example `$__rate_interval` resolved to a window shorter than the data's sample spacing.
-6. Run `workspace plan`, then `workspace apply <plan-id>`. The user approves the exact diff; report applied, conflicted, failed, or denied per dashboard.
-7. For several dashboards at once, fetch them with `grafana fetch UID...`, search with `rg`, change them in one script, validate all, and plan them together.
+6. Run `workspace apply`. The user approves the exact diff; report applied, conflicted, failed, or denied per dashboard.
+7. For several dashboards at once, fetch them with `grafana fetch UID...`, search with `rg`, change them in one script, validate all, and apply them together.
 
 ## Jsonnet Rules
 
@@ -74,5 +74,7 @@ Use this skill when the user asks for a dashboard, panel, row, variable, live da
 - Do not overwrite an existing dashboard without reading it first.
 - Do not run `workspace apply` after a draft or preview-only request unless the user explicitly asks to apply or save.
 - If `jsonnet` or `grafana-dashboard validate` fails, fix the source before offering the dashboard as complete.
-- If apply reports `conflicted`, the dashboard changed in Grafana since it was fetched: run `grafana refresh <uid> --discard`, reapply the change, and plan again.
+- If apply reports `conflicted`, the dashboard changed in Grafana since it was fetched: run `grafana refresh <uid> --discard`, reapply the change, and run `workspace apply` again.
 - If metrics are missing, state the gap instead of fabricating panels.
+
+Use `workspace apply --path PATH` to select files when other unrelated changes are staged. No plan IDs or planning mode are used. Inspect receipts under `/session/receipts/`.

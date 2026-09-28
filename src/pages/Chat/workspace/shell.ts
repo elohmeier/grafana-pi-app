@@ -1,5 +1,6 @@
-import type { CommandName, CustomCommand, ExecResult } from 'just-bash/browser';
-import type { ArtifactRuntime } from '../tools/artifacts';
+import type { EvidencePresentation } from './commands/evidence';
+import type { ExecResult } from 'just-bash/browser';
+import type { ArtifactRuntime } from '../domain/artifacts';
 import { WorkspaceBashFs } from './bashFs';
 import type { WorkspaceApprovalService, WorkspaceBroker } from './broker';
 import { WORKSPACE_COMMANDS } from './commands/commands';
@@ -10,7 +11,7 @@ import {
   type WorkspaceCommandContext,
   type WorkspaceCommandSpec,
 } from './commands/registry';
-import { jqCommand } from './jqCommand';
+import { executeShell, type ShellHost } from './execution/engine';
 import { LIVE_DASHBOARD_PATH } from './liveDashboard';
 import { normalizeWorkspacePath, truncateUtf8 } from './paths';
 import type { WorkspaceFileChange } from './types';
@@ -22,70 +23,7 @@ export const MAX_SHELL_TIMEOUT_MS = 120_000;
 export const DEFAULT_SHELL_OUTPUT_BYTES = 32 * 1024;
 export const MAX_SHELL_IMAGES = 4;
 
-/** Built-in just-bash commands exposed to the agent. No network, process, or link commands. */
-export const WORKSPACE_BUILTIN_COMMANDS: CommandName[] = [
-  'echo',
-  'cat',
-  'printf',
-  'ls',
-  'mkdir',
-  'rmdir',
-  'touch',
-  'rm',
-  'cp',
-  'mv',
-  'pwd',
-  'head',
-  'tail',
-  'wc',
-  'stat',
-  'grep',
-  'fgrep',
-  'egrep',
-  'rg',
-  'sed',
-  'awk',
-  'sort',
-  'uniq',
-  'comm',
-  'cut',
-  'paste',
-  'tr',
-  'rev',
-  'nl',
-  'fold',
-  'expand',
-  'unexpand',
-  'column',
-  'join',
-  'tee',
-  'find',
-  'basename',
-  'dirname',
-  'tree',
-  'du',
-  'env',
-  'printenv',
-  'xargs',
-  'true',
-  'false',
-  'bash',
-  'sh',
-  'yq',
-  'base64',
-  'diff',
-  'date',
-  'seq',
-  'expr',
-  'md5sum',
-  'sha1sum',
-  'sha256sum',
-  'file',
-  'help',
-  'which',
-  'tac',
-  'od',
-];
+export { WORKSPACE_BUILTIN_COMMANDS } from './execution/engine';
 
 /** Extra shell command backed by the workspace transaction (for example python3). */
 export type WorkspaceShellCommand = {
@@ -124,6 +62,7 @@ export type WorkspaceBashResult = {
   discardedChanges?: string;
   /** Images produced by commands (at most MAX_SHELL_IMAGES). */
   images?: CommandImage[];
+  presentations?: EvidencePresentation[];
   durationMs: number;
 };
 
@@ -177,95 +116,85 @@ export async function runWorkspaceBash(
   await deps.workspace.prepareMounts(controller.signal);
   const tx = deps.workspace.begin({ signal: controller.signal });
   try {
-    const { Bash, defineCommand } = await import('just-bash/browser');
     const fs = new WorkspaceBashFs(tx);
-    if ((await fs.exists(cwd)) === false) {
+    if (!(await fs.exists(cwd))) {
       throw new WorkspaceError('ENOENT', `working directory does not exist: ${cwd}`);
     }
-    const env = {
-      HOME: '/workspace',
-      PWD: cwd,
-      PATH: '/usr/bin:/bin',
-      LANG: 'C.UTF-8',
-      TMPDIR: '/tmp',
-    };
     const images: CommandImage[] = [];
-    const customCommands: CustomCommand[] = [
-      ...(deps.commandSpecs ?? WORKSPACE_COMMANDS).map((spec) =>
-        defineCommand(spec.name, async (args, ctx) => {
-          const result = await runRegisteredCommand(
-            spec,
-            args,
-            commandContext(commandDeps, tx, ctx.cwd, stdinText(ctx.stdin), controller.signal)
-          );
-          images.push(...(result.images ?? []));
-          return textResult(result);
-        })
-      ),
-      ...[jqCommand, ...(deps.extraCommands ?? [])].map((extra) =>
-        defineCommand(extra.name, async (args, ctx) =>
-          extra.run(args, {
-            ...commandContext(commandDeps, tx, ctx.cwd, stdinText(ctx.stdin), controller.signal),
-            env: Object.fromEntries(ctx.env),
-          })
-        )
-      ),
-    ];
-    const bash = new Bash({
+    const presentations: EvidencePresentation[] = [];
+    const specs = deps.commandSpecs ?? WORKSPACE_COMMANDS;
+    const extras = deps.extraCommands ?? [];
+    const host: ShellHost = {
       fs,
-      cwd,
-      env,
-      commands: WORKSPACE_BUILTIN_COMMANDS,
-      customCommands,
-      python: false,
-      javascript: false,
-      executionLimits: {
-        maxCommandCount: 5000,
-        maxLoopIterations: 5000,
-        maxCallDepth: 50,
-        maxAwkIterations: 100_000,
-        maxSedIterations: 100_000,
-        maxJqIterations: 100_000,
-        maxStringLength: 4 * 1024 * 1024,
-        maxHeredocSize: 1024 * 1024,
+      async command(call) {
+        if (controller.signal.aborted) {
+          throw new Error('Shell cancelled');
+        }
+        const ctx = commandContext(commandDeps, tx, call.cwd, call.stdin, controller.signal);
+        const spec = specs.find((spec) => spec.name === call.name);
+        if (spec) {
+          const result = await runRegisteredCommand(spec, call.args, ctx);
+          images.push(...(result.images ?? []));
+          images.splice(0, Math.max(0, images.length - MAX_SHELL_IMAGES));
+          presentations.push(...(result.presentations ?? []));
+          presentations.splice(0, Math.max(0, presentations.length - 10));
+          tx.refreshGeneratedFiles();
+          return textResult(result);
+        }
+        const extra = extras.find((extra) => extra.name === call.name);
+        if (!extra) {
+          throw new Error(`Unknown command ${call.name}`);
+        }
+        return extra.run(call.args, { ...ctx, env: call.env });
       },
-    });
-
+    };
+    const input = {
+      command,
+      cwd,
+      stdin: params.stdin,
+      commandNames: [...specs.map((spec) => spec.name), ...extras.map((extra) => extra.name)],
+    };
     let exec: { stdout: string; stderr: string; exitCode: number };
     let escapedError: string | undefined;
     try {
-      exec = await bash.exec(command, {
-        cwd,
-        stdin: params.stdin,
-        signal: controller.signal,
-      });
+      exec =
+        typeof Worker === 'undefined'
+          ? await executeShell(input, host, controller.signal)
+          : await (await import('./execution/browserRunner')).executeInWorker(input, host, controller.signal);
     } catch (error) {
       // Some filesystem errors (for example a redirect into a read-only file or
       // a quota violation) escape the interpreter and end the script early.
-      if (!(error instanceof WorkspaceError)) {
-        throw error;
+      if (controller.signal.aborted) {
+        exec = { stdout: '', stderr: '', exitCode: timedOut ? 124 : 130 };
+      } else {
+        if (!(error instanceof WorkspaceError)) {
+          throw error;
+        }
+        escapedError = error.message;
+        exec = { stdout: '', stderr: `bash: ${error.message}\n`, exitCode: 1 };
       }
-      escapedError = error.message;
-      exec = { stdout: '', stderr: `bash: ${error.message}\n`, exitCode: 1 };
     }
 
     const stdout = truncateUtf8(exec.stdout ?? '', DEFAULT_SHELL_OUTPUT_BYTES);
     const stderr = truncateUtf8(exec.stderr ?? '', DEFAULT_SHELL_OUTPUT_BYTES);
-    let changes: WorkspaceFileChange[] = [];
+    let changes: WorkspaceFileChange[] = tx.committedChanges();
     let discardedChanges: string | undefined;
     let exitCode = exec.exitCode;
     let stderrText = stderr.text;
     if (escapedError) {
       tx.abort();
       discardedChanges = escapedError;
-      stderrText = appendLine(stderrText, 'bash: script stopped; file changes from this invocation were discarded');
+      stderrText = appendLine(
+        stderrText,
+        'bash: script stopped; uncommitted file changes were discarded; earlier apply boundaries remain committed'
+      );
     } else if (controller.signal.aborted) {
       tx.abort();
       discardedChanges = timedOut ? `timed out after ${timeoutMs}ms` : 'cancelled';
       exitCode = timedOut ? 124 : 130;
       stderrText = appendLine(
         stderrText,
-        `bash: ${discardedChanges}; file changes from this invocation were discarded`
+        `bash: ${discardedChanges}; uncommitted file changes were discarded; earlier apply boundaries remain committed`
       );
     } else {
       try {
@@ -276,7 +205,7 @@ export async function runWorkspaceBash(
         exitCode = exitCode === 0 ? 1 : exitCode;
         stderrText = appendLine(
           stderrText,
-          `bash: ${discardedChanges}; file changes from this invocation were discarded`
+          `bash: ${discardedChanges}; uncommitted file changes were discarded; earlier apply boundaries remain committed`
         );
       }
     }
@@ -293,6 +222,7 @@ export async function runWorkspaceBash(
       changes,
       discardedChanges,
       ...(images.length > 0 ? { images: images.slice(-MAX_SHELL_IMAGES) } : {}),
+      presentations: presentations.slice(-10),
       durationMs: Date.now() - startedAt,
     };
   } catch (error) {
@@ -352,19 +282,6 @@ function commandContext(
 
 function textResult({ stdout, stderr, exitCode }: CommandResult): ExecResult {
   return { stdout, stderr, exitCode, stdoutKind: 'text' };
-}
-
-/** Converts just-bash's latin1-shaped byte buffer into UTF-8 text. */
-function stdinText(stdin: unknown) {
-  const raw = typeof stdin === 'string' ? stdin : String(stdin ?? '');
-  if (!raw) {
-    return '';
-  }
-  const bytes = new Uint8Array(raw.length);
-  for (let index = 0; index < raw.length; index++) {
-    bytes[index] = raw.charCodeAt(index) & 0xff;
-  }
-  return new TextDecoder().decode(bytes);
 }
 
 function appendLine(text: string, line: string) {
