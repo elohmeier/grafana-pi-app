@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { basename, dirname, extname, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import process from 'node:process';
 
@@ -39,7 +39,11 @@ async function main() {
 export async function importDashboardDirectory(options, dependencies = {}) {
   const logger = dependencies.logger ?? console;
   const fetchImplementation = dependencies.fetchImplementation ?? fetch;
-  const tree = await discoverDashboardTree(options.inputPath);
+  let tree = await discoverDashboardTree(options.inputPath);
+  if (!options.folderUid) {
+    tree = liftGeneralDirectory(tree);
+  }
+  tree = limitFolderDepth(tree, options.maxFolderDepth, logger);
   const dashboards = await mapLimit(tree.dashboardFiles, options.concurrency, readDashboard);
   assertUniqueDashboardUids(dashboards);
   const v2Dashboards = dashboards.filter((entry) => entry.format === 'v2').length;
@@ -240,6 +244,62 @@ async function readDashboard(entry) {
   }
 
   return { ...entry, dashboard: dashboardValue, format: 'classic' };
+}
+
+// Grafana reserves the name General for its root folder, and exports store root dashboards in a
+// top-level general directory. Import that directory's contents into General itself.
+export function liftGeneralDirectory(tree) {
+  const general = tree.directories.find(
+    (directory) => directory.parentRelativePath === '' && directory.title.toLowerCase() === 'general'
+  );
+  if (!general) {
+    return tree;
+  }
+  const lift = (relativePath) =>
+    relativePath === general.relativePath
+      ? ''
+      : relativePath.startsWith(general.relativePath + sep)
+        ? relativePath.slice(general.relativePath.length + 1)
+        : relativePath;
+  return {
+    ...tree,
+    dashboardFiles: tree.dashboardFiles.map((file) => ({
+      ...file,
+      folderRelativePath: lift(file.folderRelativePath),
+    })),
+    directories: tree.directories
+      .filter((directory) => directory !== general)
+      .map((directory) => ({
+        ...directory,
+        parentRelativePath: lift(directory.parentRelativePath),
+        relativePath: lift(directory.relativePath),
+      })),
+  };
+}
+
+// Grafana rejects folders nested deeper than its max_nesting_depth (4 by default). Directories below
+// the limit are merged into their ancestor at the limit, so their dashboards still import.
+export function limitFolderDepth(tree, maxFolderDepth, logger = console) {
+  if (!maxFolderDepth) {
+    return tree;
+  }
+  const truncate = (relativePath) => relativePath.split(sep).slice(0, maxFolderDepth).join(sep);
+  const depth = (relativePath) => relativePath.split(sep).length;
+  const directories = tree.directories.filter((directory) => depth(directory.relativePath) <= maxFolderDepth);
+  const merged = tree.directories.length - directories.length;
+  if (merged > 0) {
+    logger.log(
+      `Merging ${merged} director${merged === 1 ? 'y' : 'ies'} nested deeper than ${maxFolderDepth} levels into their ancestor folder.`
+    );
+  }
+  return {
+    ...tree,
+    dashboardFiles: tree.dashboardFiles.map((file) => ({
+      ...file,
+      folderRelativePath: file.folderRelativePath && truncate(file.folderRelativePath),
+    })),
+    directories,
+  };
 }
 
 function assertUniqueDashboardUids(dashboards) {
@@ -470,6 +530,7 @@ export function parseArguments(args) {
     grafanaUrl: undefined,
     help: false,
     inputPath: undefined,
+    maxFolderDepth: undefined,
     namespace: process.env.GRAFANA_NAMESPACE ?? DEFAULT_NAMESPACE,
     overwrite: true,
   };
@@ -488,6 +549,9 @@ export function parseArguments(args) {
         break;
       case '--folder-uid':
         options.folderUid = requireValue(args, ++index, argument);
+        break;
+      case '--max-folder-depth':
+        options.maxFolderDepth = parseMaxFolderDepth(requireValue(args, ++index, argument));
         break;
       case '--namespace':
         options.namespace = requireValue(args, ++index, argument);
@@ -519,6 +583,14 @@ function parseConcurrency(value) {
     throw new Error('--concurrency must be an integer between 1 and 64.');
   }
   return concurrency;
+}
+
+function parseMaxFolderDepth(value) {
+  const depth = Number(value);
+  if (!Number.isSafeInteger(depth) || depth < 1) {
+    throw new Error('--max-folder-depth must be a positive integer.');
+  }
+  return depth;
 }
 
 function requireValue(args, index, option) {
@@ -576,11 +648,15 @@ function printUsage() {
 
 Recursively imports every JSON dashboard and mirrors all child directories as nested Grafana folders.
 The source directory itself is not created. Dashboards directly inside it are imported into General, or
-into the folder selected with --folder-uid.
+into the folder selected with --folder-uid. Without --folder-uid, a top-level general directory is also
+imported into General.
 
 Options:
   --grafana-url URL  Grafana URL (default: GRAFANA_URL or ${DEFAULT_GRAFANA_URL})
   --folder-uid UID   Use an existing Grafana folder as the root (default: General)
+  --max-folder-depth N
+                     Merge directories nested deeper than N levels into their ancestor
+                     (Grafana allows 4 nested folder levels by default)
   --namespace NAME   Grafana API namespace for v2 dashboards (default: ${DEFAULT_NAMESPACE})
   --concurrency N    Concurrent dashboard imports, 1-64 (default: ${DEFAULT_CONCURRENCY})
   --no-overwrite     Fail instead of replacing a dashboard with the same UID
