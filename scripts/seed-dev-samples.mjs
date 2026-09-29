@@ -64,12 +64,35 @@ const enterpriseFolderThemes = [
   { key: 'experiments', title: 'Product Experiments' },
 ];
 
+const ALERT_EDITING_GROUP = 'assistant-rule-editing';
+const ALERT_EDITING_RULES = [
+  {
+    uid: 'assistant-edit-5xx-rate',
+    title: 'Checkout 5xx rate (rule editing sample)',
+    query: 'sum(rate(http_requests_total{status=~"5.."}[5m]))',
+    threshold: 1,
+  },
+  {
+    uid: 'assistant-edit-request-rate',
+    title: 'Checkout request rate (rule editing sample)',
+    query: 'sum(rate(http_requests_total[5m]))',
+    threshold: 1000,
+  },
+];
+const ALERT_PROVISIONED_RULE = {
+  uid: 'assistant-provisioned-5xx',
+  title: 'Provisioned 5xx rate (read-only sample)',
+  query: 'sum(rate(http_requests_total{status=~"5.."}[5m]))',
+  threshold: 5,
+};
+
 await main();
 
 async function main() {
   await waitForGrafana();
   await seedFolder(FOLDER_UID, FOLDER_TITLE);
   await seedAlertTroubleshootingSample();
+  await seedAlertRuleEditingSamples();
   await seedDashboardEditingSample();
   await seedDashboardContextSample();
   await seedDashboardMetricDiscoverySamples();
@@ -79,6 +102,9 @@ async function main() {
   log('Seeded development samples:');
   log(`- Alert troubleshooting: ${dashboardUrl(samples.alertDashboardUid, 'alert-troubleshooting', 'viewPanel=1')}`);
   log(`- Alert rule: ${GRAFANA_URL}/alerting/grafana/${samples.alertRuleName}/view`);
+  log(
+    `- Alert rule editing: group ${ALERT_EDITING_GROUP} (${ALERT_EDITING_RULES.map((rule) => rule.uid).join(', ')}) and provisioned rule ${ALERT_PROVISIONED_RULE.uid}`
+  );
   log(`- Dashboard editing: ${dashboardUrl(samples.dashboardEditingUid, 'dashboard-editing')}`);
   log(`- Dashboard context: ${dashboardUrl(samples.dashboardContextUid, 'dashboard-context')}`);
   log(`- Metric discovery service: ${dashboardUrl(samples.metricServiceUid, 'metric-discovery-service')}`);
@@ -454,7 +480,9 @@ function enterpriseDashboardDefinition(index, folder) {
   const service = enterpriseServices[index % enterpriseServices.length];
   const env = enterpriseEnvironments[Math.floor(index / enterpriseServices.length) % enterpriseEnvironments.length];
   const region =
-    enterpriseRegions[Math.floor(index / (enterpriseServices.length * enterpriseEnvironments.length)) % enterpriseRegions.length];
+    enterpriseRegions[
+      Math.floor(index / (enterpriseServices.length * enterpriseEnvironments.length)) % enterpriseRegions.length
+    ];
   const uid = `ent-${enterpriseServiceSlug(service)}-${enterpriseEnvSlug(env)}-${enterpriseRegionSlug(region)}-${String(index + 1).padStart(3, '0')}`;
   const title = `Enterprise ${service.name} ${env.toUpperCase()} ${region} operations`;
   const panels = enterprisePanels({ service, env, region }).slice(0, clampInt(ENTERPRISE_PANELS_PER_DASHBOARD, 4, 10));
@@ -467,15 +495,7 @@ function enterpriseDashboardDefinition(index, folder) {
     dashboard: {
       uid,
       title,
-      tags: [
-        'assistant-enterprise-sample',
-        'prod-like',
-        service.team,
-        service.tier,
-        env,
-        region,
-        folder.uid,
-      ],
+      tags: ['assistant-enterprise-sample', 'prod-like', service.team, service.tier, env, region, folder.uid],
       timezone: 'browser',
       schemaVersion: 41,
       time: { from: 'now-6h', to: 'now' },
@@ -597,7 +617,11 @@ function enterprisePanel(panel, index) {
 function enterpriseTemplating({ service, env, region }) {
   return {
     list: [
-      customVariable('service', enterpriseServices.map((item) => item.id), service.id),
+      customVariable(
+        'service',
+        enterpriseServices.map((item) => item.id),
+        service.id
+      ),
       customVariable('env', enterpriseEnvironments, env),
       customVariable('region', enterpriseRegions, region),
     ],
@@ -776,6 +800,71 @@ async function createAlertRule({ name, title, dashboardUid, panelId, folderUid, 
   }
 }
 
+/**
+ * A rule group with two sibling rules, to check that editing one rule leaves the other and the
+ * group interval alone, and a rule with API provenance, which the assistant must treat as read-only.
+ */
+async function seedAlertRuleEditingSamples() {
+  const response = await grafanaFetch(`/api/ruler/grafana/api/v1/rules/${encodeURIComponent(FOLDER_UID)}`, {
+    method: 'POST',
+    body: {
+      name: ALERT_EDITING_GROUP,
+      interval: '1m',
+      rules: ALERT_EDITING_RULES.map((rule) => ({
+        for: '2m',
+        labels: { sample: 'alert-rule-editing', severity: 'warning' },
+        annotations: { summary: rule.title },
+        grafana_alert: {
+          uid: rule.uid,
+          title: rule.title,
+          condition: 'C',
+          no_data_state: 'NoData',
+          exec_err_state: 'Error',
+          data: rulerQueries(alertExpressions(rule.query, rule.threshold)),
+        },
+      })),
+    },
+  });
+  await expectOk(response, `upsert alert rule group ${ALERT_EDITING_GROUP}`);
+
+  const provisioned = {
+    uid: ALERT_PROVISIONED_RULE.uid,
+    title: ALERT_PROVISIONED_RULE.title,
+    folderUID: FOLDER_UID,
+    ruleGroup: 'assistant-provisioned',
+    condition: 'C',
+    for: '5m',
+    noDataState: 'NoData',
+    execErrState: 'Error',
+    labels: { sample: 'alert-rule-editing', severity: 'critical' },
+    data: rulerQueries(alertExpressions(ALERT_PROVISIONED_RULE.query, ALERT_PROVISIONED_RULE.threshold)),
+  };
+  const path = `/api/v1/provisioning/alert-rules/${encodeURIComponent(provisioned.uid)}`;
+  const update = await grafanaFetch(path, { method: 'PUT', body: provisioned });
+  if (update.status === 404) {
+    await expectOk(
+      await grafanaFetch('/api/v1/provisioning/alert-rules', { method: 'POST', body: provisioned }),
+      `create provisioned alert rule ${provisioned.uid}`
+    );
+  } else {
+    await expectOk(update, `update provisioned alert rule ${provisioned.uid}`);
+  }
+  log(`Seeded alert rule editing samples in ${FOLDER_UID}.`);
+}
+
+/** App Platform expressions as ruler/provisioning API queries. */
+function rulerQueries(expressions) {
+  return Object.entries(expressions).map(([refId, expression]) => ({
+    refId,
+    queryType: expression.queryType ?? '',
+    datasourceUid: expression.datasourceUID,
+    relativeTimeRange: expression.relativeTimeRange
+      ? { from: Number.parseInt(expression.relativeTimeRange.from, 10), to: 0 }
+      : { from: 0, to: 0 },
+    model: expression.model,
+  }));
+}
+
 function isRetryableGrafanaWriteError(text) {
   return /SQLITE_BUSY|database is locked|sqlstore\.max-retries-reached|InternalError/i.test(text);
 }
@@ -824,7 +913,11 @@ async function verifyPrometheusSample() {
 
   const body = await response.json();
   const value = body?.data?.result?.[0]?.value?.[1];
-  log(value === undefined ? 'Prometheus sample query returned no current series.' : `Prometheus sample query value: ${value}.`);
+  log(
+    value === undefined
+      ? 'Prometheus sample query returned no current series.'
+      : `Prometheus sample query value: ${value}.`
+  );
 }
 
 async function grafanaFetch(path, options = {}) {
