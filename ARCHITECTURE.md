@@ -107,9 +107,10 @@ Key manifest choices:
   the Go backend binary.
 - `includes` adds the app page to Grafana navigation.
 - `roles` defines the `g42-pi-app.app:access` action.
-- `iam.permissions` still grants the plugin service account dashboard and
-  folder permissions. They are unused now that dashboard reads and writes run
-  in the browser as the current user; removing them is an owner decision.
+- `iam.permissions` grants the plugin service account only
+  `users.permissions:read`, which the backend's authz client needs to check
+  app access. Dashboard reads and writes run in the browser as the current
+  user, so the service account has no dashboard or folder permissions.
 - `extensions.addedLinks` declares three dashboard panel menu actions
   (`Explain in Assistant`, `Troubleshoot panel`, `Suggest improvements`).
 - `grafanaDependency` is `>=13.2.0`.

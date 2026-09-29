@@ -68,7 +68,7 @@ The local demo config points Grafana at `http://host.docker.internal:8080/v1` an
 Compose sets the model limits from `PI_CONTEXT_WINDOW` and `PI_MAX_OUTPUT_TOKENS` (defaults `131072` and `16384`).
 When `OPENAI_API_KEY` is unset, Compose provides a local dummy key because llama-server only needs a bearer token-shaped value.
 
-Dashboard reads and writes run in the browser as the current Grafana user, so they follow that user's dashboard and folder permissions. `plugin.json` still declares dashboard and folder permissions for the plugin service account, but the backend no longer uses them. In local Docker, `docker-compose.yaml` starts Grafana image rendering so screenshots can run.
+Dashboard reads and writes run in the browser as the current Grafana user, so they follow that user's dashboard and folder permissions. The plugin service account has no dashboard or folder permissions. In local Docker, `docker-compose.yaml` starts Grafana image rendering so screenshots can run.
 
 ## PostgreSQL session storage
 

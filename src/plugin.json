@@ -59,13 +59,7 @@
     }
   ],
   "iam": {
-    "permissions": [
-      { "action": "users.permissions:read", "scope": "users:*" },
-      { "action": "dashboards:create", "scope": "folders:uid:*" },
-      { "action": "dashboards:read", "scope": "folders:uid:*" },
-      { "action": "dashboards:write", "scope": "folders:uid:*" },
-      { "action": "folders:read", "scope": "folders:uid:*" }
-    ]
+    "permissions": [{ "action": "users.permissions:read", "scope": "users:*" }]
   },
   "dependencies": {
     "grafanaDependency": ">=13.2.0",

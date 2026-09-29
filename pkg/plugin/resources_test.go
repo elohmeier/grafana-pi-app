@@ -829,9 +829,9 @@ func TestOpenAIRequestPrefixesFailedToolResults(t *testing.T) {
 				{
 					Role:       "toolResult",
 					ToolCallID: "call_1",
-					ToolName:   "save_dashboard",
+					ToolName:   "bash",
 					Content: json.RawMessage(
-						`[{"type":"text","text":"Grafana request failed (502 Bad Gateway): PluginAppClientSecret not set in config"}]`,
+						`[{"type":"text","text":"grafana-prom query: Grafana request failed (502 Bad Gateway)"}]`,
 					),
 					IsError: true,
 				},
@@ -842,7 +842,7 @@ func TestOpenAIRequestPrefixesFailedToolResults(t *testing.T) {
 	if len(payload.Messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(payload.Messages))
 	}
-	expected := "TOOL ERROR [save_dashboard]: Grafana request failed (502 Bad Gateway): PluginAppClientSecret not set in config"
+	expected := "TOOL ERROR [bash]: grafana-prom query: Grafana request failed (502 Bad Gateway)"
 	if payload.Messages[0].Content != expected {
 		t.Fatalf("unexpected failed tool content:\nwant: %q\n got: %q", expected, payload.Messages[0].Content)
 	}
