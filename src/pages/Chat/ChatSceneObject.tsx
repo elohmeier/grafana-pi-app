@@ -34,7 +34,8 @@ import { useRestrictedGrafanaApis, type DashboardMutationAPI, type GrafanaTheme2
 import { PLUGIN_BASE_URL, PLUGIN_ID } from '../../constants';
 import { testIds } from '../../components/testIds';
 import { ChangeSetReviewModal } from './ChangeSetReview';
-import { navigatePromptHistory, type PromptHistoryState } from './promptHistory';
+import { HistorySearch } from './HistorySearch';
+import { navigatePromptHistory, promptHistory, type PromptHistoryState } from './promptHistory';
 import { usePluginMeta } from '../../utils/utils.plugin';
 import type { Artifact } from './domain';
 import { formatAssistantError, type AssistantErrorView } from './llmErrors';
@@ -843,6 +844,8 @@ export function ChatApp({
   }, [setAutoScrollEnabled]);
 
   const historyRef = useRef<PromptHistoryState>(undefined);
+  const [historySearch, setHistorySearch] = useState<{ entries: string[] }>();
+  const historySearchOpenRef = useRef(false);
   const handleInputChange = useCallback((value: string) => {
     // Typing ends history browsing and keeps the text as the new draft.
     historyRef.current = undefined;
@@ -1629,6 +1632,60 @@ export function ChatApp({
     Boolean(agent) &&
     !isBusy &&
     (isShellInput ? Boolean(parseUserShellInput(input)) : Boolean(input.trim()) && hasLLMConfig);
+
+  /** Ctrl+R history search, Esc to leave history or shell mode, Ctrl+C in an empty composer to stop the run. */
+  const handleReadlineKey = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const element = event.currentTarget;
+    const plainCtrl = event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+    if (plainCtrl && event.key === 'r') {
+      // Also keeps Linux and Windows browsers from reloading the page.
+      event.preventDefault();
+      historySearchOpenRef.current = true;
+      setHistorySearch({ entries: promptHistory(sessionRef.current.agent?.state.messages ?? []) });
+      return true;
+    }
+    if (event.key === 'Escape' && !event.nativeEvent.isComposing) {
+      if (historyRef.current) {
+        event.preventDefault();
+        setInput(historyRef.current.draft);
+        historyRef.current = undefined;
+        return true;
+      }
+      if (element.value.trim() === '!') {
+        event.preventDefault();
+        setInput('');
+        return true;
+      }
+      return false;
+    }
+    const empty = element.value.trim() === '' || element.value.trim() === '!';
+    if (plainCtrl && event.key === 'c' && empty && element.selectionStart === element.selectionEnd && isStreaming) {
+      event.preventDefault();
+      abortAgent();
+      return true;
+    }
+    return false;
+  };
+
+  const closeHistorySearch = (accepted?: string) => {
+    // Accepting focuses the composer, which blurs the search input and would cancel a second time.
+    if (!historySearchOpenRef.current) {
+      return;
+    }
+    historySearchOpenRef.current = false;
+    setHistorySearch(undefined);
+    if (accepted !== undefined) {
+      historyRef.current = undefined;
+      setInput(accepted);
+    }
+    requestAnimationFrame(() => {
+      const element = composerRef.current;
+      element?.focus();
+      if (element && accepted !== undefined) {
+        element.setSelectionRange(accepted.length, accepted.length);
+      }
+    });
+  };
   const hasCurrentMessages = hasPersistableMessages(agent?.state.messages ?? []);
   const visibleSidebarSessions = sessions.slice(0, SIDEBAR_SESSION_MENU_LIMIT);
   const sidebarSessionMenu = (
@@ -2010,6 +2067,13 @@ export function ChatApp({
           onSubmit={submitPrompt}
         >
           <div className={styles.composerInputGroup}>
+            {historySearch && (
+              <HistorySearch
+                entries={historySearch.entries}
+                onAccept={(text) => closeHistorySearch(text)}
+                onCancel={() => closeHistorySearch()}
+              />
+            )}
             {isShellInput && (
               <div className={styles.composerShellMode} data-testid={testIds.chat.shellMode}>
                 <Icon name="brackets-curly" /> Shell mode: runs in this chat&apos;s session filesystem, without the
@@ -2027,7 +2091,7 @@ export function ChatApp({
               placeholder="Ask about metrics, PromQL, or dashboards (! runs a shell command; Shift+Enter for a new line)"
               onChange={(event) => handleInputChange(event.currentTarget.value)}
               onKeyDown={(event) => {
-                if (handleHistoryKey(event)) {
+                if (handleHistoryKey(event) || handleReadlineKey(event)) {
                   return;
                 }
                 // Enter sends, Shift+Enter inserts a new line; Enter that confirms an IME composition does neither.

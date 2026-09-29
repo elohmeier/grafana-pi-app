@@ -1,5 +1,11 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { navigatePromptHistory, promptHistory, type PromptHistoryState } from './promptHistory';
+import {
+  navigatePromptHistory,
+  promptHistory,
+  searchPromptHistory,
+  searchPromptHistoryNewer,
+  type PromptHistoryState,
+} from './promptHistory';
 
 const user = (text: string) => ({ role: 'user', content: text, timestamp: 0 }) as AgentMessage;
 const shell = (command: string) =>
@@ -50,5 +56,16 @@ describe('navigatePromptHistory', () => {
 
   it('browses only shell commands from shell mode', () => {
     expect(walk('!', [-1, -1, 1])).toEqual(['!ls', undefined, '!']);
+  });
+});
+
+describe('searchPromptHistory', () => {
+  const entries = ['!grafana fetch --all', 'show error rates', '!grafana search kafka', 'list dashboards'];
+
+  it('finds the newest entry containing the text, then older ones, ignoring case', () => {
+    expect(searchPromptHistory(entries, 'GRAFANA')).toBe(0);
+    expect(searchPromptHistory(entries, 'grafana', 1)).toBe(2);
+    expect(searchPromptHistory(entries, 'grafana', 3)).toBeUndefined();
+    expect(searchPromptHistoryNewer(entries, 'grafana', 1)).toBe(0);
   });
 });

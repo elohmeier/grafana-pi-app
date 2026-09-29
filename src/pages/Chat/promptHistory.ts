@@ -62,3 +62,29 @@ export function navigatePromptHistory(
   }
   return { state: { ...current, index }, text: current.entries[index] };
 }
+
+/**
+ * Index of the first history entry at or after `from` (older) that contains
+ * `query`, ignoring case, like readline's reverse-i-search. An empty query
+ * matches every entry.
+ */
+export function searchPromptHistory(entries: readonly string[], query: string, from = 0): number | undefined {
+  const needle = query.toLowerCase();
+  for (let index = Math.max(0, from); index < entries.length; index++) {
+    if (entries[index].toLowerCase().includes(needle)) {
+      return index;
+    }
+  }
+  return undefined;
+}
+
+/** Like {@link searchPromptHistory}, towards newer entries (at or before `from`). */
+export function searchPromptHistoryNewer(entries: readonly string[], query: string, from: number): number | undefined {
+  const needle = query.toLowerCase();
+  for (let index = Math.min(from, entries.length - 1); index >= 0; index--) {
+    if (entries[index].toLowerCase().includes(needle)) {
+      return index;
+    }
+  }
+  return undefined;
+}
