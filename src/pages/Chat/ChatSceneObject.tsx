@@ -49,8 +49,6 @@ import {
   ToolResultMessageBody,
   ToolTranscriptContext,
   UserShellEntry,
-  type DashboardAction,
-  type DashboardOpenHandler,
   type ToolRunView,
   type ToolTranscript,
 } from './ToolRenderer';
@@ -1391,45 +1389,6 @@ export function ChatApp({
     locationService.push(targetRoute);
   }, [preserveCurrentRunForHandoff, saveSession]);
 
-  const handleOpenDashboard = useCallback<DashboardOpenHandler>(
-    async (action: DashboardAction) => {
-      const targetRoute = dashboardActionRoute(action);
-      if (!targetRoute) {
-        setError('The dashboard sync result did not include a dashboard URL or UID.');
-        return;
-      }
-
-      const currentAgent = sessionRef.current.agent;
-      const currentSessionId = sessionIdRef.current;
-
-      try {
-        if (PLUGIN_ID === ASSISTANT_SIDEBAR_PLUGIN_ID && currentAgent && currentSessionId) {
-          if (currentAgent.state.isStreaming) {
-            preserveCurrentRunForHandoff();
-          }
-          if (!currentAgent.state.isStreaming && hasPersistableMessages(currentAgent.state.messages)) {
-            await saveSession(currentSessionId, titleRef.current, currentAgent.state.messages);
-          }
-          storeAssistantSidebarDockRequest({
-            path: targetRoute,
-            sessionId: currentSessionId,
-          });
-        } else if (currentAgent && currentSessionId && !currentAgent.state.isStreaming) {
-          if (hasPersistableMessages(currentAgent.state.messages)) {
-            await saveSession(currentSessionId, titleRef.current, currentAgent.state.messages);
-          }
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-        return;
-      }
-
-      allowNextLocationChangeRef.current = true;
-      locationService.push(targetRoute);
-    },
-    [preserveCurrentRunForHandoff, saveSession]
-  );
-
   const requestDockToSidebar = () => {
     if (!canDockToSidebar || pendingToolConfirmation) {
       return;
@@ -1958,7 +1917,6 @@ export function ChatApp({
                     continuedInTurn={
                       message.role === 'assistant' && visibleMessages[index + 1]?.message.role === 'assistant'
                     }
-                    onOpenDashboard={handleOpenDashboard}
                   />
                 ))}
               </ToolTranscriptContext.Provider>
@@ -2244,7 +2202,6 @@ const MessageView = memo(function MessageView({
   isStreaming,
   continuesTurn,
   continuedInTurn,
-  onOpenDashboard,
 }: {
   message: AgentMessage;
   isStreaming?: boolean;
@@ -2252,7 +2209,6 @@ const MessageView = memo(function MessageView({
   continuesTurn?: boolean;
   /** An assistant message that another assistant message directly follows. */
   continuedInTurn?: boolean;
-  onOpenDashboard?: DashboardOpenHandler;
 }) {
   const styles = useStyles2(getStyles);
   const isUser = message.role === 'user';
@@ -2275,12 +2231,12 @@ const MessageView = memo(function MessageView({
       )}
     >
       {roleLabel && <div className={styles.messageHeader}>{roleLabel}</div>}
-      <div className={styles.messageBody}>{renderMessageContent(message, Boolean(isStreaming), onOpenDashboard)}</div>
+      <div className={styles.messageBody}>{renderMessageContent(message, Boolean(isStreaming))}</div>
     </article>
   );
 });
 
-function renderMessageContent(message: AgentMessage, isStreaming: boolean, onOpenDashboard?: DashboardOpenHandler) {
+function renderMessageContent(message: AgentMessage, isStreaming: boolean) {
   if (message.role === 'user') {
     return <ContentBlocks content={message.content} markdown={false} />;
   }
@@ -2302,7 +2258,6 @@ function renderMessageContent(message: AgentMessage, isStreaming: boolean, onOpe
         content={message.content}
         details={message.details}
         isError={message.isError}
-        onOpenDashboard={onOpenDashboard}
       />
     );
   }
@@ -2421,38 +2376,6 @@ function formatConfirmationArgs(value: unknown) {
   } catch {
     return String(value);
   }
-}
-
-function dashboardActionRoute(action: DashboardAction) {
-  return (
-    (action.url ? grafanaRelativePath(action.url) : undefined) ??
-    (action.uid ? `/d/${encodeURIComponent(action.uid)}` : undefined)
-  );
-}
-
-function grafanaRelativePath(rawUrl: string) {
-  const value = rawUrl.trim();
-  if (!value || value.startsWith('//')) {
-    return undefined;
-  }
-
-  if (value.startsWith('/')) {
-    return value;
-  }
-
-  try {
-    const parsed = new URL(value, window.location.origin);
-    if (!isSafeGrafanaRoute(parsed.pathname)) {
-      return undefined;
-    }
-    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
-  } catch {
-    return undefined;
-  }
-}
-
-function isSafeGrafanaRoute(pathname: string) {
-  return pathname.startsWith('/d/') || pathname === '/dashboards' || pathname.startsWith('/dashboards/');
 }
 
 function chatSessionIdFromSearch(search: string) {

@@ -36,119 +36,21 @@ function bashDetails(overrides: Record<string, unknown>) {
   };
 }
 
-const alertQuery = 'sum(rate(http_requests_total{status=~"5.."}[5m]))';
-
-function alertRuleFixture(source = 'panelRef+annotations') {
-  return {
-    name: 'service-5xx-rate',
-    title: 'Service 5xx rate',
-    viewUrl: '/alerting/grafana/service-5xx-rate/view',
-    apiPath: '/apis/rules.alerting.grafana.app/v0alpha1/namespaces/default/alertrules/service-5xx-rate',
-    folderUid: 'service-folder',
-    panelLink: { dashboardUID: 'service-dashboard', panelID: 2, source },
-    for: '1m',
-    noDataState: 'NoData',
-    execErrState: 'Error',
-    labels: { severity: 'warning' },
-    annotations: { __dashboardUid__: 'service-dashboard', __panelId__: '2' },
-    conditionRef: 'B',
-    expressions: [
-      {
-        refId: 'A',
-        datasourceUid: 'prom-b',
-        queryType: 'range',
-        expressionType: 'prometheus',
-        expression: alertQuery,
-        relativeTimeRange: { from: 300, to: 0 },
-      },
-      {
-        refId: 'B',
-        source: true,
-        datasourceUid: '__expr__',
-        expressionType: 'threshold',
-        expression: 'A',
-        reducer: 'last',
-        evaluator: { type: 'gt', params: [0] },
-      },
-    ],
-    alertCondition: {
-      sourceRefId: 'B',
-      reducer: 'last',
-      evaluator: { type: 'gt', params: [0] },
-    },
-    prometheusChecks: [
-      {
-        refId: 'A',
-        datasourceUid: 'prom-b',
-        query: alertQuery,
-        type: 'range',
-        start: 'now-5m',
-        end: 'now',
-        relativeTimeRange: { from: 300, to: 0 },
-      },
-    ],
-  };
-}
-
-function alertSearchResultFixture(source = 'panelRef+annotations') {
-  return {
-    namespace: 'default',
-    query: {
-      dashboardUid: 'service-dashboard',
-      panelId: '2',
-      panelTitle: '5xx rate panel',
-    },
-    dashboardPanel: {
-      id: '2',
-      title: '5xx rate panel',
-      type: 'timeseries',
-      datasourceUid: 'prom-b',
-      datasourceType: 'prometheus',
-      targets: [
-        {
-          refId: 'A',
-          datasourceUid: 'prom-b',
-          datasourceType: 'prometheus',
-          query: alertQuery,
-          legendFormat: '5xx',
-        },
-      ],
-      thresholds: {
-        mode: 'absolute',
-        steps: [{ value: 0, color: 'green' }],
-      },
-    },
-    ruleCount: 3,
-    matchCount: 1,
-    exactPanelMatchCount: 1,
-    matches: [
-      {
-        score: 160,
-        reasons: ['panel link exact match', `${source} panelID match`],
-        rule: alertRuleFixture(source),
-      },
-    ],
-    guidance: ['Compare alert prometheusChecks against the panel query.'],
-  };
-}
-
 describe('ToolRenderer', () => {
-  it('renders removed specialist and Grafana tool calls as plain JSON without summaries', () => {
+  it('renders calls of retired tools with their arguments behind the tool name', () => {
     const { container } = render(
       <ContentBlocks
         content={[
           { type: 'toolCall', name: 'run_query_agent', arguments: { task: 'Find CPU metrics.' } },
-          { type: 'toolCall', name: 'list_metrics', arguments: { prefix: 'node_' } },
-          { type: 'toolCall', name: 'query_prometheus', arguments: { query: 'up' } },
+          { type: 'toolCall', name: 'list_metrics', arguments: {} },
         ]}
       />
     );
 
-    expect(container.textContent).toContain('"task": "Find CPU metrics."');
-    expect(container.textContent).toContain('"prefix": "node_"');
-    expect(container.textContent).toContain('"query": "up"');
-    expect(container.textContent).not.toContain('Run query agent');
-    expect(container.textContent).not.toContain('List metric names');
+    const summaries = Array.from(container.querySelectorAll('details > summary')).map((summary) => summary.textContent);
+    expect(summaries).toEqual(['›run_query_agent']);
+    expect(container.querySelector('details pre')?.textContent).toContain('"task": "Find CPU metrics."');
+    expect(container.textContent).toContain('›list_metrics');
   });
 
   it('renders tool calls with their transcript results and run state in one terminal', () => {
@@ -448,7 +350,7 @@ describe('ToolRenderer', () => {
     expect(container.textContent).toBe('›edit /workspace/a.txtoldText not found in /workspace/a.txt.');
   });
 
-  it('renders stored specialist results with the generic tool result view', () => {
+  it('renders results of retired tools as their text output', () => {
     const { container } = render(
       <ToolResultMessageBody
         toolName="run_query_agent"
@@ -457,10 +359,7 @@ describe('ToolRenderer', () => {
       />
     );
 
-    expect(container.textContent).toContain('run_query_agent');
-    expect(container.textContent).toContain('Specialist answer');
-    expect(container.textContent).not.toContain('Query agent');
-    expect(screen.queryByTestId('subagent-result')).not.toBeInTheDocument();
+    expect(container.textContent).toBe('›run_query_agentSpecialist answer');
   });
 
   it('renders object-shaped failed tool results as readable errors', () => {
@@ -473,427 +372,7 @@ describe('ToolRenderer', () => {
       />
     );
 
-    expect(screen.getByTestId('tool-error')).toBeInTheDocument();
-    expect(container.textContent).toContain('get_alert_rule failed');
-    expect(container.textContent).toContain('Alert rule lookup failed');
-    expect(container.textContent).not.toContain('[object Object]');
-  });
-
-  it('renders panel alert rule matches with link health', () => {
-    const content = [{ type: 'text', text: JSON.stringify(alertSearchResultFixture()) }];
-
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="find_panel_alert_rules"
-        content={content}
-        details={{
-          namespace: 'default',
-          dashboardUid: 'service-dashboard',
-          panelId: '2',
-          ruleCount: 3,
-          matchCount: 1,
-          exactPanelMatchCount: 1,
-          summarized: true,
-        }}
-      />
-    );
-
-    expect(container.textContent).toContain('1 matched alert rule | 1 exact panel link | 3 scanned');
-    expect(container.textContent).toContain('5xx rate panel');
-    expect(container.textContent).toContain('Service 5xx rate');
-    expect(container.textContent).toContain('properly linked');
-    expect(container.textContent).toContain('panel indicator should appear');
-    expect(container.textContent).toContain(alertQuery);
-    expect(container.textContent).not.toContain('"matches"');
-    expect(container.textContent).not.toContain('Compare alert prometheusChecks against the panel query.');
-    expect(container.querySelector('table')).not.toBeInTheDocument();
-  });
-
-  it('warns when an alert match only has panelRef linkage', () => {
-    const content = [{ type: 'text', text: JSON.stringify(alertSearchResultFixture('panelRef')) }];
-
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="find_panel_alert_rules"
-        content={content}
-        details={{
-          namespace: 'default',
-          ruleCount: 3,
-          matchCount: 1,
-          exactPanelMatchCount: 1,
-          summarized: true,
-        }}
-      />
-    );
-
-    expect(container.textContent).toContain('panelRef only');
-    expect(container.textContent).toContain('panel indicator annotations missing');
-  });
-
-  it('renders alert rule expression chains and Prometheus checks', () => {
-    const content = [
-      {
-        type: 'text',
-        text: JSON.stringify({
-          namespace: 'default',
-          rule: alertRuleFixture('panelRef'),
-          rawStatus: { state: 'firing' },
-          guidance: ['Run prometheusChecks with `grafana-prom query` for current evidence.'],
-        }),
-      },
-    ];
-
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="get_alert_rule"
-        content={content}
-        details={{ namespace: 'default', name: 'service-5xx-rate', prometheusChecks: 1, summarized: true }}
-      />
-    );
-
-    expect(container.textContent).toContain('Alert rule | Service 5xx rate | service-5xx-rate');
-    expect(container.textContent).toContain('B last gt 0');
-    expect(container.textContent).toContain('Expression chain');
-    expect(container.textContent).toContain('Prometheus checks');
-    expect(container.textContent).toContain('panel indicator annotations missing');
-    expect(container.textContent).toContain(alertQuery);
-    expect(container.textContent).not.toContain('"rawStatus"');
-  });
-
-  it('renders artifactized tool results as artifact cards', () => {
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="query_prometheus"
-        content={[{ type: 'text', text: 'Stored artifact [artifact: artifact_1]' }]}
-        details={{
-          artifactRef: {
-            id: 'artifact_1',
-            kind: 'json',
-            title: 'query_prometheus',
-            toolName: 'query_prometheus',
-            createdAt: '2026-06-05T00:00:00.000Z',
-            bytes: 8192,
-            summary: 'Prometheus batch result.',
-          },
-          artifactPreview: {
-            type: 'json',
-            data: { results: [{ query: 'up' }] },
-            truncated: true,
-          },
-        }}
-      />
-    );
-
-    expect(screen.getByTestId('artifact-result')).toBeInTheDocument();
-    expect(container.textContent).toContain('artifact_1');
-    expect(container.textContent).toContain('Prometheus batch result.');
-    expect(container.textContent).toContain('8.0 KiB');
-    expect(container.textContent).not.toContain('Stored artifact [artifact: artifact_1]');
-  });
-
-  it('renders live dashboard JSON artifacts without dumping raw preview data', () => {
-    const rawMarker = `RAW_LIVE_DASHBOARD_JSON_${'x'.repeat(2048)}`;
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="list_live_dashboard_panels"
-        content={[
-          {
-            type: 'text',
-            text: `Stored artifact [artifact: artifact_1]\n${rawMarker}`,
-          },
-        ]}
-        details={{
-          artifactRef: {
-            id: 'artifact_1',
-            kind: 'dashboard',
-            title: 'list_live_dashboard_panels',
-            toolName: 'list_live_dashboard_panels',
-            createdAt: '2026-06-05T00:00:00.000Z',
-            bytes: 256000,
-            summary: '24 live dashboard panels summarized.',
-          },
-          artifactPreview: {
-            type: 'json',
-            data: {
-              command: 'LIST_PANELS',
-              summary: {
-                panelCount: 24,
-                panels: [{ elementName: 'panel-1', title: 'Request rate' }],
-              },
-              data: {
-                elements: [
-                  {
-                    element: {
-                      kind: 'Panel',
-                      spec: {
-                        title: 'Request rate',
-                        fieldConfig: { defaults: { custom: { rawMarker } } },
-                      },
-                    },
-                  },
-                ],
-              },
-            },
-            truncated: true,
-          },
-        }}
-      />
-    );
-
-    expect(screen.getByTestId('artifact-result')).toBeInTheDocument();
-    expect(container.textContent).toContain('artifact_1');
-    expect(container.textContent).toContain('24 live dashboard panels summarized.');
-    expect(container.textContent).toContain('250.0 KiB');
-    expect(container.textContent).toContain('read /artifacts/artifact_1.json');
-    expect(container.textContent).not.toContain('Stored artifact [artifact: artifact_1]');
-    expect(container.textContent).not.toContain(rawMarker);
-    expect(container.textContent).not.toContain('"elements"');
-  });
-
-  it('renders read_artifact output instead of hiding it behind an artifact card', () => {
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="read_artifact"
-        content={[{ type: 'text', text: 'selected artifact value' }]}
-        details={{
-          artifactRead: true,
-          mode: 'field',
-          path: 'results.0.query',
-          artifactRef: {
-            id: 'artifact_1',
-            kind: 'json',
-            title: 'query_prometheus',
-            toolName: 'query_prometheus',
-            createdAt: '2026-06-05T00:00:00.000Z',
-            bytes: 8192,
-            summary: 'Prometheus batch result.',
-          },
-        }}
-      />
-    );
-
-    expect(screen.queryByTestId('artifact-result')).not.toBeInTheDocument();
-    expect(container.textContent).toContain('Artifact read | field | query_prometheus');
-    expect(container.textContent).toContain('selected artifact value');
-    expect(container.textContent).not.toContain('read /artifacts/artifact_1.json');
-  });
-
-  it('renders jq null artifact reads without raw null fallback details', () => {
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="read_artifact"
-        content={[{ type: 'text', text: 'null' }]}
-        details={{
-          artifactRead: true,
-          mode: 'jq',
-          jq: '.elements[0].element.vizConfig.spec.fieldConfig.defaults.thresholds',
-          exitCode: 0,
-          truncated: false,
-          artifactRef: {
-            id: 'artifact_1',
-            kind: 'dashboard',
-            title: 'list_live_dashboard_panels',
-            toolName: 'list_live_dashboard_panels',
-            createdAt: '2026-07-01T08:44:20.964Z',
-            bytes: 5573,
-            summary: 'list_live_dashboard_panels returned 1 panel.',
-          },
-        }}
-      />
-    );
-
-    expect(container.textContent).toContain('Artifact read | jq | list_live_dashboard_panels');
-    expect(container.textContent).toContain('jq result is null.');
-    expect(container.textContent).toContain('.elements[0].element.vizConfig.spec.fieldConfig.defaults.thresholds');
-    expect(container.textContent).not.toContain('"artifactRead"');
-    expect(container.textContent).not.toContain('Details');
-  });
-
-  it('renders undefined artifact fields as an empty state', () => {
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="read_artifact"
-        content={[{ type: 'text', text: 'undefined' }]}
-        details={{
-          artifactRead: true,
-          mode: 'field',
-          path: 'data.elements.0.element.vizConfig.spec.fieldConfig.defaults',
-          artifactRef: {
-            id: 'artifact_1',
-            kind: 'dashboard',
-            title: 'list_live_dashboard_panels',
-            toolName: 'list_live_dashboard_panels',
-            createdAt: '2026-07-01T08:44:20.964Z',
-            bytes: 5573,
-            summary: 'list_live_dashboard_panels returned 1 panel.',
-          },
-        }}
-      />
-    );
-
-    expect(container.textContent).toContain('Artifact read | field | list_live_dashboard_panels');
-    expect(container.textContent).toContain('Selected artifact field is undefined.');
-    expect(container.textContent).toContain('data.elements.0.element.vizConfig.spec.fieldConfig.defaults');
-    expect(container.textContent).not.toContain('Details');
-  });
-
-  it('collapses full JSON artifact reads behind a dashboard summary', () => {
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="read_artifact"
-        content={[
-          {
-            type: 'text',
-            text: JSON.stringify({
-              command: 'LIST_PANELS',
-              success: true,
-              data: {
-                elements: [
-                  {
-                    element: {
-                      kind: 'Panel',
-                      spec: {
-                        title: '5xx rate panel',
-                        data: { kind: 'QueryGroup', spec: { queries: [{ kind: 'PanelQuery' }] } },
-                        vizConfig: { kind: 'VizConfig', group: 'timeseries' },
-                      },
-                    },
-                    layoutItem: { kind: 'GridLayoutItem', spec: { x: 0, y: 0, width: 24, height: 8 } },
-                  },
-                ],
-              },
-              availableCommands: ['LIST_PANELS'],
-            }),
-          },
-        ]}
-        details={{
-          artifactRead: true,
-          mode: 'full',
-          truncated: false,
-          artifactRef: {
-            id: 'artifact_1',
-            kind: 'dashboard',
-            title: 'list_live_dashboard_panels',
-            toolName: 'list_live_dashboard_panels',
-            createdAt: '2026-07-01T08:44:20.964Z',
-            bytes: 5573,
-            summary: 'list_live_dashboard_panels returned 1 panel.',
-          },
-        }}
-      />
-    );
-
-    const details = screen.getByText('Full artifact JSON').closest('details') as HTMLDetailsElement | null;
-
-    expect(container.textContent).toContain('Artifact read | full | list_live_dashboard_panels');
-    expect(container.textContent).toContain('LIST_PANELS');
-    expect(container.textContent).toContain('5xx rate panel');
-    expect(container.textContent).toContain('24x8 at 0,0');
-    expect(details?.open).toBe(false);
-  });
-
-  it('renders live dashboard mutation schema results', () => {
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="get_live_dashboard_mutation_schema"
-        content={[
-          {
-            type: 'text',
-            text: JSON.stringify({
-              command: 'UPDATE_PANEL',
-              available: true,
-              readOnly: false,
-              guidance: {
-                workflow: ['Use list_live_dashboard_panels first.'],
-              },
-              availableCommands: ['LIST_PANELS', 'UPDATE_PANEL'],
-            }),
-          },
-        ]}
-        details={{
-          command: 'UPDATE_PANEL',
-          availableCommands: ['LIST_PANELS', 'UPDATE_PANEL'],
-          guidanceOnly: true,
-        }}
-      />
-    );
-
-    expect(container.textContent).toContain('Live dashboard mutation schema | UPDATE_PANEL');
-    expect(container.textContent).toContain('LIST_PANELS');
-    expect(container.textContent).toContain('UPDATE_PANEL');
-    expect(container.textContent).toContain('Guidance');
-    expect(container.textContent).not.toContain('Details');
-  });
-
-  it('renders live dashboard mutation results as structured changes', () => {
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="rename_live_dashboard_panel"
-        content={[
-          {
-            type: 'text',
-            text: 'Live dashboard mutation UPDATE_PANEL succeeded.\nChanges: 1\n{"previousValue":"Old title"}',
-          },
-        ]}
-        details={{
-          command: 'UPDATE_PANEL',
-          success: true,
-          payload: {
-            element: { kind: 'ElementReference', name: 'panel-1' },
-            panel: { kind: 'Panel', spec: { title: 'New title' } },
-          },
-          changes: [{ path: '/elements/panel-1/spec/title', previousValue: 'Old title', newValue: 'New title' }],
-          warnings: ['Panel data will refresh after save.'],
-          data: { ok: true },
-          visualVerification: { status: 'skipped', error: 'Renderer unavailable' },
-          availableCommands: ['LIST_PANELS', 'UPDATE_PANEL'],
-        }}
-      />
-    );
-
-    expect(container.textContent).toContain('Live dashboard mutation succeeded');
-    expect(container.textContent).toContain('UPDATE_PANEL');
-    expect(container.textContent).toContain('panel-1');
-    expect(container.textContent).toContain('Panel title');
-    expect(container.textContent).toContain('/elements/panel-1/spec/title');
-    expect(container.textContent).toContain('Old title');
-    expect(container.textContent).toContain('New title');
-    expect(container.textContent).toContain('Verification issue');
-    expect(container.textContent).toContain('Renderer unavailable');
-    expect(container.textContent).toContain('Panel data will refresh after save.');
-    expect(container.textContent).not.toContain('"previousValue"');
-    const changes = [...container.querySelectorAll('details')].find((details) =>
-      details.querySelector('summary')?.textContent?.includes('Changes')
-    );
-    expect(changes).toBeInTheDocument();
-    expect(changes).not.toHaveAttribute('open');
-  });
-
-  it('renders read-only live dashboard results as commands', () => {
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="list_live_dashboard_panels"
-        content={[{ type: 'text', text: 'Live dashboard mutation LIST_PANELS succeeded.' }]}
-        details={{
-          command: 'LIST_PANELS',
-          success: true,
-          changes: [],
-          data: {
-            elements: [
-              { element: { kind: 'Panel', spec: { title: 'Requests' } } },
-              { element: { kind: 'Panel', spec: { title: 'Errors' } } },
-            ],
-          },
-          availableCommands: ['LIST_PANELS', 'UPDATE_PANEL'],
-        }}
-      />
-    );
-
-    expect(container.textContent).toContain('Live dashboard command succeeded');
-    expect(container.textContent).toContain('LIST_PANELS');
-    expect(container.textContent).toContain('Panels');
-    expect(container.textContent).toContain('2');
-    expect(container.textContent).not.toContain('Live dashboard mutation succeeded');
+    expect(container.textContent).toBe('›get_alert_ruleAlert rule lookup failed');
   });
 
   it('renders images attached to bash results', () => {
@@ -986,38 +465,8 @@ describe('ToolRenderer hardening', () => {
     expect(container.textContent).not.toMatch(/@@ -\d/);
   });
 
-  it('renders alert rule matches with duplicate rule names without duplicate keys', () => {
-    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      render(
-        <ToolResultMessageBody
-          toolName="find_panel_alert_rules"
-          content={[
-            {
-              type: 'text',
-              text: JSON.stringify({
-                ruleCount: 2,
-                matchCount: 2,
-                exactPanelMatchCount: 0,
-                matches: [
-                  { score: 1, reasons: [], rule: { name: 'unknown', title: 'Rule A' } },
-                  { score: 1, reasons: [], rule: { name: 'unknown', title: 'Rule B' } },
-                ],
-              }),
-            },
-          ]}
-          details={{ ruleCount: 2, matchCount: 2 }}
-        />
-      );
-
-      expect(consoleError.mock.calls.flat().join(' ')).not.toContain('same key');
-    } finally {
-      consoleError.mockRestore();
-    }
-  });
-
   it('falls back to the default error message instead of dumping JSON', () => {
-    render(
+    const { container } = render(
       <ToolResultMessageBody
         toolName="query_prometheus"
         content={undefined}
@@ -1026,49 +475,15 @@ describe('ToolRenderer hardening', () => {
       />
     );
 
-    const error = screen.getByTestId('tool-error');
-    expect(error.textContent).toContain('Tool failed without a readable error message.');
+    expect(container.textContent).toBe('›query_prometheusTool failed without a readable error message.');
   });
 
   it('ignores non-string error primitives like false', () => {
-    render(
+    const { container } = render(
       <ToolResultMessageBody toolName="query_prometheus" content={undefined} details={{ error: false }} isError />
     );
 
-    const error = screen.getByTestId('tool-error');
-    expect(error.textContent).toContain('Tool failed without a readable error message.');
-    // The raw details JSON stays inspectable in the Details section, but the
-    // headline error message must not be the stringified primitive.
-    expect(screen.queryByText('false')).not.toBeInTheDocument();
-  });
-
-  it('skips non-primitive label values instead of stringifying them', () => {
-    const rule = { ...alertRuleFixture(), labels: { severity: 'warning', bad: { nested: true } } };
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="get_alert_rule"
-        content={[{ type: 'text', text: JSON.stringify({ namespace: 'default', rule }) }]}
-        details={{ namespace: 'default', name: 'service-5xx-rate' }}
-      />
-    );
-
-    expect(container.textContent).toContain('severity');
-    expect(container.textContent).not.toContain('[object Object]');
-  });
-
-  it('does not render alert rule links with unsafe schemes', () => {
-    const result = alertSearchResultFixture();
-    result.matches[0].rule.viewUrl = 'javascript:alert(1)';
-    render(
-      <ToolResultMessageBody
-        toolName="find_panel_alert_rules"
-        content={[{ type: 'text', text: JSON.stringify(result) }]}
-        details={{ namespace: 'default', matchCount: 1 }}
-      />
-    );
-
-    expect(screen.queryByRole('link', { name: 'Open rule' })).not.toBeInTheDocument();
-    expect(screen.getAllByText('Open rule').length).toBeGreaterThan(0);
+    expect(container.textContent).toBe('›query_prometheusTool failed without a readable error message.');
   });
 
   it('strips remote images and iframes from rendered markdown', () => {
