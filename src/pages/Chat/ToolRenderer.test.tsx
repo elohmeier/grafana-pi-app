@@ -294,7 +294,7 @@ describe('ToolRenderer', () => {
     expect(container.querySelector('details')).toBeNull();
   });
 
-  it('shows the first lines of long output and expands on request', () => {
+  it('shows the first lines of long output, expands on request, and collapses again', () => {
     const stdout = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join('\n') + '\n';
     const { container } = render(
       <ToolResultMessageBody toolName="bash" content={[]} details={bashDetails({ command: 'seq', stdout })} />
@@ -303,7 +303,42 @@ describe('ToolRenderer', () => {
     expect(container.querySelector('pre')?.textContent?.split('\n')).toHaveLength(10);
     fireEvent.click(screen.getByRole('button', { name: '… 20 more lines' }));
     expect(container.querySelector('pre')?.textContent?.split('\n')).toHaveLength(30);
-    expect(screen.queryByRole('button')).toBeNull();
+    const collapse = screen.getByRole('button', { name: 'Show less' });
+    expect(collapse).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.click(collapse);
+    expect(container.querySelector('pre')?.textContent?.split('\n')).toHaveLength(10);
+    expect(screen.getByRole('button', { name: '… 20 more lines' })).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('shows a command the user stopped as stopped, not failed', () => {
+    render(
+      <ToolResultMessageBody
+        toolName="bash"
+        content={[{ type: 'text', text: '[stderr]\nbash: cancelled\n[exit 130]' }]}
+        details={bashDetails({
+          command: 'sleep 60',
+          exitCode: 130,
+          stderr: 'bash: cancelled\n',
+          discardedChanges: 'cancelled',
+        })}
+      />
+    );
+    expect(screen.getByText(/stopped/)).toBeInTheDocument();
+    expect(screen.queryByText(/exit 130/)).toBeNull();
+    expect(screen.queryByText(/discarded uncommitted changes/)).toBeNull();
+  });
+
+  it('shows a tool call stopped before it ran as stopped', () => {
+    render(
+      <ToolResultMessageBody
+        toolName="read"
+        content={[{ type: 'text', text: 'Operation aborted' }]}
+        details={{}}
+        isError
+      />
+    );
+    expect(screen.getByText('stopped')).toBeInTheDocument();
+    expect(screen.queryByText('Operation aborted')).toBeNull();
   });
 
   it('renders timed-out bash results with discarded changes', () => {

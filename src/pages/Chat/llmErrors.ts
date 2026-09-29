@@ -5,18 +5,14 @@ export type AssistantErrorView = {
   severity: 'error' | 'warning';
 };
 
+/**
+ * Error notice for a failed assistant message. Aborted messages are not errors:
+ * every abort is the user stopping the run (Stop, or leaving or switching the
+ * chat), and the transcript shows them as stopped with their partial content.
+ */
 export function formatAssistantError(errorMessage?: string, stopReason?: string): AssistantErrorView | undefined {
-  if (!errorMessage && stopReason !== 'aborted') {
+  if (!errorMessage || stopReason === 'aborted') {
     return undefined;
-  }
-
-  if (stopReason === 'aborted') {
-    return {
-      title: 'LLM request canceled',
-      message: 'The request was canceled before the model returned a response.',
-      details: errorMessage,
-      severity: 'warning',
-    };
   }
 
   const rawMessage = errorMessage ?? 'Unknown LLM request failure';

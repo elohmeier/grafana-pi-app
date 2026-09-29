@@ -5,6 +5,7 @@ import {
   createUserShellMessage,
   finishedTurnSteps,
   hasPersistableMessages,
+  isStoppedToolResult,
   pairToolResults,
   parseUserShellInput,
 } from './chatMessages';
@@ -144,6 +145,22 @@ describe('pairToolResults', () => {
     ];
 
     expect(pairToolResults(messages)).toEqual(new Map([['call_1', paired]]));
+  });
+});
+
+describe('isStoppedToolResult', () => {
+  it('recognizes tool calls the user stopped before or while they ran', () => {
+    expect(
+      isStoppedToolResult({ ...toolResult('a'), isError: true, content: [{ type: 'text', text: 'Operation aborted' }] })
+    ).toBe(true);
+    expect(
+      isStoppedToolResult({
+        ...toolResult('b'),
+        toolName: 'bash',
+        details: { exitCode: 130, discardedChanges: 'cancelled' },
+      })
+    ).toBe(true);
+    expect(isStoppedToolResult({ ...toolResult('c'), toolName: 'bash', details: { exitCode: 1 } })).toBe(false);
   });
 });
 

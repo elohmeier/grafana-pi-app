@@ -12,7 +12,7 @@ import React, {
 } from 'react';
 import { css, cx } from '@emotion/css';
 import { Agent, type AgentEvent, type AgentMessage, type StreamFn, streamProxy } from '@earendil-works/pi-agent-core';
-import type { ToolResultMessage } from '@earendil-works/pi-ai';
+import type { AssistantMessage, ToolResultMessage } from '@earendil-works/pi-ai';
 import { SceneComponentProps, SceneObjectBase, SceneObjectState } from '@grafana/scenes';
 import {
   Alert,
@@ -34,6 +34,7 @@ import { useRestrictedGrafanaApis, type DashboardMutationAPI, type GrafanaTheme2
 import { PLUGIN_BASE_URL, PLUGIN_ID } from '../../constants';
 import { testIds } from '../../components/testIds';
 import { ChangeSetReviewModal } from './ChangeSetReview';
+import { navigatePromptHistory, type PromptHistoryState } from './promptHistory';
 import { usePluginMeta } from '../../utils/utils.plugin';
 import type { Artifact } from './domain';
 import { formatAssistantError, type AssistantErrorView } from './llmErrors';
@@ -343,6 +344,7 @@ export function ChatApp({
   const saveSequenceRef = useRef(0);
   const runStatusRef = useRef<ChatRunStatus>(undefined);
   const importSessionInputRef = useRef<HTMLInputElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesContainerRef = useRef<HTMLElement | null>(null);
   const autoScrollRef = useRef(true);
   const sidebarRouteRef = useRef<string | undefined>(sidebarRoute);
@@ -840,8 +842,51 @@ export function ChatApp({
     setAutoScrollEnabled(true);
   }, [setAutoScrollEnabled]);
 
+  const historyRef = useRef<PromptHistoryState>(undefined);
   const handleInputChange = useCallback((value: string) => {
+    // Typing ends history browsing and keeps the text as the new draft.
+    historyRef.current = undefined;
     setInput(value);
+  }, []);
+
+  /** Up/Down recall earlier prompts and shell commands, like the pi coding agent's editor. */
+  const handleHistoryKey = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.shiftKey || event.altKey || event.metaKey || event.ctrlKey || event.nativeEvent.isComposing) {
+      return false;
+    }
+    const element = event.currentTarget;
+    const browsing = historyRef.current !== undefined;
+    let direction: -1 | 1;
+    if (event.key === 'ArrowUp') {
+      const onFirstLine = element.value.lastIndexOf('\n', element.selectionStart - 1) === -1;
+      const empty = element.value.trim() === '' || element.value.trim() === '!';
+      if (!(browsing ? onFirstLine : empty)) {
+        return false;
+      }
+      direction = -1;
+    } else if (event.key === 'ArrowDown') {
+      if (!browsing || element.value.indexOf('\n', element.selectionEnd) !== -1) {
+        return false;
+      }
+      direction = 1;
+    } else {
+      return false;
+    }
+    const step = navigatePromptHistory(
+      historyRef.current,
+      sessionRef.current.agent?.state.messages ?? [],
+      element.value,
+      direction
+    );
+    if (!step) {
+      return false;
+    }
+    event.preventDefault();
+    historyRef.current = step.state;
+    setInput(step.text);
+    // Put the caret at the end, so Up walks a multi-line entry before moving on.
+    requestAnimationFrame(() => element.setSelectionRange(step.text.length, step.text.length));
+    return true;
   }, []);
 
   useLayoutEffect(() => {
@@ -1061,6 +1106,10 @@ export function ChatApp({
       } finally {
         setUserShellRunning(false);
         flushRevision();
+        // Stay in the composer for the next command, unless the user moved on to another control.
+        if (document.activeElement === document.body || document.activeElement === composerRef.current) {
+          composerRef.current?.focus();
+        }
       }
     },
     [buildWorkspaceToolkit, flushRevision, keepAutoScrollEnabled, saveSession, userShellRunning]
@@ -1576,6 +1625,10 @@ export function ChatApp({
   const streamingStatusText = runStatusText(displayRunStatus, pendingApprovalToolName);
   const streamingBadgeText = runStatusBadgeText(displayRunStatus, pendingApprovalToolName);
   const hasLLMConfig = Boolean(jsonData.isOpenAIAPIKeySet) && configuredModels.length > 0;
+  const canSubmit =
+    Boolean(agent) &&
+    !isBusy &&
+    (isShellInput ? Boolean(parseUserShellInput(input)) : Boolean(input.trim()) && hasLLMConfig);
   const hasCurrentMessages = hasPersistableMessages(agent?.state.messages ?? []);
   const visibleSidebarSessions = sessions.slice(0, SIDEBAR_SESSION_MENU_LIMIT);
   const sidebarSessionMenu = (
@@ -1964,15 +2017,26 @@ export function ChatApp({
               </div>
             )}
             <TextArea
+              ref={composerRef}
               className={cx(isShellInput && styles.composerShellInput)}
               data-testid={testIds.chat.composer}
               rows={isSidebarVariant ? 2 : 3}
               value={input}
-              disabled={!agent || isBusy || (!hasLLMConfig && !isShellInput)}
-              placeholder="Ask about metrics, PromQL, or dashboards... (! runs a shell command)"
+              // Stays editable while the assistant or a command runs, so focus and the next draft are kept.
+              disabled={!agent || (!hasLLMConfig && !isShellInput)}
+              placeholder="Ask about metrics, PromQL, or dashboards (! runs a shell command; Shift+Enter for a new line)"
               onChange={(event) => handleInputChange(event.currentTarget.value)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                if (handleHistoryKey(event)) {
+                  return;
+                }
+                // Enter sends, Shift+Enter inserts a new line; Enter that confirms an IME composition does neither.
+                if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) {
+                  return;
+                }
+                event.preventDefault();
+                if (canSubmit) {
+                  historyRef.current = undefined;
                   void submitPrompt(event);
                 }
               }}
@@ -1996,9 +2060,7 @@ export function ChatApp({
                 data-testid={testIds.chat.send}
                 icon={isShellInput ? 'play' : 'message'}
                 type="submit"
-                disabled={
-                  !agent || isBusy || (isShellInput ? !parseUserShellInput(input) : !input.trim() || !hasLLMConfig)
-                }
+                disabled={!canSubmit}
               >
                 {isShellInput ? 'Run' : 'Send'}
               </Button>
@@ -2256,6 +2318,15 @@ function renderMessageContent(message: AgentMessage, isStreaming: boolean) {
     return <ContentBlocks content={message.content} markdown={false} />;
   }
   if (message.role === 'assistant') {
+    if (message.stopReason === 'aborted') {
+      // Keep what the model streamed before the user stopped it.
+      return (
+        <>
+          {hasVisibleContent(message.content) && <ContentBlocks content={message.content} />}
+          <StoppedNotice />
+        </>
+      );
+    }
     const errorView = formatAssistantError(message.errorMessage, message.stopReason);
     if (errorView) {
       return <AssistantErrorNotice error={errorView} />;
@@ -2286,6 +2357,24 @@ function messageKey(message: AgentMessage, index: number, isStreaming: boolean) 
       ? (message as { timestamp: number }).timestamp
       : 'untimed';
   return `${message.role}-${timestamp}-${index}${isStreaming ? '-streaming' : ''}`;
+}
+
+function hasVisibleContent(content: AssistantMessage['content']) {
+  return content.some(
+    (block) =>
+      (block.type === 'text' && block.text.trim() !== '') ||
+      (block.type === 'thinking' && block.thinking.trim() !== '') ||
+      block.type === 'toolCall'
+  );
+}
+
+function StoppedNotice() {
+  const styles = useStyles2(getStyles);
+  return (
+    <div className={styles.stoppedNotice} data-testid={testIds.chat.stoppedNotice}>
+      <Icon name="square-shape" size="xs" /> Stopped
+    </div>
+  );
 }
 
 function AssistantErrorNotice({ error }: { error: AssistantErrorView }) {
@@ -3494,6 +3583,13 @@ const getStyles = (theme: GrafanaTheme2) => ({
   }),
   messageBody: css({
     lineHeight: 1.5,
+  }),
+  stoppedNotice: css({
+    display: 'flex',
+    alignItems: 'center',
+    gap: theme.spacing(0.75),
+    color: theme.colors.text.secondary,
+    fontSize: theme.typography.bodySmall.fontSize,
   }),
   assistantError: css({
     display: 'grid',

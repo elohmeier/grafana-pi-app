@@ -1,5 +1,5 @@
 import { EvidenceView, evidencePresentations } from './session/EvidenceView';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { css, cx, keyframes } from '@emotion/css';
 import type { AgentToolResult } from '@earendil-works/pi-agent-core';
 import type { ToolResultMessage } from '@earendil-works/pi-ai';
@@ -7,6 +7,7 @@ import { renderMarkdown, type GrafanaTheme2 } from '@grafana/data';
 import { Spinner, useStyles2 } from '@grafana/ui';
 import { structuredPatch } from 'diff';
 import { highlightBash } from './bashRendering';
+import { STOPPED_TOOL_ERROR } from './chatMessages';
 import {
   highlightJsonnetLines,
   shouldHighlightJsonnet,
@@ -232,7 +233,10 @@ function ToolEntry({
 }) {
   const record = isRecord(args) ? args : {};
   const details = isRecord(result?.details) ? result.details : undefined;
-  const error = result?.isError ? extractToolError(name, result.details, result.content).message : undefined;
+  const errorMessage = result?.isError ? extractToolError(name, result.details, result.content).message : undefined;
+  // The user pressed Stop before the tool ran; that is not a failure of the tool.
+  const stopped = errorMessage === STOPPED_TOOL_ERROR;
+  const error = stopped ? undefined : errorMessage;
 
   switch (name) {
     case 'bash':
@@ -245,13 +249,18 @@ function ToolEntry({
           prompt={prompt}
           result={result}
           state={state}
+          stopped={stopped}
         />
       );
     case 'read':
-      return <ReadEntry args={record} details={details} error={error} result={result} state={state} />;
+      return (
+        <ReadEntry args={record} details={details} error={error} result={result} state={state} stopped={stopped} />
+      );
     case 'write':
     case 'edit':
-      return <MutationEntry args={record} details={details} error={error} name={name} state={state} />;
+      return (
+        <MutationEntry args={record} details={details} error={error} name={name} state={state} stopped={stopped} />
+      );
     default:
       return null;
   }
@@ -265,6 +274,7 @@ function BashEntry({
   prompt,
   result,
   state,
+  stopped: stoppedBeforeRun,
 }: {
   args: Record<string, unknown>;
   details?: Record<string, unknown>;
@@ -273,13 +283,24 @@ function BashEntry({
   prompt: string;
   result?: ToolEntryResult;
   state: ToolEntryState;
+  stopped?: boolean;
 }) {
   const styles = useStyles2(getToolStyles);
   const bash = details && !error ? workspaceBashResultFromRecord(details) : undefined;
   const command = bash?.command || stringField(args, 'command') || '';
   const cwd = bash?.cwd ?? stringField(args, 'cwd');
-  const failed = Boolean(error || bash?.timedOut || (bash?.exitCode !== undefined && bash.exitCode !== 0));
-  const status = bash?.timedOut ? 'timed out' : bash?.exitCode ? `exit ${bash.exitCode}` : error ? 'error' : undefined;
+  // Stop during the command ends it with exit 130 and discards its uncommitted changes.
+  const stopped = stoppedBeforeRun || (bash?.exitCode === 130 && bash.discardedChanges === 'cancelled');
+  const failed = !stopped && Boolean(error || bash?.timedOut || (bash?.exitCode !== undefined && bash.exitCode !== 0));
+  const status = stopped
+    ? 'stopped'
+    : bash?.timedOut
+      ? 'timed out'
+      : bash?.exitCode
+        ? `exit ${bash.exitCode}`
+        : error
+          ? 'error'
+          : undefined;
   // Commands such as `grafana-dashboard screenshot` attach images after the text block.
   const images = imageBlocks(result?.content);
 
@@ -300,8 +321,8 @@ function BashEntry({
       )}
       {error && <TerminalOutput error text={error} />}
       {bash?.stdout && <TerminalOutput text={bash.stdout} truncated={bash.stdoutTruncated} />}
-      {bash?.stderr && <TerminalOutput error text={bash.stderr} truncated={bash.stderrTruncated} />}
-      {bash?.discardedChanges && (
+      {bash?.stderr && <TerminalOutput error={!stopped} text={bash.stderr} truncated={bash.stderrTruncated} />}
+      {bash?.discardedChanges && !stopped && (
         <div className={styles.terminalError}>discarded uncommitted changes: {bash.discardedChanges}</div>
       )}
       {bash && bash.changes.length > 0 && <TerminalFileChanges changes={bash.changes} />}
@@ -323,24 +344,28 @@ function ReadEntry({
   error,
   result,
   state,
+  stopped,
 }: {
   args: Record<string, unknown>;
   details?: Record<string, unknown>;
   error?: string;
   result?: ToolEntryResult;
   state: ToolEntryState;
+  stopped?: boolean;
 }) {
   const styles = useStyles2(getToolStyles);
   const path = stringField(details, 'path') ?? stringField(args, 'path') ?? '';
-  const text = extractToolText(result?.content) ?? '';
+  const text = stopped ? '' : (extractToolText(result?.content) ?? '');
   const isDirectory = stringField(details, 'type') === 'directory';
   const directory = details && isDirectory ? workspaceDirectoryResultFromRecord(details, text) : undefined;
   const file = details && !isDirectory && !error ? workspaceReadResultFromRecord(details, text) : undefined;
-  const meta = directory
-    ? formatLabeledCount(directory.entries.length, 'entry', 'entries')
-    : file
-      ? workspaceReadLineSummary(file)
-      : undefined;
+  const meta = stopped
+    ? 'stopped'
+    : directory
+      ? formatLabeledCount(directory.entries.length, 'entry', 'entries')
+      : file
+        ? workspaceReadLineSummary(file)
+        : undefined;
   const line = (
     <PromptLine failed={Boolean(error)} meta={meta} state={state}>
       <span className={styles.terminalVerb}>read</span> {directory ? `${directory.path}/` : path}
@@ -382,12 +407,14 @@ function MutationEntry({
   details,
   error,
   state,
+  stopped,
 }: {
   name: 'write' | 'edit';
   args: Record<string, unknown>;
   details?: Record<string, unknown>;
   error?: string;
   state: ToolEntryState;
+  stopped?: boolean;
 }) {
   const styles = useStyles2(getToolStyles);
   const path = stringField(details, 'path') ?? stringField(args, 'path') ?? '';
@@ -395,8 +422,9 @@ function MutationEntry({
   const edits = recordsField(args, 'edits').length;
   const diff = stringField(details, 'diff');
   const hasDiff = Boolean(diff && /^@@/m.test(diff));
-  const meta =
-    name === 'write'
+  const meta = stopped
+    ? 'stopped'
+    : name === 'write'
       ? formatBytes(numberField(details, 'bytes') ?? (content !== undefined ? utf8ByteLength(content) : undefined))
       : edits > 0
         ? formatLabeledCount(edits, 'edit', 'edits')
@@ -530,23 +558,64 @@ function BashCommand({ command }: { command: string }) {
 }
 
 const OUTPUT_PREVIEW_LINES = 10;
+/** Expanded output longer than this scrolls inside the panel instead of pushing the chat away. */
+const OUTPUT_SCROLL_LINES = 200;
+
+/**
+ * Shows the first lines of long output with a toggle: "… N more lines" expands,
+ * "Show less" collapses again and brings the panel's top back into view.
+ */
+function ClampedLines({
+  count,
+  className,
+  children,
+}: {
+  count: number;
+  className?: string;
+  children: (visible: number) => React.ReactNode;
+}) {
+  const styles = useStyles2(getToolStyles);
+  const [expanded, setExpanded] = useState(false);
+  const panelRef = useRef<HTMLPreElement>(null);
+  // Hiding only a line or two saves nothing; show them instead of a toggle.
+  const clampable = count > OUTPUT_PREVIEW_LINES + 2;
+  const clamped = clampable && !expanded;
+  const toggle = () => {
+    setExpanded(!expanded);
+    if (expanded) {
+      // The collapsed panel may now sit above the viewport; scroll only as far as needed.
+      requestAnimationFrame(() => panelRef.current?.scrollIntoView?.({ block: 'nearest' }));
+    }
+  };
+  return (
+    <>
+      <pre
+        ref={panelRef}
+        className={cx(
+          styles.terminalOutput,
+          className,
+          expanded && count > OUTPUT_SCROLL_LINES && styles.terminalScroll
+        )}
+      >
+        {children(clamped ? OUTPUT_PREVIEW_LINES : count)}
+      </pre>
+      {clampable && (
+        <button className={styles.terminalExpand} type="button" aria-expanded={expanded} onClick={toggle}>
+          {clamped ? `… ${formatLabeledCount(count - OUTPUT_PREVIEW_LINES, 'more line', 'more lines')}` : 'Show less'}
+        </button>
+      )}
+    </>
+  );
+}
 
 function TerminalOutput({ text, error, truncated }: { text: string; error?: boolean; truncated?: boolean }) {
   const styles = useStyles2(getToolStyles);
-  const [expanded, setExpanded] = useState(false);
   const lines = text.replace(/\n$/, '').split('\n');
-  // Hiding only a line or two saves nothing; show them instead of an expander.
-  const clamp = !expanded && lines.length > OUTPUT_PREVIEW_LINES + 2;
   return (
     <>
-      <pre className={cx(styles.terminalOutput, error && styles.terminalError)}>
-        {clamp ? lines.slice(0, OUTPUT_PREVIEW_LINES).join('\n') : lines.join('\n')}
-      </pre>
-      {clamp && (
-        <button className={styles.terminalExpand} type="button" onClick={() => setExpanded(true)}>
-          … {formatLabeledCount(lines.length - OUTPUT_PREVIEW_LINES, 'more line', 'more lines')}
-        </button>
-      )}
+      <ClampedLines count={lines.length} className={error ? styles.terminalError : undefined}>
+        {(visible) => lines.slice(0, visible).join('\n')}
+      </ClampedLines>
       {truncated && <div className={styles.terminalMuted}>[output truncated]</div>}
     </>
   );
@@ -554,7 +623,6 @@ function TerminalOutput({ text, error, truncated }: { text: string; error?: bool
 
 function TerminalDiff({ diff }: { diff: string }) {
   const styles = useStyles2(getToolStyles);
-  const [expanded, setExpanded] = useState(false);
   const { lines, metadataFlags } = useMemo(() => {
     // The entry already names the file; keep hunks and drop file headers and end-of-file markers.
     const allLines = optimizedUnifiedDiffLines(diff);
@@ -565,12 +633,10 @@ function TerminalDiff({ diff }: { diff: string }) {
       .filter(({ line }, index) => index >= Math.max(firstHunk, 0) && line !== '' && !line.startsWith('\\'));
     return { lines: kept.map(({ line }) => line), metadataFlags: kept.map(({ isMeta }) => isMeta) };
   }, [diff]);
-  const clamp = !expanded && lines.length > OUTPUT_PREVIEW_LINES + 2;
-  const visible = clamp ? lines.slice(0, OUTPUT_PREVIEW_LINES) : lines;
   return (
-    <>
-      <pre className={styles.terminalOutput}>
-        {visible.map((line, index) => {
+    <ClampedLines count={lines.length}>
+      {(visible) =>
+        lines.slice(0, visible).map((line, index) => {
           const isMeta = metadataFlags[index];
           return (
             <div
@@ -584,14 +650,9 @@ function TerminalDiff({ diff }: { diff: string }) {
               {line || ' '}
             </div>
           );
-        })}
-      </pre>
-      {clamp && (
-        <button className={styles.terminalExpand} type="button" onClick={() => setExpanded(true)}>
-          … {formatLabeledCount(lines.length - OUTPUT_PREVIEW_LINES, 'more line', 'more lines')}
-        </button>
-      )}
-    </>
+        })
+      }
+    </ClampedLines>
   );
 }
 
@@ -1345,6 +1406,12 @@ const getToolStyles = (theme: GrafanaTheme2) => ({
   }),
   terminalDiffDelete: css({
     color: theme.colors.error.text,
+  }),
+  terminalScroll: css({
+    '&&': {
+      maxHeight: '60vh',
+      overflowY: 'auto',
+    },
   }),
   terminalExpand: css({
     justifySelf: 'start',

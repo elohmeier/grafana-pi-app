@@ -27,10 +27,7 @@ describe('formatAssistantError', () => {
     expect(error?.message).toContain('http://host.docker.internal:8080/v1/chat/completions');
   });
 
-  it('uses warning severity for aborted requests', () => {
-    expect(formatAssistantError('Request aborted by user', 'aborted')).toMatchObject({
-      title: 'LLM request canceled',
-      severity: 'warning',
-    });
+  it('does not report a request the user stopped as an error', () => {
+    expect(formatAssistantError('Request aborted by user', 'aborted')).toBeUndefined();
   });
 });

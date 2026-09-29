@@ -188,8 +188,24 @@ export function finishedTurnSteps(
   return turns;
 }
 
+/** Tool result of a call the user stopped before it ran (pi-agent-core's agent loop). */
+export const STOPPED_TOOL_ERROR = 'Operation aborted';
+
+/** A tool call ended by the user pressing Stop, before or while it ran; not a failure. */
+export function isStoppedToolResult(result: ToolResultMessage) {
+  const details = result.details as { exitCode?: unknown; discardedChanges?: unknown } | undefined;
+  const text = result.content
+    .map((block) => (block.type === 'text' ? block.text : ''))
+    .join('')
+    .trim();
+  return (
+    (result.isError && text === STOPPED_TOOL_ERROR) ||
+    (result.toolName === 'bash' && details?.exitCode === 130 && details.discardedChanges === 'cancelled')
+  );
+}
+
 function isFailedToolResult(result: ToolResultMessage | undefined) {
-  if (!result) {
+  if (!result || isStoppedToolResult(result)) {
     return false;
   }
   const details = result.details as { exitCode?: unknown; timedOut?: unknown } | undefined;
