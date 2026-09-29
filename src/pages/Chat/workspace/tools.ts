@@ -200,10 +200,13 @@ function makeBashTool(deps: WorkspaceShellDeps): AgentTool {
       cwd: Type.Optional(Type.String({ description: 'Working directory. Defaults to /workspace.' })),
       timeoutMs: Type.Optional(Type.Number({ description: 'Timeout in milliseconds (default 30000, max 120000).' })),
     }),
-    async execute(_toolCallId, params, signal) {
+    async execute(_toolCallId, params, signal, onUpdate) {
       throwIfAborted(signal);
       const args = params as BashParams;
-      const bash = await runWorkspaceBash(deps, args, signal);
+      // The interpreter returns output only at the end; report which host command is running meanwhile.
+      const bash = await runWorkspaceBash(deps, args, signal, (running) =>
+        onUpdate?.({ content: [], details: { running } })
+      );
       const { images, ...result } = bash;
       const text = textResult(formatBashResult(bash), {
         ...result,

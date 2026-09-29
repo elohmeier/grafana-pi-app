@@ -1,5 +1,5 @@
 import { EvidenceView, evidencePresentations } from './session/EvidenceView';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { css, cx, keyframes } from '@emotion/css';
 import type { AgentToolResult } from '@earendil-works/pi-agent-core';
 import type { ToolResultMessage } from '@earendil-works/pi-ai';
@@ -23,6 +23,8 @@ export type ToolRunView = {
   partialResult?: AgentToolResult<any>;
   result?: AgentToolResult<any>;
   isError?: boolean;
+  /** When execution started; absent in runs restored from older snapshots. */
+  startedAt?: number;
   updatedAt: number;
 };
 
@@ -201,7 +203,15 @@ function ToolCallEntry({
   if (!WORKSPACE_TOOL_NAMES.has(name)) {
     return <LegacyToolEntry name={name} args={args} partialJson={partialJson} state={state} result={result} />;
   }
-  return <ToolEntry name={name} args={isRecord(args) ? args : {}} state={state} result={result} />;
+  return (
+    <ToolEntry
+      name={name}
+      args={isRecord(args) ? args : {}}
+      state={state}
+      result={result}
+      progress={state === 'running' ? run : undefined}
+    />
+  );
 }
 
 function ToolEntry({
@@ -209,12 +219,15 @@ function ToolEntry({
   args,
   state,
   result,
+  progress,
   prompt = '$',
 }: {
   name: string;
   args: unknown;
   state: ToolEntryState;
   result?: ToolEntryResult;
+  /** The in-flight run of this call, for its start time and progress updates. */
+  progress?: ToolRunView;
   prompt?: string;
 }) {
   const record = isRecord(args) ? args : {};
@@ -223,7 +236,17 @@ function ToolEntry({
 
   switch (name) {
     case 'bash':
-      return <BashEntry args={record} details={details} error={error} prompt={prompt} result={result} state={state} />;
+      return (
+        <BashEntry
+          args={record}
+          details={details}
+          error={error}
+          progress={progress}
+          prompt={prompt}
+          result={result}
+          state={state}
+        />
+      );
     case 'read':
       return <ReadEntry args={record} details={details} error={error} result={result} state={state} />;
     case 'write':
@@ -238,6 +261,7 @@ function BashEntry({
   args,
   details,
   error,
+  progress,
   prompt,
   result,
   state,
@@ -245,6 +269,7 @@ function BashEntry({
   args: Record<string, unknown>;
   details?: Record<string, unknown>;
   error?: string;
+  progress?: ToolRunView;
   prompt: string;
   result?: ToolEntryResult;
   state: ToolEntryState;
@@ -265,10 +290,14 @@ function BashEntry({
         failed={failed}
         meta={[status, formatDurationMs(bash?.durationMs)].filter(Boolean).join(' · ') || undefined}
         prompt={prompt}
+        startedAt={progress?.startedAt}
         state={state}
       >
         <BashCommand command={command} />
       </PromptLine>
+      {state === 'running' && runningCommand(progress) && (
+        <div className={styles.terminalMuted}>↳ {runningCommand(progress)}</div>
+      )}
       {error && <TerminalOutput error text={error} />}
       {bash?.stdout && <TerminalOutput text={bash.stdout} truncated={bash.stdoutTruncated} />}
       {bash?.stderr && <TerminalOutput error text={bash.stderr} truncated={bash.stderrTruncated} />}
@@ -443,6 +472,7 @@ function PromptLine({
   failed,
   meta,
   prompt = '›',
+  startedAt,
   state,
 }: {
   children: React.ReactNode;
@@ -450,6 +480,7 @@ function PromptLine({
   failed?: boolean;
   meta?: string;
   prompt?: string;
+  startedAt?: number;
   state: ToolEntryState;
 }) {
   const styles = useStyles2(getToolStyles);
@@ -464,7 +495,9 @@ function PromptLine({
         {state === 'preparing' && <span className={styles.streamingCursor} aria-hidden="true" />}
       </span>
       {state === 'running' ? (
-        <Spinner className={styles.terminalMeta} inline size="xs" />
+        <span className={styles.terminalMeta}>
+          {startedAt !== undefined && <RunningElapsed startedAt={startedAt} />} <Spinner inline size="xs" />
+        </span>
       ) : (
         meta && <span className={cx(styles.terminalMeta, failed && styles.terminalError)}>{meta}</span>
       )}
@@ -473,6 +506,21 @@ function PromptLine({
 }
 
 const DEFAULT_CWD = '/workspace';
+
+function runningCommand(run: ToolRunView | undefined) {
+  const details = run?.partialResult?.details;
+  return isRecord(details) ? stringField(details, 'running') : undefined;
+}
+
+function RunningElapsed({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const seconds = Math.floor((now - startedAt) / 1000);
+  return seconds >= 1 ? <>{seconds} s</> : null;
+}
 
 function BashCommand({ command }: { command: string }) {
   const tokens = useMemo(() => highlightBash(command), [command]);

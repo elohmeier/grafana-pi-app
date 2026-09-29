@@ -39,6 +39,20 @@ describe('workspace bash', () => {
     expect(workspace.getScratchFile('/workspace/notes.txt')?.content).toBe('alpha\nbeta\n');
   });
 
+  it('reports each host command as it starts, but not interpreter builtins', async () => {
+    const { workspace, broker } = setup();
+    const progress: string[] = [];
+    const result = await runWorkspaceBash(
+      { workspace, broker },
+      { command: `grafana search checkout | jq -r '.results[].uid'; echo done; grafana search "a b" --limit 1` },
+      undefined,
+      (command) => progress.push(command)
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(progress).toEqual(['grafana search checkout', "grafana search 'a b' --limit 1"]);
+  });
+
   it('resets shell state per invocation but keeps files', async () => {
     const { run } = setup();
     await run('X=42; cd /tmp; echo $X > x.txt');

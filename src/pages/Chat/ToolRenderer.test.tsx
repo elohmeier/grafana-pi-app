@@ -70,7 +70,15 @@ describe('ToolRenderer', () => {
         ],
       ]),
       runs: {
-        'call-2': { id: 'call-2', name: 'bash', args: { command: 'sleep 5' }, status: 'running', updatedAt: 1 },
+        'call-2': {
+          id: 'call-2',
+          name: 'bash',
+          args: { command: 'sleep 5' },
+          status: 'running',
+          partialResult: { content: [], details: { running: 'grafana-prom query up' } },
+          startedAt: Date.now() - 3000,
+          updatedAt: 1,
+        },
       },
     };
     const { container } = render(
@@ -90,6 +98,8 @@ describe('ToolRenderer', () => {
     expect(container.textContent).toContain('42 ms');
     expect(container.textContent).not.toContain('/workspace');
     expect(screen.getAllByTestId('Spinner')).toHaveLength(1);
+    expect(container.textContent).toContain('3 s');
+    expect(container.textContent).toContain('↳ grafana-prom query up');
     expect(container.textContent).not.toContain('Run bash');
     expect(container.textContent).not.toContain('"command"');
   });

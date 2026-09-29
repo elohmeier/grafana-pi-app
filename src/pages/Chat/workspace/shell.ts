@@ -76,7 +76,9 @@ export type WorkspaceBashResult = {
 export async function runWorkspaceBash(
   deps: WorkspaceShellDeps,
   params: WorkspaceBashParams,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  /** Called with each host command (for example `grafana-prom query ...`) as it starts. */
+  onProgress?: (command: string) => void
 ): Promise<WorkspaceBashResult> {
   const command = params.command?.trim();
   if (!command) {
@@ -130,6 +132,7 @@ export async function runWorkspaceBash(
         if (controller.signal.aborted) {
           throw new Error('Shell cancelled');
         }
+        onProgress?.(formatProgressCommand(call.name, call.args));
         const ctx = commandContext(commandDeps, tx, call.cwd, call.stdin, controller.signal);
         const spec = specs.find((spec) => spec.name === call.name);
         if (spec) {
@@ -329,4 +332,13 @@ class PausableDeadline {
     this.startedAt = Date.now();
     this.timer = setTimeout(this.onExpire, Math.max(0, this.remaining));
   }
+}
+
+const MAX_PROGRESS_COMMAND_LENGTH = 200;
+
+function formatProgressCommand(name: string, args: string[]) {
+  const text = [name, ...args.map((arg) => (/^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`))]
+    .join(' ')
+    .replace(/\s+/g, ' ');
+  return text.length > MAX_PROGRESS_COMMAND_LENGTH ? `${text.slice(0, MAX_PROGRESS_COMMAND_LENGTH - 1)}…` : text;
 }

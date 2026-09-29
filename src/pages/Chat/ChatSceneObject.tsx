@@ -2436,6 +2436,7 @@ function reduceToolRuns(state: ToolRunState, event: AgentEvent): ToolRunState {
         name: event.toolName,
         args: event.args,
         status: 'running',
+        startedAt: Date.now(),
         updatedAt: Date.now(),
       },
     };
