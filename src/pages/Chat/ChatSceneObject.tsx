@@ -12,6 +12,7 @@ import React, {
 } from 'react';
 import { css, cx } from '@emotion/css';
 import { Agent, type AgentEvent, type AgentMessage, type StreamFn, streamProxy } from '@earendil-works/pi-agent-core';
+import type { ToolResultMessage } from '@earendil-works/pi-ai';
 import { SceneComponentProps, SceneObjectBase, SceneObjectState } from '@grafana/scenes';
 import {
   Alert,
@@ -42,7 +43,14 @@ import {
   type PiAppJsonData,
   type PiAppThinkingLevel,
 } from './model';
-import { createUserShellMessage, hasPersistableMessages, pairToolResults, parseUserShellInput } from './chatMessages';
+import {
+  createUserShellMessage,
+  finishedTurnSteps,
+  hasPersistableMessages,
+  pairToolResults,
+  parseUserShellInput,
+  type TurnSteps,
+} from './chatMessages';
 import { getGrafanaSkills, renderGrafanaSystemPrompt, selectGrafanaSkills } from './skills';
 import {
   ContentBlocks,
@@ -484,7 +492,7 @@ export function ChatApp({
         throw err;
       }
     },
-    []
+    [setError]
   );
 
   const handleAgentEvent = useCallback(
@@ -584,7 +592,14 @@ export function ChatApp({
     setToolRuns({});
     settleToolConfirmation(false);
     buildAgent([]);
-  }, [replaceWorkspace, buildAgent, setRunStatusSnapshot, settleToolConfirmation, stopCurrentAgentForSessionChange]);
+  }, [
+    replaceWorkspace,
+    buildAgent,
+    setRunStatusSnapshot,
+    settleToolConfirmation,
+    stopCurrentAgentForSessionChange,
+    setError,
+  ]);
 
   const startDashboardLaunchSession = useCallback(
     (launch: DashboardAssistantLaunch) => {
@@ -607,7 +622,14 @@ export function ChatApp({
       settleToolConfirmation(false);
       buildAgent([]);
     },
-    [replaceWorkspace, buildAgent, setRunStatusSnapshot, settleToolConfirmation, stopCurrentAgentForSessionChange]
+    [
+      replaceWorkspace,
+      buildAgent,
+      setRunStatusSnapshot,
+      settleToolConfirmation,
+      stopCurrentAgentForSessionChange,
+      setError,
+    ]
   );
 
   const startExternalAssistantLaunchSession = useCallback(
@@ -631,7 +653,14 @@ export function ChatApp({
       settleToolConfirmation(false);
       buildAgent([]);
     },
-    [replaceWorkspace, buildAgent, setRunStatusSnapshot, settleToolConfirmation, stopCurrentAgentForSessionChange]
+    [
+      replaceWorkspace,
+      buildAgent,
+      setRunStatusSnapshot,
+      settleToolConfirmation,
+      stopCurrentAgentForSessionChange,
+      setError,
+    ]
   );
 
   const preserveCurrentRunForHandoff = useCallback(() => {
@@ -686,7 +715,7 @@ export function ChatApp({
 
       return true;
     },
-    [flushRevision, handleAgentEvent, saveSession, setRunStatusSnapshot, stopCurrentAgentForSessionChange]
+    [flushRevision, handleAgentEvent, saveSession, setRunStatusSnapshot, stopCurrentAgentForSessionChange, setError]
   );
 
   useEffect(() => {
@@ -1100,6 +1129,7 @@ export function ChatApp({
       setRunStatusSnapshot,
       settleToolConfirmation,
       stopCurrentAgentForSessionChange,
+      setError,
     ]
   );
 
@@ -1334,7 +1364,7 @@ export function ChatApp({
 
     allowNextLocationChangeRef.current = true;
     locationService.push(url);
-  }, [saveSession]);
+  }, [saveSession, setError]);
 
   const requestOpenFullPage = () => {
     const launch = dashboardLaunchRef.current;
@@ -1387,7 +1417,7 @@ export function ChatApp({
 
     allowNextLocationChangeRef.current = true;
     locationService.push(targetRoute);
-  }, [preserveCurrentRunForHandoff, saveSession]);
+  }, [preserveCurrentRunForHandoff, saveSession, setError]);
 
   const requestDockToSidebar = () => {
     if (!canDockToSidebar || pendingToolConfirmation) {
@@ -1454,7 +1484,7 @@ export function ChatApp({
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [llmModel.id, thinkingLevel]
+    [llmModel.id, thinkingLevel, setError]
   );
 
   const openImportSessionPicker = useCallback(() => {
@@ -1527,6 +1557,7 @@ export function ChatApp({
       setRunStatusSnapshot,
       settleToolConfirmation,
       stopCurrentAgentForSessionChange,
+      setError,
     ]
   );
 
@@ -1906,19 +1937,7 @@ export function ChatApp({
               />
             ) : (
               <ToolTranscriptContext.Provider value={toolTranscript}>
-                {visibleMessages.map(({ message, isStreaming }, index) => (
-                  <MessageView
-                    key={messageKey(message, index, isStreaming)}
-                    message={message}
-                    isStreaming={isStreaming}
-                    continuesTurn={
-                      message.role === 'assistant' && visibleMessages[index - 1]?.message.role === 'assistant'
-                    }
-                    continuedInTurn={
-                      message.role === 'assistant' && visibleMessages[index + 1]?.message.role === 'assistant'
-                    }
-                  />
-                ))}
+                <Transcript isStreaming={isStreaming} messages={visibleMessages} toolResults={toolResults} />
               </ToolTranscriptContext.Provider>
             )}
             {isStreaming && (
@@ -2195,6 +2214,88 @@ function ReportPanel({
       {content}
     </aside>
   );
+}
+
+type VisibleMessage = { message: AgentMessage; isStreaming: boolean };
+
+/** Renders the messages, folding the steps of finished turns behind their summary line. */
+function Transcript({
+  messages,
+  toolResults,
+  isStreaming,
+}: {
+  messages: VisibleMessage[];
+  toolResults: ReadonlyMap<string, ToolResultMessage>;
+  isStreaming: boolean;
+}) {
+  const turnSteps = finishedTurnSteps(
+    messages.map(({ message }) => message),
+    toolResults,
+    isStreaming
+  );
+  const stepsByStart = new Map(turnSteps.map((steps) => [steps.start, steps]));
+  // Expanded turn steps continue the card that holds their summary line.
+  const renderMessage = ({ message, isStreaming }: VisibleMessage, index: number, isTurnStep = false) => (
+    <MessageView
+      key={messageKey(message, index, isStreaming)}
+      message={message}
+      isStreaming={isStreaming}
+      continuesTurn={isTurnStep || (message.role === 'assistant' && messages[index - 1]?.message.role === 'assistant')}
+      continuedInTurn={message.role === 'assistant' && messages[index + 1]?.message.role === 'assistant'}
+    />
+  );
+  const views: React.ReactNode[] = [];
+  let index = 0;
+  while (index < messages.length) {
+    const steps = stepsByStart.get(index);
+    if (!steps) {
+      views.push(renderMessage(messages[index], index));
+      index += 1;
+      continue;
+    }
+    const first = index;
+    views.push(
+      <TurnStepsView key={`steps-${messageKey(messages[first].message, first, false)}`} steps={steps}>
+        {messages.slice(steps.start, steps.end + 1).map((entry, offset) => renderMessage(entry, first + offset, true))}
+      </TurnStepsView>
+    );
+    index = steps.end + 1;
+  }
+  return <>{views}</>;
+}
+
+/** The tool-calling steps of a finished turn, folded into one line above its answer. */
+function TurnStepsView({ steps, children }: { steps: TurnSteps; children: React.ReactNode }) {
+  const styles = useStyles2(getStyles);
+  const [isOpen, setIsOpen] = useState(false);
+  return (
+    <>
+      <article className={cx(styles.message, styles.messageContinuedInTurn)}>
+        <div className={styles.messageHeader}>assistant</div>
+        <button
+          aria-expanded={isOpen}
+          className={styles.turnStepsToggle}
+          type="button"
+          onClick={() => setIsOpen((open) => !open)}
+        >
+          <Icon aria-hidden name={isOpen ? 'angle-down' : 'angle-right'} />
+          <span>
+            {steps.toolCalls} tool {steps.toolCalls === 1 ? 'call' : 'calls'}
+            {steps.durationMs !== undefined && ` · ${formatTurnDuration(steps.durationMs)}`}
+          </span>
+          {steps.failedToolCalls > 0 && (
+            <span className={styles.turnStepsFailed}>· {steps.failedToolCalls} failed</span>
+          )}
+        </button>
+      </article>
+      {isOpen && children}
+    </>
+  );
+}
+
+function formatTurnDuration(ms: number) {
+  const seconds = Math.round(ms / 1000);
+  return seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)} min ${seconds % 60} s`;
 }
 
 const MessageView = memo(function MessageView({
@@ -3504,6 +3605,23 @@ const getStyles = (theme: GrafanaTheme2) => ({
     borderBottom: 'none',
     borderBottomLeftRadius: 0,
     borderBottomRightRadius: 0,
+  }),
+  turnStepsToggle: css({
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: theme.spacing(0.5),
+    padding: 0,
+    border: 'none',
+    background: 'none',
+    color: theme.colors.text.secondary,
+    fontSize: theme.typography.bodySmall.fontSize,
+    cursor: 'pointer',
+    '&:hover': {
+      color: theme.colors.text.primary,
+    },
+  }),
+  turnStepsFailed: css({
+    color: theme.colors.error.text,
   }),
   messageShell: css({
     padding: 0,

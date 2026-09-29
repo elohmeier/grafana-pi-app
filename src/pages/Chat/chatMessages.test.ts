@@ -3,6 +3,7 @@ import type { AssistantMessage, ToolResultMessage, Usage, UserMessage } from '@e
 import {
   convertChatMessagesToLlm,
   createUserShellMessage,
+  finishedTurnSteps,
   hasPersistableMessages,
   pairToolResults,
   parseUserShellInput,
@@ -143,6 +144,50 @@ describe('pairToolResults', () => {
     ];
 
     expect(pairToolResults(messages)).toEqual(new Map([['call_1', paired]]));
+  });
+});
+
+describe('finishedTurnSteps', () => {
+  const step = (id: string, timestamp: number) =>
+    assistant({
+      content: [{ type: 'toolCall', id, name: 'bash', arguments: {} }],
+      stopReason: 'toolUse',
+      timestamp,
+    });
+  const bashResult = (id: string, exitCode: number): ToolResultMessage => ({
+    ...toolResult(id),
+    toolName: 'bash',
+    details: { exitCode },
+  });
+
+  it('summarizes the steps of turns that ended with an answer', () => {
+    const messages: AgentMessage[] = [
+      user('q1'),
+      step('a', 1000),
+      step('b', 4000),
+      assistant({ timestamp: 13_000 }),
+      user('q2'),
+      assistant({ timestamp: 20_000 }),
+    ];
+    const results = new Map([
+      ['a', bashResult('a', 0)],
+      ['b', bashResult('b', 2)],
+    ]);
+
+    expect(finishedTurnSteps(messages, results)).toEqual([
+      { start: 1, end: 2, toolCalls: 2, failedToolCalls: 1, durationMs: 12_000 },
+    ]);
+  });
+
+  it('leaves turns in progress, aborted, or still calling tools expanded', () => {
+    const aborted: AgentMessage[] = [user('q'), step('a', 1), assistant({ stopReason: 'aborted', content: [] })];
+    const calling: AgentMessage[] = [user('q'), step('a', 1), step('b', 2)];
+    const answering: AgentMessage[] = [user('q'), step('a', 1), assistant({ timestamp: 5 })];
+
+    expect(finishedTurnSteps(aborted, new Map())).toEqual([]);
+    expect(finishedTurnSteps(calling, new Map())).toEqual([]);
+    expect(finishedTurnSteps(answering, new Map(), true)).toEqual([]);
+    expect(finishedTurnSteps(answering, new Map())).toHaveLength(1);
   });
 });
 

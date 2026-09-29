@@ -129,3 +129,73 @@ export function pairToolResults(messages: AgentMessage[]): Map<string, ToolResul
   }
   return results;
 }
+
+/** Tool-calling steps of a finished turn, collapsed behind one summary line in the transcript. */
+export type TurnSteps = {
+  /** Index of the first step message. */
+  start: number;
+  /** Index of the last step message; the turn's answer follows it. */
+  end: number;
+  toolCalls: number;
+  failedToolCalls: number;
+  /** Time from the first step to the start of the answer. */
+  durationMs?: number;
+};
+
+/**
+ * Finds the steps of turns that ended with an answer: runs of consecutive
+ * assistant messages whose last one stops normally without calling tools.
+ * With `isStreaming`, the run ending at the last message is still in progress.
+ */
+export function finishedTurnSteps(
+  messages: AgentMessage[],
+  results: ReadonlyMap<string, ToolResultMessage>,
+  isStreaming = false
+): TurnSteps[] {
+  const turns: TurnSteps[] = [];
+  let start = 0;
+  while (start < messages.length) {
+    let end = start;
+    while (messages[end].role === 'assistant' && messages[end + 1]?.role === 'assistant') {
+      end += 1;
+    }
+    const answer = messages[end];
+    const inProgress = isStreaming && end === messages.length - 1;
+    if (
+      end > start &&
+      !inProgress &&
+      answer.role === 'assistant' &&
+      answer.stopReason === 'stop' &&
+      assistantToolCalls(normalizeAssistantContent(answer)).length === 0
+    ) {
+      const calls = messages
+        .slice(start, end)
+        .flatMap((message) =>
+          message.role === 'assistant' ? assistantToolCalls(normalizeAssistantContent(message)) : []
+        );
+      const first = messages[start];
+      turns.push({
+        start,
+        end: end - 1,
+        toolCalls: calls.length,
+        failedToolCalls: calls.filter((call) => isFailedToolResult(results.get(call.id))).length,
+        durationMs:
+          'timestamp' in first && answer.timestamp > first.timestamp ? answer.timestamp - first.timestamp : undefined,
+      });
+    }
+    start = end + 1;
+  }
+  return turns;
+}
+
+function isFailedToolResult(result: ToolResultMessage | undefined) {
+  if (!result) {
+    return false;
+  }
+  const details = result.details as { exitCode?: unknown; timedOut?: unknown } | undefined;
+  return (
+    result.isError ||
+    details?.timedOut === true ||
+    (result.toolName === 'bash' && typeof details?.exitCode === 'number' && details.exitCode !== 0)
+  );
+}
