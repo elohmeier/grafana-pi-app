@@ -4,7 +4,7 @@ Observability Analyst is a Grafana app plugin that embeds an LLM analyst for obs
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how the current implementation works, and the [architecture review and roadmap](ROADMAP.md) for the `read`/`write`/`edit`/`bash` redesign status and the remaining work: deliberate evidence presentation, a durable server host, restricted datasource access, and future chat integrations.
 
-The [conversational alerting analysis](docs/alerting-chat-openclaw.md) covers Mattermost/Webex incident conversations, screenshots, silencing, proactive follow-up, and OpenClaw integration or runtime replacement.
+The [conversational alerting design](docs/conversational-alerting.md) covers Mattermost/Webex incident conversations, screenshots, silencing, and proactive follow-up on a Pi server host, with patterns borrowed from OpenClaw.
 
 ## What it does
 

@@ -9,7 +9,7 @@ implementation is documented in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 This section is the current state. Everything from [Recommendation](#recommendation)
 on is the original review (baseline `4857f8c`, 2026-09-25). It stays as the
-design rationale, but two of its proposals were superseded:
+design rationale, but three of its proposals were superseded:
 
 - `workspace plan` and plan IDs: replaced by direct `workspace apply`. The user
   reviews the complete diff of the change set and can leave dashboards out;
@@ -17,6 +17,9 @@ design rationale, but two of its proposals were superseded:
 - The `show_evidence` model tool: replaced by the `evidence show` shell command,
   which presents captured files without running queries again. The model-facing
   tools stay `read`, `write`, `edit`, and `bash`.
+- The OpenClaw host pilot: the runtime stays Pi. The durable server host is an
+  app-owned Node service running `AssistantSession`; OpenClaw contributes design
+  patterns only (see the decision below).
 
 ### Implemented
 
@@ -101,6 +104,15 @@ design rationale, but two of its proposals were superseded:
 - **Local default model** is Ornith-1.5-35B-A3B (Q4_K_M). Ornith-1.5-9B gave
   comparable results in a spot check but was about 2.8x slower on the reference
   Strix Halo host (dense 9B vs. ~3B active parameters).
+- **Pi only, no OpenClaw host.** The reviewed OpenClaw revision owns its agent
+  core, so adopting it would replace the working Pi agent, compaction, and
+  session model and require constraining a broad operator runtime to four tools.
+  The server host runs `AssistantSession` with a server `SessionHost`. Channel
+  adapters, the scheduler, and the delivery outbox borrow OpenClaw's gateway
+  patterns (channel plugins, thread-keyed session routing, deterministic
+  commands beside model tools, persisted jobs with run admission, a recovering
+  delivery queue, one trust boundary per deployment); see
+  [patterns borrowed from OpenClaw](docs/conversational-alerting.md#patterns-borrowed-from-openclaw).
 - **Server-side enforcement waits for the server host.** Datasource queries run in
   the browser as the current user through Grafana's datasource API, so an
   allow-list check in the plugin backend would not constrain them, and the model
@@ -137,9 +149,9 @@ design rationale, but two of its proposals were superseded:
 
 ### Not yet implemented
 
-- **Durable server host (M4)** and the OpenClaw/Mattermost host and identity
-  pilot (A0). Sessions run in the browser; a run survives page/sidebar handoffs
-  but not closing Grafana.
+- **Durable Pi server host (M4)** and the Mattermost host and identity spike
+  (A0). Sessions run in the browser; a run survives page/sidebar handoffs but
+  not closing Grafana.
 - **Server-side policy:** the datasource allow-list and dashboard validation run
   in the browser, and approval is bound to the change-set digest but not to the
   actor or an expiry (see the decision above).
@@ -166,11 +178,9 @@ design rationale, but two of its proposals were superseded:
    approvals bound to actor, change-set digest, and expiry, and read-only alert
    commands and silences toward M5 and the companion plan's A1–A4.
 
-The follow-up [conversational alerting and OpenClaw analysis](docs/alerting-chat-openclaw.md)
+The follow-up [conversational alerting design](docs/conversational-alerting.md)
 extends this roadmap with proactive Mattermost/Webex incident threads, screenshots,
-silencing, and bounded follow-up. It revises the runtime recommendation: pilot
-OpenClaw as the server host before implementing a bespoke Pi service. The inspected
-OpenClaw revision owns its agent core; it is no longer a drop-in Pi host.
+silencing, and bounded follow-up on the Pi host.
 
 ## Recommendation
 
@@ -243,10 +253,10 @@ or multi-organization support. [Grafana service accounts](https://grafana.com/de
 flowchart TB
   G[Grafana sidebar / full page] --> S[Session API and event stream]
   W[Mattermost / Webex adapters] --> S
-  S --> R[Durable agent host: OpenClaw or Pi adapter]
+  S --> R[Durable agent host: Pi AssistantSession]
   R --> T[read / write / edit / bash]
   T --> C[Command registry and workspace service]
-  R --> E[show_evidence]
+  R --> E[evidence show]
   E --> D[Authorized artifact presentation]
   D --> S
   C --> V[Session VFS: snapshots, overlay, artifacts]
@@ -266,10 +276,10 @@ browser storage, or `window`. Its dependencies should be injected interfaces:
 `SessionStore`, `ApprovalService`, `EvidencePresenter`, `EventSink`, and
 `LiveDashboardBridge`.
 
-Recommended next step: pilot a dedicated OpenClaw gateway with a Grafana domain
-plugin as the durable Node host; retain a bespoke Pi service as the fallback if
-the identity, capability, or isolation gates fail. The restricted just-bash/VFS
-and Go broker are shared domain components in either case. The Go plugin remains
+The durable host is an app-owned Node service that runs `AssistantSession` on
+`pi-agent-core` (decided 2026-09-29; OpenClaw is not adopted, see
+[Status](#decisions-taken-since-the-review)). The restricted just-bash/VFS and Go
+broker are shared with the browser host. The Go plugin remains
 the Grafana-facing authentication, resource policy, and validation boundary.
 Grafana, Mattermost, and Webex become session clients. Give the runtime
 an authenticated, narrowly scoped broker connection; do not put Grafana service
@@ -283,23 +293,22 @@ A temporary browser host can reuse the extracted core during migration; avoid
 maintaining two different runtimes indefinitely. Do not assume Grafana will
 launch a Node daemon just because the plugin ships a Go backend.
 
-Continue with `pi-agent-core` in the browser during the pilot. If the chosen host
-retains Pi, evaluate `pi-coding-agent` session and compaction facilities in a
-bounded spike once the host boundary exists. Adopt
+Continue with `pi-agent-core` in the browser until the host exists. Evaluate
+`pi-coding-agent` session and compaction facilities in a bounded spike once the
+host boundary exists. Adopt
 them only with custom VFS tools, controlled storage, and ambient shell/filesystem,
 extension discovery, and credential discovery disabled. Never expose the SDK's
 default OS shell as the workspace shell. Keep Pi behind an adapter so adopting
 its session facilities does not define the public session protocol.
 
-If OpenClaw is selected, use its documented tool/plugin APIs and existing model
-and session facilities; do not build a second Pi orchestration layer by default.
-The [companion analysis](docs/alerting-chat-openclaw.md#openclaw-integration-options)
-defines the comparison, trust-domain requirements, and migration acceptance gates.
+The [companion design](docs/conversational-alerting.md#patterns-borrowed-from-openclaw)
+lists the OpenClaw gateway patterns the host borrows and the
+[host guardrails](docs/conversational-alerting.md#host-guardrails) it must meet.
 
 The current Go backend also maintains its own Chat Completions/Responses request
 and streaming translation in `resources.go` and `openai_responses.go`. Keep that
 working gateway during extraction. In M4, evaluate moving protocol translation
-to the selected host's provider adapters inside the trusted Node gateway, which would reduce
+to `pi-ai` provider adapters inside the trusted Node host, which would reduce
 duplicate SDK maintenance and make additional providers easier. Keep credentials
 in the trusted gateway host, inaccessible to VFS/commands, and retain central
 model authorization. Switch only after parity tests for reasoning items, usage,
@@ -312,9 +321,8 @@ an explicit change with stream, cancellation, tools, reasoning, and resume tests
 
 ### Suggested code ownership
 
-These are responsibility boundaries. OpenClaw adoption can supply the session,
-channel, and scheduling host responsibilities through plugins/adapters; do not
-implement competing services simply to reproduce this directory sketch.
+These are responsibility boundaries; do not create packages simply to reproduce
+this directory sketch.
 
 | Area                      | Responsibility                                                                             |
 | ------------------------- | ------------------------------------------------------------------------------------------ |
@@ -792,13 +800,13 @@ workspace/model request, not that the assistant declines to quote them afterward
 
 ## Durable sessions, incident operations, and chat channels
 
-The [conversational alerting design](docs/alerting-chat-openclaw.md) is the detailed
+The [conversational alerting design](docs/conversational-alerting.md) is the detailed
 plan for this workstream. Keep incident state, delivery receipts, silence actions,
 and expiring watch grants outside the agent transcript. Deliver deterministic
 alerts before optional model enrichment, reconcile source state while silenced,
 and apply the restricted-data policy to screenshots and notification annotations.
-Mattermost is the first OpenClaw pilot channel; Webex requires an adapter in the
-reviewed source baseline.
+Mattermost is the first channel adapter on the Pi host; Webex follows against
+the same channel interface.
 
 Persist session metadata, ordered events, workspace checkpoints, model/context
 state, pending approvals, operation journal, and artifact references. Keep large
@@ -840,17 +848,17 @@ Each milestone has a demonstrable exit condition. This ordering allows a useful
 Grafana release before enabling alert mutations, restricted sources, or Webex.
 No calendar estimates are assigned without a team/deployment decision.
 
-| Milestone                                           | Deliverable                                                                                                                                                                 | Exit condition / required evidence                                                                                                                                                                                                        | Dependencies                                                    |
-| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| M0 — Remove unused integration and define contracts | Delete external workspace/VFS integration and provider contract; define four tools plus evidence, resource capabilities, caller authorization; OpenClaw host/identity pilot | No unused workspace launch/provider branch remains. Backend writes enforce caller authority. A0 proves whether OpenClaw can expose exactly the intended tools.                                                                            | None                                                            |
-| M1 — Extract core and model budgets                 | Session controller outside React; injected adapters; model configuration round trip; bounded context/output handling                                                        | Maintained sidebar/full-page flows run through the core. Model limits propagate through provisioning, importer, backend, and benchmarks.                                                                                                  | M0 contracts                                                    |
-| M2 — Four-tool shell and evidence                   | New persistent filesystem; lazy dashboard catalog; shared artifacts/skills; `rg`/`jq` and documented `fd`; command registry/help; worker limits; `show_evidence`            | Multi-dashboard tasks use read/write/edit/bash. Selected artifacts render in chat without query reexecution. Search reports coverage; cancellation and quotas bound staging. Working files and artifact references restore with sessions. | M1                                                              |
-| M3 — Dashboard change sets and validation           | Extracted chezmoi validators; JSON and optional Jsonnet commands; immutable plans; conditional writes; batch journal; live bridge                                           | Review/apply a 20-dashboard fixture batch through shell commands and system approvals. Inject conflicts, permission changes, timeouts, and partial failure; verify no lost concurrent edits.                                              | M0, M2                                                          |
-| M4 — Durable service host                           | Selected OpenClaw gateway/plugins or Pi service; authenticated Go broker; persistent state; reconnect and operation recovery                                                | Runs survive closing Grafana and worker restart. Approvals bind exact plans; writes and evidence delivery reconcile without duplicates. Host parity/isolation gates pass.                                                                 | M1 and A0; M2–M3 for command/presentation parity                |
-| M5 — Alerting resources                             | Rule/group/config files and commands; redacted patch model; API adapters and provenance policy                                                                              | Stage validated edits, review configuration changes, preserve sibling rules and secret fields. Provisioned/managed resources reject unauthorized mutation.                                                                                | M3                                                              |
-| M6 — Restricted sources                             | Server-generated MSSQL/Elasticsearch schema/count commands and output-policy enforcement                                                                                    | Raw content cannot enter shell outputs, artifacts, model requests, screenshots, presentations, or errors. Count and coverage semantics remain visible.                                                                                    | M0 policy, M2, M4 broker                                        |
-| M7 — Conversational alerting and channels           | Mattermost/Webex adapters; incident journal/outbox; selected evidence; silence/expire commands; bounded watches; identity/audience enforcement                              | Initial alerts survive model failure; duplicate events/clicks are safe; silences reconcile; restricted content is excluded; watches expire and recover.                                                                                   | M4 and audience/action policy; A0–A4 allow incremental delivery |
-| M8 — Complete cutover                               | Remove remaining old domain tools, tool-name render dispatch, and duplicate stores; deployment packaging and session export/migration                                       | Supported workflows use the four generic tools and explicit evidence presentation; no dependence on retired tool names. Maintained chat content has a defined export/migration path.                                                      | M3–M7 for enabled release scope                                 |
+| Milestone                                           | Deliverable                                                                                                                                                           | Exit condition / required evidence                                                                                                                                                                                                        | Dependencies                                                    |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| M0 — Remove unused integration and define contracts | Delete external workspace/VFS integration and provider contract; define four tools plus evidence, resource capabilities, caller authorization; Pi host/identity spike | No unused workspace launch/provider branch remains. Backend writes enforce caller authority. A0 proves the host exposes exactly the intended tools with broker-issued identity.                                                           | None                                                            |
+| M1 — Extract core and model budgets                 | Session controller outside React; injected adapters; model configuration round trip; bounded context/output handling                                                  | Maintained sidebar/full-page flows run through the core. Model limits propagate through provisioning, importer, backend, and benchmarks.                                                                                                  | M0 contracts                                                    |
+| M2 — Four-tool shell and evidence                   | New persistent filesystem; lazy dashboard catalog; shared artifacts/skills; `rg`/`jq` and documented `fd`; command registry/help; worker limits; `show_evidence`      | Multi-dashboard tasks use read/write/edit/bash. Selected artifacts render in chat without query reexecution. Search reports coverage; cancellation and quotas bound staging. Working files and artifact references restore with sessions. | M1                                                              |
+| M3 — Dashboard change sets and validation           | Extracted chezmoi validators; JSON and optional Jsonnet commands; immutable plans; conditional writes; batch journal; live bridge                                     | Review/apply a 20-dashboard fixture batch through shell commands and system approvals. Inject conflicts, permission changes, timeouts, and partial failure; verify no lost concurrent edits.                                              | M0, M2                                                          |
+| M4 — Durable service host                           | Pi host service running `AssistantSession`; authenticated Go broker; persistent state; reconnect and operation recovery                                               | Runs survive closing Grafana and worker restart. Approvals bind exact plans; writes and evidence delivery reconcile without duplicates. Host parity/isolation gates pass.                                                                 | M1 and A0; M2–M3 for command/presentation parity                |
+| M5 — Alerting resources                             | Rule/group/config files and commands; redacted patch model; API adapters and provenance policy                                                                        | Stage validated edits, review configuration changes, preserve sibling rules and secret fields. Provisioned/managed resources reject unauthorized mutation.                                                                                | M3                                                              |
+| M6 — Restricted sources                             | Server-generated MSSQL/Elasticsearch schema/count commands and output-policy enforcement                                                                              | Raw content cannot enter shell outputs, artifacts, model requests, screenshots, presentations, or errors. Count and coverage semantics remain visible.                                                                                    | M0 policy, M2, M4 broker                                        |
+| M7 — Conversational alerting and channels           | Mattermost/Webex adapters; incident journal/outbox; selected evidence; silence/expire commands; bounded watches; identity/audience enforcement                        | Initial alerts survive model failure; duplicate events/clicks are safe; silences reconcile; restricted content is excluded; watches expire and recover.                                                                                   | M4 and audience/action policy; A0–A4 allow incremental delivery |
+| M8 — Complete cutover                               | Remove remaining old domain tools, tool-name render dispatch, and duplicate stores; deployment packaging and session export/migration                                 | Supported workflows use the four generic tools and explicit evidence presentation; no dependence on retired tool names. Maintained chat content has a defined export/migration path.                                                      | M3–M7 for enabled release scope                                 |
 
 M5 can proceed after M3 while the durable host is completed. M6 policy design
 should begin in M0 so new validation/data commands cannot accidentally establish
@@ -867,7 +875,7 @@ rule-definition/config editing. M4's runtime choice is gated by the A0 host pilo
 2. Prove the new tool surface with a vertical slice: discover/fetch two dashboards,
    use `rg`/`fd`/`jq`, edit JSON, validate, and present one captured query or panel
    via `show_evidence`. Use a new filesystem implementation with checked mutations.
-3. Run the OpenClaw/Mattermost host and identity pilot; expose model/context/output
+3. Run the Pi host and Mattermost identity spike; expose model/context/output
    configuration end to end, including benchmark profiles.
 4. Extract `AgentSessionController`, working-file persistence, and presentation
    events from ChatSceneObject; share the command and artifact services across hosts.
@@ -961,12 +969,12 @@ Local references inspected:
 
 Decisions to settle in M0/M1, with recommended defaults already used above:
 
-| Decision                                                 | Recommended default                                                                                                                            |
-| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Is an additional runtime service acceptable?             | Yes. Pilot OpenClaw before building a bespoke Pi host; the broker/incident state remain app-owned.                                             |
-| Whose permissions govern writes?                         | Explicit mapped caller permissions intersected with broker policy and credential scope. No caller mapping means no writes.                     |
-| Are counts allowed to expose arbitrary dimension values? | No. Approved dimensions/predicates only; no free-text grouping or value exploration.                                                           |
-| What does alerting “config” include first?               | Non-secret rule/group fields, notification policy, and mute timing structures behind separate capabilities. Credential edits excluded.         |
-| Can source-managed dashboards/rules be edited?           | Read-only by default; stage proposals for the owning source workflow where possible.                                                           |
-| Which agent runtime should own server conversations?     | Pilot OpenClaw for a trusted operations domain; retain Pi if capability/isolation gates fail. Shared Pi ancestry is not runtime compatibility. |
-| What happens to existing sessions?                       | Versioned export and selective one-way migration of allowed content; fresh approvals and fresh permission checks.                              |
+| Decision                                                 | Recommended default                                                                                                                    |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Is an additional runtime service acceptable?             | Yes. An app-owned Pi host service; the broker/incident state remain app-owned.                                                         |
+| Whose permissions govern writes?                         | Explicit mapped caller permissions intersected with broker policy and credential scope. No caller mapping means no writes.             |
+| Are counts allowed to expose arbitrary dimension values? | No. Approved dimensions/predicates only; no free-text grouping or value exploration.                                                   |
+| What does alerting “config” include first?               | Non-secret rule/group fields, notification policy, and mute timing structures behind separate capabilities. Credential edits excluded. |
+| Can source-managed dashboards/rules be edited?           | Read-only by default; stage proposals for the owning source workflow where possible.                                                   |
+| Which agent runtime should own server conversations?     | Pi (decided 2026-09-29). OpenClaw's gateway patterns inform the host design; it is not adopted as a runtime or dependency.             |
+| What happens to existing sessions?                       | Versioned export and selective one-way migration of allowed content; fresh approvals and fresh permission checks.                      |

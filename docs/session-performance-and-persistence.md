@@ -31,7 +31,7 @@ The list endpoint never selects the snapshot. This preserves deployment simplici
 while solving the all-histories download; message-level storage is a later
 optimization. The OpenClaw comparison and deployment alternatives below remain
 research context, not the selected implementation plan. The earlier
-[conversational alerting analysis](alerting-chat-openclaw.md) is also outside the
+[conversational alerting design](conversational-alerting.md) is also outside the
 current scope.
 
 ## HA Grafana and PostgreSQL follow-up
@@ -348,10 +348,10 @@ network/CPU throttling. Log counts and timings, not transcript text.
 
 ## Comparison with the inspected OpenClaw checkout
 
-OpenClaw now owns its agent runtime; this checkout is not a drop-in host for the
-app's Pi 0.75.5 objects. Its remaining external Pi package is `pi-tui` 0.86.1.
-Use documented SDK/protocol boundaries rather than importing its internal storage
-modules or assuming session-format compatibility.
+This comparison is research input for the Pi host's session store; OpenClaw is
+not adopted as a runtime. OpenClaw now owns its agent runtime; this checkout is
+not a drop-in host for the app's Pi objects. Its remaining external Pi package
+is `pi-tui` 0.86.1.
 
 | Concern                     | Pi app today                                       | OpenClaw source evidence                                                                 |
 | --------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -384,7 +384,7 @@ or a measured speed advantage. No head-to-head runtime benchmark was run.
 ```mermaid
 flowchart TD
   UI[Grafana sidebar and full page] --> API[Go plugin resource API: identity and authorization]
-  API --> HOST[Assistant service: OpenClaw adapter or Pi host]
+  API --> HOST[Assistant service: Pi host]
   HOST --> STORE[Session metadata, transcript events, runs and checkpoints]
   HOST --> BLOBS[Artifacts and workspace content]
   HOST --> BROKER[Grafana query and action broker]
@@ -417,8 +417,7 @@ DELETE /sessions/:id                     defined deletion and running-job behavi
 Implement transport through supported plugin resource/streaming facilities;
 SSE, WebSocket, or bounded polling can serve the event contract. A reconnect must
 either replay durable events or explicitly request a new snapshot if the cursor
-expired. A sequence number alone does not make a stream replayable. If OpenClaw
-owns the runtime, adapt its actual recovery semantics at this boundary.
+expired. A sequence number alone does not make a stream replayable.
 
 For a bespoke Pi store, use separate records:
 
@@ -459,14 +458,11 @@ its revision checks. Unattended jobs use explicit scoped automation credentials;
 they cannot inherit a departed browser user's session. These capabilities are
 part of the host contract, not things a database supplies.
 
-For an OpenClaw-backed implementation, let OpenClaw own its transcript and runtime
-state. The app owns Grafana identity/session mappings, domain action receipts,
-and incident state where needed. A session-list projection can be rebuildable;
-do not create a second competing authoritative transcript or scheduler.
-OpenClaw documents [one trust boundary per Gateway](https://docs.openclaw.ai/gateway/security/trust-model):
-session IDs are not tenant authorization. Use isolated Gateway cells where trust
-domains differ, and keep the Grafana broker authoritative. Do not expose a Gateway
-operator token to the Grafana browser.
+The host stays Pi (decided 2026-09-29); OpenClaw is not adopted. One lesson from
+its trust model carries over: session IDs are not tenant authorization. Deploy
+separate host instances where trust domains differ, keep the Grafana broker
+authoritative, and do not expose a host operator credential to the Grafana
+browser.
 
 ## Database and deployment choices
 
@@ -474,13 +470,12 @@ A pod is a deployment unit; it does not itself provide persistence. A persistent
 volume, backup/restore process and storage ownership still need to be specified.
 Database HA and agent-worker HA are separate decisions.
 
-| Option                                                             | Suitable use                                                                                 | Main trade-off                                                                                                    |
-| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Go plugin + app-owned SQLite on a persistent volume                | Fast session API while execution remains browser-based; one Grafana writer deployment        | Lowest extra infrastructure, but lifecycle tied to Grafana and unsuitable as independently replicated local state |
-| Dedicated Pi service + SQLite + persistent volume                  | One durable runtime writer, modest deployment                                                | Independent runtime lifecycle; one active owner, backups and restart downtime to manage                           |
-| Dedicated OpenClaw service + its native SQLite + persistent volume | Pilot persistent conversations, channels and scheduled work                                  | Reuses existing lifecycle; app adapter, access isolation and parity still required                                |
-| Service + PostgreSQL                                               | Several API/worker replicas, shared tenant data, existing managed database operations        | More infrastructure, but a natural shared transactional store for a bespoke service                               |
-| Service + rqlite                                                   | Specifically want network-accessible, replicated SQLite semantics and accept Raft operations | Additional cluster/consistency decisions; does not remove single-leader write routing                             |
+| Option                                              | Suitable use                                                                                 | Main trade-off                                                                                                    |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Go plugin + app-owned SQLite on a persistent volume | Fast session API while execution remains browser-based; one Grafana writer deployment        | Lowest extra infrastructure, but lifecycle tied to Grafana and unsuitable as independently replicated local state |
+| Dedicated Pi service + SQLite + persistent volume   | One durable runtime writer, modest deployment                                                | Independent runtime lifecycle; one active owner, backups and restart downtime to manage                           |
+| Service + PostgreSQL                                | Several API/worker replicas, shared tenant data, existing managed database operations        | More infrastructure, but a natural shared transactional store for a bespoke service                               |
+| Service + rqlite                                    | Specifically want network-accessible, replicated SQLite semantics and accept Raft operations | Additional cluster/consistency decisions; does not remove single-leader write routing                             |
 
 SQLite WAL readers/writers must coordinate on the same host; do not scale by
 having Grafana replicas open the same SQLite file over a shared network filesystem.
@@ -504,12 +499,6 @@ session/job/action state. This is an architectural preference, not a benchmark
 result. [PostgreSQL concurrency model](https://www.postgresql.org/docs/current/mvcc-intro.html).
 Use a separate application database/schema and credentials; do not write custom
 tables directly into Grafana's internal database as an undocumented plugin API.
-
-OpenClaw's inspected persistence directly uses local SQLite connections, workers,
-schema/projection maintenance and filesystem lifecycle. rqlite or PostgreSQL is
-not a connection-string substitution. Replacing that storage would be a substantial
-OpenClaw integration/fork effort. Start its pilot with its native store and evaluate
-actual workload and recovery needs before considering that work.
 
 ## Delivery sequence
 
