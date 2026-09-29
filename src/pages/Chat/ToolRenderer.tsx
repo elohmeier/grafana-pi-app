@@ -1,7 +1,7 @@
 import { EvidenceView, evidencePresentations } from './session/EvidenceView';
+import type { ToolRunView } from './session/toolRuns';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { css, cx, keyframes } from '@emotion/css';
-import type { AgentToolResult } from '@earendil-works/pi-agent-core';
 import type { ToolResultMessage } from '@earendil-works/pi-ai';
 import { renderMarkdown, type GrafanaTheme2 } from '@grafana/data';
 import { Spinner, useStyles2 } from '@grafana/ui';
@@ -16,18 +16,7 @@ import {
   type CodeTokenKind,
 } from './jsonnetRendering';
 
-export type ToolRunView = {
-  id: string;
-  name: string;
-  args: unknown;
-  status: 'running' | 'completed' | 'failed';
-  partialResult?: AgentToolResult<any>;
-  result?: AgentToolResult<any>;
-  isError?: boolean;
-  /** When execution started; absent in runs restored from older snapshots. */
-  startedAt?: number;
-  updatedAt: number;
-};
+export type { ToolRunView } from './session/toolRuns';
 
 /** Tool results and in-flight runs, keyed by tool call ID, so calls render with their output in place. */
 export type ToolTranscript = {

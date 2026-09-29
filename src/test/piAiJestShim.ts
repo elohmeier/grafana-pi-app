@@ -72,3 +72,18 @@ export function streamSimple(): never {
 export function validateToolArguments(_tool: unknown, toolCall: { arguments: unknown }) {
   return toolCall.arguments;
 }
+
+type AssistantStreamEvent = { type: string; message?: unknown; error?: unknown };
+
+export class AssistantMessageEventStream extends EventStream<AssistantStreamEvent, unknown> {
+  constructor() {
+    super(
+      (event) => event.type === 'done' || event.type === 'error',
+      (event) => (event.type === 'done' ? event.message : event.error)
+    );
+  }
+}
+
+export function createAssistantMessageEventStream() {
+  return new AssistantMessageEventStream();
+}

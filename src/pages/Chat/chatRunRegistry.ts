@@ -1,42 +1,25 @@
-import type { Agent } from '@earendil-works/pi-agent-core';
-import type { DashboardAssistantLaunch } from './dashboardLaunch';
 import type { AssistantSession } from './session/AssistantSession';
-import type { ChatRunStatus } from './streamingStatus';
-import type { ToolRunView } from './ToolRenderer';
 
-export type ChatRunSnapshot = {
-  id: string;
-  title: string;
-  agent: Agent;
-  dashboardLaunch?: DashboardAssistantLaunch;
-  session: AssistantSession;
-  toolRuns: Record<string, ToolRunView>;
-  runStatus?: ChatRunStatus;
-  updatedAt: number;
-};
+/**
+ * Sessions whose run continues while no view shows them, such as during a
+ * page-to-sidebar handoff. The next view with the same session ID attaches to it.
+ */
+const liveRuns = new Map<string, AssistantSession>();
 
-const liveRuns = new Map<string, ChatRunSnapshot>();
-
-export function storeChatRun(snapshot: Omit<ChatRunSnapshot, 'updatedAt'>): ChatRunSnapshot {
-  const stored = {
-    ...snapshot,
-    updatedAt: Date.now(),
-  };
-  liveRuns.set(snapshot.id, stored);
-  return stored;
+export function storeChatRun(session: AssistantSession) {
+  liveRuns.set(session.id, session);
 }
 
-export function getChatRun(id: string | undefined): ChatRunSnapshot | undefined {
+export function getChatRun(id: string | undefined): AssistantSession | undefined {
   return id ? liveRuns.get(id) : undefined;
 }
 
 export function removeChatRun(id: string | undefined) {
-  if (!id) {
-    return;
+  if (id) {
+    liveRuns.delete(id);
   }
-  liveRuns.delete(id);
 }
 
-export function isStoredChatRunAgent(id: string | undefined, agent: Agent | undefined) {
-  return Boolean(id && agent && liveRuns.get(id)?.agent === agent);
+export function isStoredChatRun(session: AssistantSession | undefined) {
+  return Boolean(session && liveRuns.get(session.id) === session);
 }

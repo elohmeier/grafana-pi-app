@@ -7,8 +7,11 @@ jest.mock('typebox', () => ({
   ),
 }));
 
-import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
-import { AssistantSession } from './AssistantSession';
+import type { StreamFn } from '@earendil-works/pi-agent-core';
+import { createAssistantMessageEventStream, type Context } from '@earendil-works/pi-ai';
+import { SUMMARIZER_SYSTEM_PROMPT, type CompactionEvent } from '../compaction';
+import { AssistantSession, type SessionHost } from './AssistantSession';
+import type { StoredSession } from './sessionRecord';
 import { createFakeDashboardBroker } from '../workspace/testUtils';
 
 it('keeps catalog caches, artifacts, and pending approvals across view/toolkit changes', async () => {
@@ -74,12 +77,66 @@ it('does not retain an approval after cancellation', async () => {
   expect(session.approvals.getSnapshot()).toBeUndefined();
 });
 
-it('serializes persistence with captured state independently of the view', async () => {
-  const session = new AssistantSession();
-  const seen: string[] = [];
-  session.persist = async (snapshot) => {
-    seen.push(snapshot.workspace.files['/session/note']?.content);
+const usage = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+function assistantMessage(text: string, timestamp = Date.now()) {
+  return {
+    role: 'assistant' as const,
+    content: [{ type: 'text' as const, text }],
+    api: 'openai-completions',
+    provider: 'test',
+    model: 'test',
+    usage,
+    stopReason: 'stop' as const,
+    timestamp,
   };
+}
+
+/** A host whose model answers prompts with the next reply and summarizer calls with `summary`. */
+function createHost(replies: string[] = [], contextWindow = 100000, summary = '- summary') {
+  const records: StoredSession[] = [];
+  const requests: Context[] = [];
+  const compactions: CompactionEvent[] = [];
+  const { broker } = createFakeDashboardBroker([{ uid: 'one', title: 'One' }]);
+  const streamFn: StreamFn = (_model, context) => {
+    requests.push(context);
+    const stream = createAssistantMessageEventStream();
+    const message = assistantMessage(
+      context.systemPrompt === SUMMARIZER_SYSTEM_PROMPT ? summary : (replies.shift() ?? 'ok')
+    );
+    queueMicrotask(() => {
+      stream.push({ type: 'done', reason: 'stop', message });
+      stream.end(message);
+    });
+    return stream;
+  };
+  const host: SessionHost = {
+    environment: (session) => ({
+      streamFn,
+      model: { id: session.getState().modelId ?? 'test', contextWindow, maxTokens: 1000 } as never,
+      thinkingLevel: 'off',
+      broker,
+      skills: [],
+    }),
+    persist: async (record) => {
+      records.push(record);
+    },
+    onCompaction: (event) => compactions.push(event),
+  };
+  return { host, records, requests, compactions };
+}
+
+it('serializes persistence with captured state independently of the view', async () => {
+  const session = new AssistantSession({ messages: [{ role: 'user', content: 'hi', timestamp: 1 }] });
+  const { host, records } = createHost();
+  session.attach(host);
   const first = session.workspace.begin();
   await first.writeFile('/session/note', 'first');
   first.commit();
@@ -88,59 +145,109 @@ it('serializes persistence with captured state independently of the view', async
   await second.writeFile('/session/note', 'second');
   second.commit();
   await Promise.all([saving, session.save()]);
-  expect(seen).toEqual(['first', 'second']);
+  expect(records.map((record) => record.workspace?.files['/session/note']?.content)).toEqual(['first', 'second']);
+  expect(session.getState().save).toEqual({ status: 'saved' });
 });
 
 it('persists the complete history after a run, not only the run’s new messages', async () => {
-  const session = new AssistantSession();
-  const saved: unknown[][] = [];
-  session.persist = async (snapshot) => {
-    saved.push(snapshot.messages);
-  };
-  const answer = {
-    role: 'assistant' as const,
-    content: [{ type: 'text' as const, text: 'second' }],
-    api: 'openai-completions',
-    provider: 'test',
-    model: 'test',
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-    stopReason: 'stop' as const,
-    timestamp: 3,
-  };
-  const earlier = [
-    { role: 'user' as const, content: [{ type: 'text' as const, text: 'first' }], timestamp: 1 },
-    { ...answer, content: [{ type: 'text' as const, text: 'first answer' }], timestamp: 2 },
-  ];
-  const agent = session.createAgent({
-    messages: earlier,
-    systemPrompt: '',
-    tools: [],
-    model: { id: 'test', contextWindow: 100000, maxTokens: 1000 } as never,
-    thinkingLevel: 'off',
-    streamFn: () => {
-      const stream = createAssistantMessageEventStream();
-      queueMicrotask(() => {
-        stream.push({ type: 'done', reason: 'stop', message: answer });
-        stream.end(answer);
-      });
-      return stream;
-    },
+  const session = new AssistantSession({
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'first' }], timestamp: 1 },
+      assistantMessage('first answer', 2),
+    ],
   });
+  const { host, records } = createHost(['second']);
+  session.attach(host);
 
-  await agent.prompt('second question');
-  await session.flushSaves();
+  await session.prompt('second question');
 
-  expect(saved.at(-1)?.map((message) => (message as { role: string }).role)).toEqual([
+  expect(records.at(-1)?.messages.map((message) => (message as { role: string }).role)).toEqual([
     'user',
     'assistant',
     'user',
     'assistant',
   ]);
+});
+
+it('titles a new chat from its first prompt and passes launch context only to that prompt', async () => {
+  const session = new AssistantSession({
+    launch: {
+      external: {
+        prompt: 'Check this',
+        context: [{ node: { title: 'Launch item', data: 'launch-context' } }],
+        autoSend: true,
+      },
+    },
+  });
+  const { host, requests, records } = createHost(['one', 'two']);
+  session.attach(host);
+  const states: Array<string | undefined> = [];
+  session.subscribeState(() => states.push(session.getState().runStatus?.phase));
+
+  await session.prompt('Why is   the error rate high?');
+  expect(session.title).toBe('Why is the error rate high?');
+  expect(requests[0].systemPrompt).toContain('Launch item');
+  expect(states).toContain('waiting_model');
+  expect(session.getState().runStatus).toBeUndefined();
+
+  await session.prompt('And now?');
+  expect(requests[1].systemPrompt).not.toContain('Launch item');
+  expect(session.title).toBe('Why is the error rate high?');
+  expect(records.at(-1)).toMatchObject({ id: session.id, title: 'Why is the error rate high?', modelId: 'test' });
+});
+
+it('runs user shell commands into the transcript and saves them', async () => {
+  const session = new AssistantSession();
+  const { host, records } = createHost();
+  session.attach(host);
+
+  await session.runUserShell('echo hello > /workspace/a.txt; cat /workspace/a.txt');
+
+  expect(session.title).toBe('! echo hello > /workspace/a.txt; cat /workspace/a.txt');
+  expect(session.messages.at(-1)).toMatchObject({ role: 'userShell', result: { stdout: 'hello\n', exitCode: 0 } });
+  expect(records).toHaveLength(1);
+  expect(session.getState().shellRunning).toBe(false);
+});
+
+it('keeps model choices with the session and restores them with its files', async () => {
+  const session = new AssistantSession({ messages: [{ role: 'user', content: 'hi', timestamp: 1 }] });
+  const { host, records } = createHost();
+  session.attach(host);
+  session.setModelSettings({ modelId: 'other', thinkingLevel: 'high' });
+  const tx = session.workspace.begin();
+  await tx.writeFile('/session/findings.md', 'notes');
+  tx.commit();
+  await session.save();
+
+  const restored = AssistantSession.restore(records[0]);
+  expect(restored.id).toBe(session.id);
+  expect(restored.getState()).toMatchObject({ modelId: 'other', thinkingLevel: 'high' });
+  expect(restored.workspace.getScratchFile('/session/findings.md')?.content).toBe('notes');
+
+  const imported = AssistantSession.restore(records[0], { id: 'copy', title: 'Copy', trusted: false });
+  expect(imported.id).toBe('copy');
+  expect(imported.createdAt).toBeUndefined();
+});
+
+it('reports summaries and compaction progress while keeping the transcript complete', async () => {
+  const long = 'x'.repeat(12000);
+  const messages = Array.from({ length: 6 }, (_, index) =>
+    index % 2 === 0
+      ? { role: 'user' as const, content: `question ${index} ${long}`, timestamp: index + 1 }
+      : assistantMessage(`answer ${index} ${long}`, index + 1)
+  );
+  const session = new AssistantSession({ messages });
+  const { host, compactions, requests } = createHost(['final'], 30000, '- summary of earlier work');
+  session.attach(host);
+  const phases = new Set<string | undefined>();
+  session.subscribeState(() => phases.add(session.getState().runStatus?.phase));
+
+  await session.prompt('continue');
+
+  expect(compactions.map((event) => event.kind)).toEqual(['summarizing', 'summarized']);
+  expect(phases).toContain('compacting');
+  expect(session.getState().compaction).toMatchObject({ summary: '- summary of earlier work', compactions: 1 });
+  expect(session.messages).toHaveLength(8);
+  expect(JSON.stringify(requests.at(-1)?.messages)).toContain('summary of earlier work');
+  expect(session.snapshot().compaction?.coveredMessages).toBe(session.getState().compaction?.coveredMessages);
 });

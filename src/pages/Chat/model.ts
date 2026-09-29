@@ -93,6 +93,34 @@ export function getActiveModel(jsonData: Pick<PiAppJsonData, 'models'> | undefin
   return resolveConfiguredModel(jsonData, modelId) ?? UNCONFIGURED_MODEL;
 }
 
+/**
+ * Resolves a chat's model choice against the configuration. Formats with
+ * binary thinking only switch the configured level on or off.
+ */
+export function resolveChatModelSettings(
+  jsonData: Pick<PiAppJsonData, 'models' | 'openAIBaseUrl'> | undefined,
+  selection: { modelId?: string; thinkingLevel?: PiAppThinkingLevel }
+) {
+  const activeModel = getActiveModel(jsonData, selection.modelId);
+  const canCustomizeThinking = activeModel.thinkingLevel !== 'off';
+  const usesBinaryThinking =
+    activeModel.protocol !== 'responses' && ['qwen', 'qwen-chat-template'].includes(activeModel.thinkingFormat);
+  const thinkingLevel: PiAppThinkingLevel = !canCustomizeThinking
+    ? 'off'
+    : usesBinaryThinking
+      ? selection.thinkingLevel === 'off'
+        ? 'off'
+        : activeModel.thinkingLevel
+      : (selection.thinkingLevel ?? activeModel.thinkingLevel);
+  return {
+    activeModel,
+    model: createOpenAICompatibleModel(jsonData, activeModel),
+    thinkingLevel,
+    canCustomizeThinking,
+    usesBinaryThinking,
+  };
+}
+
 export function createOpenAICompatibleModel(
   jsonData: Pick<PiAppJsonData, 'openAIBaseUrl'> | undefined,
   configured: ConfiguredModel

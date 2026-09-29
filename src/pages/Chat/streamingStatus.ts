@@ -1,6 +1,12 @@
 import type { AgentEvent, AgentMessage } from '@earendil-works/pi-agent-core';
 
-export type ChatRunPhase = 'waiting_model' | 'thinking' | 'generating' | 'preparing_tool' | 'running_tool';
+export type ChatRunPhase =
+  | 'waiting_model'
+  | 'compacting'
+  | 'thinking'
+  | 'generating'
+  | 'preparing_tool'
+  | 'running_tool';
 
 export type ChatRunStatus = {
   phase: ChatRunPhase;
@@ -13,6 +19,11 @@ export function createInitialRunStatus(now = Date.now()): ChatRunStatus {
     phase: 'waiting_model',
     startedAt: now,
   };
+}
+
+/** Moves a running status to `phase`, keeping its start time. */
+export function withRunPhase(current: ChatRunStatus | undefined, phase: ChatRunPhase, now = Date.now()) {
+  return nextRunStatus(current, phase, undefined, now);
 }
 
 export function reduceChatRunStatus(
@@ -96,6 +107,8 @@ export function runStatusBadgeText(status: ChatRunStatus | undefined, pendingApp
   switch (status?.phase) {
     case 'waiting_model':
       return 'Waiting';
+    case 'compacting':
+      return 'Compacting';
     case 'thinking':
       return 'Thinking';
     case 'generating':
@@ -116,6 +129,8 @@ export function runStatusText(status: ChatRunStatus | undefined, pendingApproval
   switch (status?.phase) {
     case 'waiting_model':
       return status.detail || 'Waiting for model';
+    case 'compacting':
+      return 'Summarizing earlier conversation to fit the context window';
     case 'thinking':
       return 'Thinking';
     case 'generating':
@@ -158,6 +173,7 @@ function nextRunStatus(
 function phaseRank(phase: ChatRunPhase) {
   switch (phase) {
     case 'waiting_model':
+    case 'compacting':
       return 0;
     case 'thinking':
       return 1;

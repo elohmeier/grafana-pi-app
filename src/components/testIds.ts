@@ -46,6 +46,8 @@ export const testIds = {
     modelSelect: 'data-testid oa-chat-model-select',
     toolConfirmation: 'data-testid oa-chat-tool-confirmation',
     stoppedNotice: 'data-testid oa-chat-stopped-notice',
+    compactionDivider: 'data-testid oa-chat-compaction-divider',
+    contextTruncated: 'data-testid oa-chat-context-truncated',
     historySearch: 'data-testid oa-chat-history-search',
     shellCompletions: 'data-testid oa-chat-shell-completions',
     toolConfirmationApprove: 'data-testid oa-chat-tool-confirmation-approve',

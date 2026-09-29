@@ -11,7 +11,7 @@ import React, {
   useSyncExternalStore,
 } from 'react';
 import { css, cx } from '@emotion/css';
-import { Agent, type AgentEvent, type AgentMessage, type StreamFn, streamProxy } from '@earendil-works/pi-agent-core';
+import { type AgentEvent, type AgentMessage, type StreamFn, streamProxy } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, ToolResultMessage } from '@earendil-works/pi-ai';
 import { SceneComponentProps, SceneObjectBase, SceneObjectState } from '@grafana/scenes';
 import {
@@ -45,30 +45,21 @@ import {
 import { DEFAULT_SHELL_CWD } from './workspace/shell';
 import { navigatePromptHistory, promptHistory, type PromptHistoryState } from './promptHistory';
 import { usePluginMeta } from '../../utils/utils.plugin';
-import type { Artifact } from './domain';
 import { formatAssistantError, type AssistantErrorView } from './llmErrors';
+import { getConfiguredModels, resolveChatModelSettings, type PiAppJsonData, type PiAppThinkingLevel } from './model';
 import {
-  createOpenAICompatibleModel,
-  getActiveModel,
-  getConfiguredModels,
-  type PiAppJsonData,
-  type PiAppThinkingLevel,
-} from './model';
-import {
-  createUserShellMessage,
   finishedTurnSteps,
   hasPersistableMessages,
   pairToolResults,
   parseUserShellInput,
   type TurnSteps,
 } from './chatMessages';
-import { getGrafanaSkills, renderGrafanaSystemPrompt, selectGrafanaSkills } from './skills';
+import { getGrafanaSkills } from './skills';
 import {
   ContentBlocks,
   ToolResultMessageBody,
   ToolTranscriptContext,
   UserShellEntry,
-  type ToolRunView,
   type ToolTranscript,
 } from './ToolRenderer';
 import {
@@ -78,60 +69,42 @@ import {
   dashboardAssistantPrompt,
   dashboardAssistantSessionTitle,
   removeDashboardAssistantLaunchParams,
-  renderDashboardAssistantContextBlock,
   storeDashboardAssistantLaunch,
   type DashboardAssistantLaunch,
 } from './dashboardLaunch';
-import {
-  externalAssistantSessionTitle,
-  renderExternalAssistantContextBlock,
-  type ExternalAssistantLaunch,
-} from './externalAssistantLaunch';
+import { externalAssistantSessionTitle, type ExternalAssistantLaunch } from './externalAssistantLaunch';
 import { getAssistantDockRoute, routeFromLocation, storeAssistantSidebarDockRequest } from './sidebarDock';
-import {
-  buildAssistantSidebarPageContextSnapshot,
-  renderAssistantSidebarPageContextBlock,
-  sidebarPageContextSkillHints,
-} from './sidebarPageContext';
+import { buildAssistantSidebarPageContextSnapshot } from './sidebarPageContext';
 import { createAssistantTelemetryReporter } from './telemetry';
 import {
-  createInitialRunStatus,
   formatRunElapsed,
-  reduceChatRunStatus,
   resolveChatRunStatusFromStreamingMessage,
   runStatusBadgeText,
   runStatusText,
-  type ChatRunStatus,
 } from './streamingStatus';
-import { getChatRun, isStoredChatRunAgent, removeChatRun, storeChatRun, type ChatRunSnapshot } from './chatRunRegistry';
-import { SessionWorkspace, type PersistedWorkspace } from './workspace';
+import { getChatRun, isStoredChatRun, removeChatRun, storeChatRun } from './chatRunRegistry';
 import { createGrafanaWorkspaceBroker } from './workspace/grafanaBroker';
-import { migrateLegacyInvestigationReport, migrateLegacyJsonnetFiles, REPORT_PATH } from './workspace/migration';
-import { isCompactionState, type CompactionState } from './compaction';
-import { AssistantSession, type SessionSnapshot } from './session/AssistantSession';
+import { REPORT_PATH } from './workspace/migration';
+import { AssistantSession, type SessionEnvironment, type SessionHost } from './session/AssistantSession';
 import { SessionRepository, type SessionMetadata } from './session/SessionRepository';
-import { compactArtifacts } from './session/artifactStore';
+import {
+  CHAT_SESSION_EXPORT_KIND,
+  CHAT_SESSION_EXPORT_SCHEMA_VERSION,
+  chatSessionExportFilename,
+  createSessionId,
+  importTitleFromFilename,
+  parseChatSessionExport,
+  type ChatSessionExport,
+  type StoredSession,
+} from './session/sessionRecord';
+import { emitBenchmarkEvent, emitBenchmarkTranscriptSnapshot, recordSerializedBenchmarkEvent } from './benchmarkEvents';
 import { createBrowserPythonRunner } from './workspace/python/pythonBrowserRunner';
+import type { CompactionState } from './compaction';
+import { CompactionDivider, ContextTruncatedNotice } from './CompactionNotice';
 
 type ChatSceneObjectState = SceneObjectState;
 
 type SessionIndexItem = SessionMetadata;
-
-type StoredSession = SessionIndexItem & {
-  messages: AgentMessage[];
-  modelId?: string;
-  thinkingLevel?: PiAppThinkingLevel;
-  /** Legacy Jsonnet sources from sessions created before the session filesystem; migrated on load. */
-  virtualJsonnetFiles?: unknown;
-  /** Legacy structured report from the retired update_report tool; migrated into /session/report.md on load. */
-  investigationReport?: unknown;
-  artifacts?: Record<string, Artifact>;
-  artifactCounter?: number;
-  workspace?: PersistedWorkspace;
-  compaction?: CompactionState;
-};
-
-type ToolRunState = Record<string, ToolRunView>;
 
 type ChatLeaveGuardAction = {
   title: string;
@@ -142,9 +115,6 @@ type ChatLeaveGuardAction = {
 
 type ChatAppVariant = 'page' | 'sidebar';
 
-const CHAT_SESSION_EXPORT_KIND = 'g42-pi-app.chat-session';
-const LEGACY_CHAT_SESSION_EXPORT_KINDS = ['grafana-pi-app.chat-session'];
-const CHAT_SESSION_EXPORT_SCHEMA_VERSION = 1;
 const ACTIVE_CHAT_LEAVE_MESSAGE =
   'The assistant is still working. Leaving now will stop the run and discard any partial response.';
 const DRAFT_CHAT_LEAVE_MESSAGE = 'The current draft message will be discarded.';
@@ -164,32 +134,16 @@ const THINKING_LEVEL_OPTIONS: Array<{
   { label: 'Extra high', value: 'xhigh', description: 'Maximum reasoning for models that support it.' },
 ];
 
-type ChatSessionExport = {
-  kind: typeof CHAT_SESSION_EXPORT_KIND;
-  schemaVersion: typeof CHAT_SESSION_EXPORT_SCHEMA_VERSION;
-  exportedAt: string;
-  pluginId: string;
-  session: StoredSession;
-};
-
-type BenchmarkAgentEvent = {
-  type: AgentEvent['type'] | 'context_compaction';
-  timestamp: number;
-  [key: string]: unknown;
-};
-
 type PluginSettingsResponse = {
   jsonData?: PiAppJsonData;
 };
 
-const BENCHMARK_EVENT_CONSOLE_PREFIX = '__PI_AGENT_BENCHMARK_EVENT__ ';
+// Shared by page and sidebar views, so a session handed over between them keeps its storage revisions.
+let sessionRepository: SessionRepository | undefined;
 
-declare global {
-  interface Window {
-    __PI_AGENT_BENCHMARK_CAPTURE__?: boolean;
-    __PI_AGENT_BENCHMARK_EVENTS__?: BenchmarkAgentEvent[];
-    __PI_AGENT_BENCHMARK_RECORD_EVENT__?: (event: BenchmarkAgentEvent) => void;
-  }
+function sharedSessionRepository(storage: ConstructorParameters<typeof SessionRepository>[0]) {
+  sessionRepository ??= new SessionRepository(storage);
+  return sessionRepository;
 }
 
 export class ChatSceneObject extends SceneObjectBase<ChatSceneObjectState> {
@@ -233,7 +187,7 @@ export function ChatApp({
   const storage = usePluginUserStorage();
   const repositoryRef = useRef<SessionRepository>(undefined);
   if (repositoryRef.current == null) {
-    repositoryRef.current = new SessionRepository(storage);
+    repositoryRef.current = sharedSessionRepository(storage);
   }
   const { dashboardMutationAPI } = useRestrictedGrafanaApis();
   const liveDashboardEditingAvailable = hasActiveDashboardMutationCommands(dashboardMutationAPI);
@@ -245,23 +199,26 @@ export function ChatApp({
     [pluginMetaJsonData, settingsJsonData]
   );
   const configuredModels = useMemo(() => getConfiguredModels(jsonData), [jsonData]);
-  const [selectedModelId, setSelectedModelId] = useState<string>();
-  const [selectedThinkingLevel, setSelectedThinkingLevel] = useState<PiAppThinkingLevel>();
+  // The session in view. Until the first session is loaded, a detached placeholder without an agent.
+  const [session, setSession] = useState(() => new AssistantSession());
+  const sessionRef = useRef(session);
+  const sessionState = useSyncExternalStore(session.subscribeState, session.getState);
+  const workspace = session.workspace;
+  const agent = session.agent;
+  const currentSessionId = session.agent ? sessionState.id : undefined;
+  const currentTitle = sessionState.title;
+  const toolRuns = sessionState.toolRuns;
+  const runStatus = sessionState.runStatus;
+  const userShellRunning = sessionState.shellRunning;
+  const saveState = sessionState.save;
   const [isModelSettingsOpen, setIsModelSettingsOpen] = useState(false);
   const modelSelectId = useId();
   const thinkingLevelSelectId = useId();
-  const activeModel = useMemo(() => getActiveModel(jsonData, selectedModelId), [jsonData, selectedModelId]);
-  const llmModel = useMemo(() => createOpenAICompatibleModel(jsonData, activeModel), [jsonData, activeModel]);
-  const canCustomizeThinking = activeModel.thinkingLevel !== 'off';
-  const usesBinaryThinking =
-    activeModel.protocol !== 'responses' && ['qwen', 'qwen-chat-template'].includes(activeModel.thinkingFormat);
-  const thinkingLevel: PiAppThinkingLevel = !canCustomizeThinking
-    ? 'off'
-    : usesBinaryThinking
-      ? selectedThinkingLevel === 'off'
-        ? 'off'
-        : activeModel.thinkingLevel
-      : (selectedThinkingLevel ?? activeModel.thinkingLevel);
+  const { activeModel, thinkingLevel, canCustomizeThinking, usesBinaryThinking } = useMemo(
+    () =>
+      resolveChatModelSettings(jsonData, { modelId: sessionState.modelId, thinkingLevel: sessionState.thinkingLevel }),
+    [jsonData, sessionState.modelId, sessionState.thinkingLevel]
+  );
   const thinkingLevelOptions = usesBinaryThinking
     ? [
         { label: 'Off', value: 'off' as const, description: 'Do not request model thinking.' },
@@ -285,18 +242,6 @@ export function ChatApp({
       }),
     []
   );
-  const sessionIdRef = useRef<string>(undefined);
-  const [session, setSession] = useState(() => new AssistantSession());
-  const sessionRef = useRef(session);
-  const workspace = session.workspace;
-  const [userShellRunning, setUserShellRunning] = useState(false);
-  const dashboardLaunchRef = useRef<DashboardAssistantLaunch>(undefined);
-  const externalLaunchRef = useRef<ExternalAssistantLaunch>(undefined);
-  // The workspace instance changes with the session; state lets the report file subscription follow it.
-  const replaceWorkspace = useCallback((next: SessionWorkspace) => {
-    sessionRef.current = new AssistantSession(next);
-    setSession(sessionRef.current);
-  }, []);
   const subscribeWorkspace = useCallback(
     (listener: () => void) => {
       const unsubscribe = workspace.subscribe(listener);
@@ -330,10 +275,6 @@ export function ChatApp({
       mounted = false;
     };
   }, [pluginMetaJsonData.isOpenAIAPIKeySet]);
-  const setArtifactSnapshots = useCallback((artifacts: Record<string, Artifact>, counter?: number) => {
-    sessionRef.current.artifacts.restore(artifacts, counter);
-  }, []);
-  const [agent, setAgent] = useState<Agent>();
   const { revision, flushRevision, scheduleRevision } = useFrameRevision();
   const [input, setInput] = useState('');
   const pendingApproval = useSyncExternalStore(session.approvals.subscribe, session.approvals.getSnapshot);
@@ -341,17 +282,9 @@ export function ChatApp({
   const [sessions, setSessions] = useState<SessionIndexItem[]>([]);
   const [nextSessionCursor, setNextSessionCursor] = useState<string>();
   const [sessionsLoading, setSessionsLoading] = useState(true);
-  const [saveState, setSaveState] = useState<{ id: string; status: 'saving' | 'saved' | 'error' }>();
-  const [currentSessionId, setCurrentSessionId] = useState<string>();
-  const [currentTitle, setCurrentTitle] = useState('New chat');
   const [error, setError] = useState<string>();
-  const [toolRuns, setToolRuns] = useState<ToolRunState>({});
-  const [runStatus, setRunStatus] = useState<ChatRunStatus>();
   const unsubscribeRef = useRef<() => void>(undefined);
-  const titleRef = useRef('New chat');
   const sessionsRef = useRef<SessionIndexItem[]>([]);
-  const saveSequenceRef = useRef(0);
-  const runStatusRef = useRef<ChatRunStatus>(undefined);
   const importSessionInputRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesContainerRef = useRef<HTMLElement | null>(null);
@@ -367,18 +300,10 @@ export function ChatApp({
   const [blockedLocation, setBlockedLocation] = useState<ReturnType<typeof locationService.getLocation>>();
   const [isAutoScrollPaused, setIsAutoScrollPaused] = useState(false);
 
-  const setRunStatusSnapshot = useCallback((next: ChatRunStatus | undefined) => {
-    runStatusRef.current = next;
-    setRunStatus(next);
-  }, []);
-
-  const updateRunStatus = useCallback((event: AgentEvent) => {
-    setRunStatus((current) => {
-      const next = reduceChatRunStatus(current, event);
-      runStatusRef.current = next;
-      return next;
-    });
-  }, []);
+  // A failed save shows as an error until it is dismissed or the next save starts.
+  const [dismissedSave, setDismissedSave] = useState<typeof saveState>();
+  const displayedError =
+    error ?? (saveState?.status === 'error' && saveState !== dismissedSave ? saveState.error : undefined);
 
   const settleToolConfirmation = useCallback(
     (approved: boolean, paths?: string[]) => sessionRef.current.approvals.settle(approved, paths),
@@ -387,334 +312,151 @@ export function ChatApp({
 
   const workspaceBroker = useMemo(() => createGrafanaWorkspaceBroker(jsonData), [jsonData]);
   const pythonRunner = useMemo(() => createBrowserPythonRunner(), []);
-  const buildWorkspaceToolkit = useCallback(
-    () =>
-      sessionRef.current.toolkit({
-        workspace: sessionRef.current.workspace,
+
+  // What this view offers a session: model access, Grafana capabilities, and storage.
+  const environment = useCallback(
+    (target: AssistantSession): SessionEnvironment => {
+      const { model, thinkingLevel } = resolveChatModelSettings(jsonData, target.getState());
+      return {
+        streamFn,
+        model,
+        thinkingLevel,
         broker: workspaceBroker,
-        approvals: sessionRef.current.approvals,
-        artifacts: sessionRef.current.artifacts,
         skills,
-        context: {
-          capturedAt: new Date().toISOString(),
-          page: buildAssistantSidebarPageContextSnapshot(sidebarRouteRef.current, { liveDashboardEditingAvailable }),
-          dashboardLaunch: dashboardLaunchRef.current,
-          externalLaunch: externalLaunchRef.current?.context,
-          capabilities: { liveDashboardEditingAvailable, python: Boolean(pythonRunner) },
-          datasources: workspaceBroker.prometheus?.datasources(),
-        },
         python: pythonRunner,
         getDashboardMutationAPI: liveDashboardEditingAvailable ? () => dashboardMutationAPI : undefined,
-      }),
-    [dashboardMutationAPI, liveDashboardEditingAvailable, pythonRunner, skills, workspaceBroker]
-  );
-
-  const buildSkillRuntime = useCallback(
-    (prompt: string) => {
-      const sidebarPageContext = isSidebarVariant
-        ? buildAssistantSidebarPageContextSnapshot(sidebarRouteRef.current, { liveDashboardEditingAvailable })
-        : undefined;
-      const selection = selectGrafanaSkills(prompt, skills, sidebarPageContextSkillHints(sidebarPageContext));
-      const workspaceToolkit = buildWorkspaceToolkit();
-      const tools = workspaceToolkit.tools;
-      const systemPrompt = [
-        renderGrafanaSystemPrompt({
-          skills,
-          activeSkillNames: selection.activeSkillNames,
-          liveDashboardEditingAvailable,
-        }),
-        workspaceToolkit.promptSection,
-      ].join('\n\n');
-      const dashboardLaunchContext = dashboardLaunchRef.current
-        ? renderDashboardAssistantContextBlock(dashboardLaunchRef.current)
-        : undefined;
-      const externalLaunchContext = externalLaunchRef.current
-        ? renderExternalAssistantContextBlock(externalLaunchRef.current.context)
-        : undefined;
-      const sidebarContext = renderAssistantSidebarPageContextBlock(sidebarPageContext);
-
-      return {
-        systemPrompt: [systemPrompt, dashboardLaunchContext, externalLaunchContext, sidebarContext]
-          .filter(Boolean)
-          .join('\n\n'),
-        tools,
-        skillSelection: selection,
+        page: buildAssistantSidebarPageContextSnapshot(sidebarRouteRef.current, { liveDashboardEditingAvailable }),
+        pageInPrompt: isSidebarVariant,
       };
     },
-    [buildWorkspaceToolkit, isSidebarVariant, liveDashboardEditingAvailable, skills]
+    [
+      dashboardMutationAPI,
+      isSidebarVariant,
+      jsonData,
+      liveDashboardEditingAvailable,
+      pythonRunner,
+      skills,
+      streamFn,
+      workspaceBroker,
+    ]
   );
-
-  const saveSession = useCallback(
-    async (
-      id: string,
-      title: string,
-      messages: AgentMessage[],
-      snapshot = sessionRef.current.snapshot(messages),
-      repository = repositoryRef.current!
-    ) => {
-      if (!hasPersistableMessages(messages)) {
-        return;
-      }
-
-      const now = new Date().toISOString();
-      const indexItem: SessionIndexItem = {
-        id,
-        title,
-        createdAt: sessionsRef.current.find((session) => session.id === id)?.createdAt ?? now,
-        updatedAt: now,
-      };
-      const stored: StoredSession = {
-        ...indexItem,
-        ...snapshot,
-        thinkingLevel: parseStoredThinkingLevel(snapshot.thinkingLevel),
-      };
-      const saveSequence = ++saveSequenceRef.current;
-      setSaveState({ id, status: 'saving' });
-      try {
-        const saved = await repository.save(stored);
-        const next = [saved, ...sessionsRef.current.filter((session) => session.id !== id)];
-        sessionsRef.current = next;
-        setSessions(next);
-        if (saveSequence === saveSequenceRef.current) {
-          setSaveState({ id, status: 'saved' });
-        }
-        if (sessionIdRef.current === id) {
-          setChatSessionParamInLocation(id);
-        }
-      } catch (err) {
-        if (saveSequence === saveSequenceRef.current) {
-          setSaveState({ id, status: 'error' });
-        }
-        if (saveSequence === saveSequenceRef.current && sessionIdRef.current === id) {
-          setError(err instanceof Error ? err.message : String(err));
-        }
-        throw err;
-      }
-    },
-    [setError]
+  const persist = useCallback(async (record: StoredSession) => {
+    const saved = await repositoryRef.current!.save(record);
+    const next = [saved, ...sessionsRef.current.filter((item) => item.id !== record.id)];
+    sessionsRef.current = next;
+    setSessions(next);
+    if (sessionRef.current.id === record.id) {
+      setChatSessionParamInLocation(record.id);
+    }
+  }, []);
+  const hostCallbacksRef = useRef({ environment, persist });
+  useLayoutEffect(() => {
+    hostCallbacksRef.current = { environment, persist };
+  }, [environment, persist]);
+  const host = useMemo<SessionHost>(
+    () => ({
+      environment: (target) => hostCallbacksRef.current.environment(target),
+      persist: (record) => hostCallbacksRef.current.persist(record),
+      onPromptStart: (context) => assistantTelemetry.recordPromptStart(context),
+      onPromptEnd: (messages) => {
+        assistantTelemetry.recordTranscriptSnapshot(messages);
+        emitBenchmarkTranscriptSnapshot(messages);
+      },
+      onCompaction: (event) =>
+        recordSerializedBenchmarkEvent({ type: 'context_compaction', timestamp: Date.now(), ...event }),
+    }),
+    [assistantTelemetry]
   );
 
   const handleAgentEvent = useCallback(
-    (event: AgentEvent, eventAgent: Agent) => {
+    (event: AgentEvent) => {
       emitBenchmarkEvent(event);
       assistantTelemetry.recordAgentEvent(event);
-      updateRunStatus(event);
       if (shouldBatchRevision(event)) {
         scheduleRevision();
       } else {
         flushRevision();
       }
-      setToolRuns((value) => {
-        const next = reduceToolRuns(value, event);
-        const sessionId = sessionIdRef.current;
-        const run = getChatRun(sessionId);
-        if (run?.agent === eventAgent) {
-          run.toolRuns = next;
-          run.updatedAt = Date.now();
-        }
-        return next;
-      });
     },
-    [assistantTelemetry, flushRevision, scheduleRevision, updateRunStatus]
+    [assistantTelemetry, flushRevision, scheduleRevision]
   );
 
-  const stopCurrentAgentForSessionChange = useCallback((options?: { preserveLiveRun?: boolean }) => {
+  /** Detaches the view from its session; unless it keeps running for a handoff, the run stops. */
+  const detachSession = useCallback((options?: { preserveLiveRun?: boolean }) => {
     unsubscribeRef.current?.();
     unsubscribeRef.current = undefined;
-    const currentAgent = sessionRef.current.agent;
-    const currentSessionId = sessionIdRef.current;
-    if (!options?.preserveLiveRun || !isStoredChatRunAgent(currentSessionId, currentAgent)) {
-      removeChatRun(currentSessionId);
-      sessionRef.current.approvals.settle(false);
-      currentAgent?.abort();
+    const current = sessionRef.current;
+    if (!options?.preserveLiveRun || !isStoredChatRun(current)) {
+      removeChatRun(current.id);
+      current.abort();
     }
   }, []);
 
-  const buildAgent = useCallback(
-    (messages: AgentMessage[] = []) => {
-      stopCurrentAgentForSessionChange();
-      const runtime = buildSkillRuntime('');
-      const id = sessionIdRef.current!;
-      const title = titleRef.current;
-      const repository = repositoryRef.current!;
-      sessionRef.current.repository = repository;
-      sessionRef.current.persist = (snapshot: SessionSnapshot) =>
-        saveSession(id, title, snapshot.messages, snapshot, repository);
-      const nextAgent = sessionRef.current.createAgent({
-        messages,
-        systemPrompt: runtime.systemPrompt,
-        tools: runtime.tools,
-        model: llmModel,
-        thinkingLevel,
-        streamFn,
-        onCompaction: (event) =>
-          recordSerializedBenchmarkEvent({ type: 'context_compaction', timestamp: Date.now(), ...event }),
-      });
-
-      unsubscribeRef.current = sessionRef.current.subscribe(handleAgentEvent);
-
-      setAgent(nextAgent);
-      sessionRef.current.agent = nextAgent;
+  /** Shows `next` in this view: stops the previous session and attaches this view as the new one's host. */
+  const activateSession = useCallback(
+    (next: AssistantSession, draft = '') => {
+      detachSession();
+      sessionRef.current = next;
+      next.attach(host);
+      unsubscribeRef.current = next.subscribe(handleAgentEvent);
+      setSession(next);
+      autoScrollRef.current = true;
+      setIsAutoScrollPaused(false);
+      setError(undefined);
+      setInput(draft);
       flushRevision();
-      return nextAgent;
     },
-    [
-      buildSkillRuntime,
-      flushRevision,
-      handleAgentEvent,
-      saveSession,
-      llmModel,
-      stopCurrentAgentForSessionChange,
-      streamFn,
-      thinkingLevel,
-    ]
+    [detachSession, flushRevision, handleAgentEvent, host, setError]
   );
 
   const startNewSession = useCallback(() => {
-    const id = createSessionId();
-    stopCurrentAgentForSessionChange();
-    dashboardLaunchRef.current = undefined;
-    externalLaunchRef.current = undefined;
     clearChatSessionParamFromLocation();
-    sessionIdRef.current = id;
-    titleRef.current = 'New chat';
-    setSelectedModelId(undefined);
-    setSelectedThinkingLevel(undefined);
-    replaceWorkspace(new SessionWorkspace());
-    setRunStatusSnapshot(undefined);
-    autoScrollRef.current = true;
-    setIsAutoScrollPaused(false);
-    setCurrentSessionId(id);
-    setCurrentTitle('New chat');
-    setError(undefined);
-    setInput('');
-    setToolRuns({});
-    settleToolConfirmation(false);
-    buildAgent([]);
-  }, [
-    replaceWorkspace,
-    buildAgent,
-    setRunStatusSnapshot,
-    settleToolConfirmation,
-    stopCurrentAgentForSessionChange,
-    setError,
-  ]);
+    activateSession(new AssistantSession());
+  }, [activateSession]);
 
   const startDashboardLaunchSession = useCallback(
     (launch: DashboardAssistantLaunch) => {
-      const id = createSessionId();
-      const title = dashboardAssistantSessionTitle(launch);
-      stopCurrentAgentForSessionChange();
-      dashboardLaunchRef.current = launch;
-      externalLaunchRef.current = undefined;
-      sessionIdRef.current = id;
-      titleRef.current = title;
-      replaceWorkspace(new SessionWorkspace());
-      setRunStatusSnapshot(undefined);
-      autoScrollRef.current = true;
-      setIsAutoScrollPaused(false);
-      setCurrentSessionId(id);
-      setCurrentTitle(title);
-      setError(undefined);
-      setInput(dashboardAssistantPrompt(launch));
-      setToolRuns({});
-      settleToolConfirmation(false);
-      buildAgent([]);
+      activateSession(
+        new AssistantSession({ title: dashboardAssistantSessionTitle(launch), launch: { dashboard: launch } }),
+        dashboardAssistantPrompt(launch)
+      );
     },
-    [
-      replaceWorkspace,
-      buildAgent,
-      setRunStatusSnapshot,
-      settleToolConfirmation,
-      stopCurrentAgentForSessionChange,
-      setError,
-    ]
+    [activateSession]
   );
 
   const startExternalAssistantLaunchSession = useCallback(
     (launch: ExternalAssistantLaunch) => {
-      const id = createSessionId();
-      const title = externalAssistantSessionTitle(launch.prompt);
-      stopCurrentAgentForSessionChange();
-      dashboardLaunchRef.current = undefined;
-      externalLaunchRef.current = launch;
-      sessionIdRef.current = id;
-      titleRef.current = title;
-      replaceWorkspace(new SessionWorkspace());
-      setRunStatusSnapshot(undefined);
-      autoScrollRef.current = true;
-      setIsAutoScrollPaused(false);
-      setCurrentSessionId(id);
-      setCurrentTitle(title);
-      setError(undefined);
-      setInput(launch.prompt);
-      setToolRuns({});
-      settleToolConfirmation(false);
-      buildAgent([]);
+      activateSession(
+        new AssistantSession({ title: externalAssistantSessionTitle(launch.prompt), launch: { external: launch } }),
+        launch.prompt
+      );
     },
-    [
-      replaceWorkspace,
-      buildAgent,
-      setRunStatusSnapshot,
-      settleToolConfirmation,
-      stopCurrentAgentForSessionChange,
-      setError,
-    ]
+    [activateSession]
   );
 
-  const preserveCurrentRunForHandoff = useCallback(() => {
-    const currentAgent = sessionRef.current.agent;
-    const id = sessionIdRef.current;
-    if (!currentAgent || !id) {
-      return false;
-    }
-
-    storeChatRun({
-      id,
-      title: titleRef.current,
-      agent: currentAgent,
-      dashboardLaunch: dashboardLaunchRef.current,
-      session: sessionRef.current,
-      toolRuns,
-      runStatus: runStatusRef.current,
-    });
-    return true;
-  }, [toolRuns]);
-
   const attachLiveRun = useCallback(
-    (run: ChatRunSnapshot) => {
-      stopCurrentAgentForSessionChange();
-      dashboardLaunchRef.current = run.dashboardLaunch;
-      externalLaunchRef.current = undefined;
-      sessionIdRef.current = run.id;
-      titleRef.current = run.title;
-      setSelectedModelId(run.agent.state.model?.id || undefined);
-      setSelectedThinkingLevel(parseStoredThinkingLevel(run.agent.state.thinkingLevel));
-      sessionRef.current = run.session;
-      repositoryRef.current = run.session.repository ?? repositoryRef.current;
-      run.session.persist = (snapshot) =>
-        saveSession(run.id, run.title, snapshot.messages, snapshot, run.session.repository);
-      setSession(run.session);
-      setRunStatusSnapshot(run.runStatus ?? (run.agent.state.isStreaming ? createInitialRunStatus() : undefined));
-      autoScrollRef.current = true;
-      setIsAutoScrollPaused(false);
-      setCurrentSessionId(run.id);
-      setCurrentTitle(run.title);
-      setError(undefined);
-      setInput('');
-      setToolRuns(run.toolRuns);
-      unsubscribeRef.current = run.session.subscribe(handleAgentEvent);
-      sessionRef.current.agent = run.agent;
-      setAgent(run.agent);
-      flushRevision();
-
-      if (!run.agent.state.isStreaming && hasPersistableMessages(run.agent.state.messages)) {
-        void run.session.flushSaves().catch((err) => setError(String(err)));
+    (run: AssistantSession) => {
+      activateSession(run);
+      if (!run.isStreaming && hasPersistableMessages(run.messages)) {
+        void run.flushSaves().catch((err) => setError(String(err)));
       }
-
       return true;
     },
-    [flushRevision, handleAgentEvent, saveSession, setRunStatusSnapshot, stopCurrentAgentForSessionChange, setError]
+    [activateSession, setError]
+  );
+
+  const loadSession = useCallback(
+    async (id: string) => {
+      const stored = await repositoryRef.current!.get<StoredSession>(id);
+      if (!stored) {
+        setError('Session not found');
+        return false;
+      }
+      setChatSessionParamInLocation(id);
+      activateSession(AssistantSession.restore(stored));
+      return true;
+    },
+    [activateSession, setError]
   );
 
   useEffect(() => {
@@ -830,16 +572,15 @@ export function ChatApp({
   );
 
   const abortAgent = useCallback(() => {
-    settleToolConfirmation(false);
-    sessionRef.current.agent?.abort();
+    sessionRef.current.abort();
     flushRevision();
-  }, [flushRevision, settleToolConfirmation]);
+  }, [flushRevision]);
 
   const isStreaming = Boolean(agent?.state.isStreaming);
   const isBusy = isStreaming || userShellRunning;
   const isShellInput = parseUserShellInput(input) !== undefined;
   const hasDraft = Boolean(input.trim());
-  const hasUnsavedSession = Boolean(saveState && saveState.id === currentSessionId && saveState.status !== 'saved');
+  const hasUnsavedSession = Boolean(saveState && saveState.status !== 'saved');
   const chatLeaveDescription = hasUnsavedSession
     ? 'This chat has changes that have not been confirmed saved. Export the session before leaving to keep a copy.'
     : isStreaming || pendingToolConfirmation
@@ -888,12 +629,7 @@ export function ChatApp({
     } else {
       return false;
     }
-    const step = navigatePromptHistory(
-      historyRef.current,
-      sessionRef.current.agent?.state.messages ?? [],
-      element.value,
-      direction
-    );
+    const step = navigatePromptHistory(historyRef.current, sessionRef.current.messages, element.value, direction);
     if (!step) {
       return false;
     }
@@ -983,7 +719,7 @@ export function ChatApp({
     setLeaveGuardAction(undefined);
     setInput('');
     if (shouldStopCurrentAgent) {
-      stopCurrentAgentForSessionChange();
+      detachSession();
     }
     flushRevision();
 
@@ -994,7 +730,7 @@ export function ChatApp({
     }
 
     action?.();
-  }, [blockedLocation, flushRevision, leaveGuardAction?.stopCurrentAgent, stopCurrentAgentForSessionChange]);
+  }, [blockedLocation, detachSession, flushRevision, leaveGuardAction?.stopCurrentAgent]);
 
   const requestGuardedAction = useCallback(
     (action: () => void, guardAction: ChatLeaveGuardAction) => {
@@ -1016,111 +752,47 @@ export function ChatApp({
   // after `setInput(...)` would still see the previous value).
   const submitPromptText = useCallback(
     async (prompt: string) => {
-      const currentAgent = sessionRef.current.agent;
-      if (!currentAgent || !prompt || currentAgent.state.isStreaming) {
+      const current = sessionRef.current;
+      if (!current.agent || !prompt || current.isStreaming) {
         return;
-      }
-
-      let sessionId = sessionIdRef.current;
-      if (!sessionId) {
-        sessionId = createSessionId();
-        sessionIdRef.current = sessionId;
-        setCurrentSessionId(sessionId);
-      }
-
-      if (titleRef.current === 'New chat') {
-        const title = generateTitle(prompt);
-        titleRef.current = title;
-        setCurrentTitle(title);
       }
 
       setInput('');
       setError(undefined);
-      setRunStatusSnapshot(createInitialRunStatus());
       keepAutoScrollEnabled();
       try {
-        const title = titleRef.current;
-        const repository = repositoryRef.current!;
-        sessionRef.current.persist = (snapshot) =>
-          saveSession(sessionId!, title, snapshot.messages, snapshot, repository);
-        const runtime = buildSkillRuntime(prompt);
-        assistantTelemetry.recordPromptStart({
-          prompt,
-          systemPrompt: runtime.systemPrompt,
-          messages: currentAgent.state.messages,
-          toolCount: runtime.tools.length,
-          activeSkills: runtime.skillSelection.activeSkills,
-          explicitSkillNames: runtime.skillSelection.explicitSkillNames,
-        });
-        currentAgent.state.systemPrompt = runtime.systemPrompt;
-        currentAgent.state.tools = runtime.tools;
-        currentAgent.state.model = llmModel;
-        currentAgent.state.thinkingLevel = thinkingLevel;
-        await currentAgent.prompt(prompt);
-        assistantTelemetry.recordTranscriptSnapshot(currentAgent.state.messages);
-        emitBenchmarkTranscriptSnapshot(currentAgent.state.messages);
-        if (sessionRef.current.agent === currentAgent && sessionIdRef.current === sessionId) {
-          await sessionRef.current.flushSaves();
-        }
+        await current.prompt(prompt);
       } catch (err) {
-        if (sessionRef.current.agent === currentAgent && sessionIdRef.current === sessionId) {
+        if (sessionRef.current === current) {
           setError(err instanceof Error ? err.message : String(err));
         }
       } finally {
-        if (sessionRef.current.agent === currentAgent && sessionIdRef.current === sessionId) {
-          dashboardLaunchRef.current = undefined;
-          externalLaunchRef.current = undefined;
-          setRunStatusSnapshot(undefined);
+        if (sessionRef.current === current) {
           flushRevision();
         }
       }
     },
-    [
-      assistantTelemetry,
-      buildSkillRuntime,
-      flushRevision,
-      keepAutoScrollEnabled,
-      llmModel,
-      saveSession,
-      setRunStatusSnapshot,
-      thinkingLevel,
-    ]
+    [flushRevision, keepAutoScrollEnabled]
   );
 
   // `!command` runs in the session shell as the user, without a model call. The
   // result is appended to the transcript, so the agent sees it on the next prompt.
   const runUserShellCommand = useCallback(
     async (command: string) => {
-      const currentAgent = sessionRef.current.agent;
-      if (!currentAgent || !command || currentAgent.state.isStreaming || userShellRunning) {
+      const current = sessionRef.current;
+      if (!current.agent || !command || current.isStreaming || current.getState().shellRunning) {
         return;
-      }
-      let sessionId = sessionIdRef.current;
-      if (!sessionId) {
-        sessionId = createSessionId();
-        sessionIdRef.current = sessionId;
-        setCurrentSessionId(sessionId);
-      }
-      if (titleRef.current === 'New chat') {
-        const title = generateTitle(`! ${command.split('\n')[0]}`);
-        titleRef.current = title;
-        setCurrentTitle(title);
       }
       setInput('!');
       setError(undefined);
-      setUserShellRunning(true);
       keepAutoScrollEnabled();
       try {
-        const result = await buildWorkspaceToolkit().runShell(command);
-        if (sessionRef.current.agent !== currentAgent || sessionIdRef.current !== sessionId) {
-          return;
-        }
-        currentAgent.state.messages = [...currentAgent.state.messages, createUserShellMessage(result)];
-        await saveSession(sessionId, titleRef.current, currentAgent.state.messages);
+        await current.runUserShell(command);
       } catch (err) {
-        setError(`Shell command failed: ${err instanceof Error ? err.message : String(err)}`);
+        if (sessionRef.current === current) {
+          setError(`Shell command failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
       } finally {
-        setUserShellRunning(false);
         flushRevision();
         // Stay in the composer for the next command, unless the user moved on to another control.
         if (document.activeElement === document.body || document.activeElement === composerRef.current) {
@@ -1128,7 +800,7 @@ export function ChatApp({
         }
       }
     },
-    [buildWorkspaceToolkit, flushRevision, keepAutoScrollEnabled, saveSession, userShellRunning]
+    [flushRevision, keepAutoScrollEnabled]
   );
 
   const submitPrompt = async (event: SyntheticEvent) => {
@@ -1141,58 +813,13 @@ export function ChatApp({
     await submitPromptText(input.trim());
   };
 
-  const loadSession = useCallback(
-    async (id: string) => {
-      const stored = await repositoryRef.current!.get<StoredSession>(id);
-      if (!stored) {
-        setError('Session not found');
-        return false;
-      }
-
-      stopCurrentAgentForSessionChange();
-      dashboardLaunchRef.current = undefined;
-      externalLaunchRef.current = undefined;
-      sessionIdRef.current = id;
-      titleRef.current = stored.title;
-      setSelectedModelId(stored.modelId || undefined);
-      setSelectedThinkingLevel(parseStoredThinkingLevel(stored.thinkingLevel));
-      setChatSessionParamInLocation(id);
-      const restoredWorkspace = SessionWorkspace.restore(stored.workspace);
-      migrateLegacyJsonnetFiles(restoredWorkspace, stored.virtualJsonnetFiles);
-      migrateLegacyInvestigationReport(restoredWorkspace, stored.investigationReport);
-      replaceWorkspace(restoredWorkspace);
-      sessionRef.current.compaction = { state: isCompactionState(stored.compaction) ? stored.compaction : undefined };
-      setRunStatusSnapshot(undefined);
-      setArtifactSnapshots(stored.artifacts ?? {}, stored.artifactCounter);
-      keepAutoScrollEnabled();
-      setCurrentSessionId(id);
-      setCurrentTitle(stored.title);
-      setError(undefined);
-      setInput('');
-      setToolRuns({});
-      settleToolConfirmation(false);
-      buildAgent(stored.messages);
-      return true;
-    },
-    [
-      replaceWorkspace,
-      buildAgent,
-      keepAutoScrollEnabled,
-      setArtifactSnapshots,
-      setRunStatusSnapshot,
-      settleToolConfirmation,
-      stopCurrentAgentForSessionChange,
-      setError,
-    ]
-  );
-
   const initialLoadHandlersRef = useRef({
     attachLiveRun,
     loadSession,
     startDashboardLaunchSession,
     startExternalAssistantLaunchSession,
     startNewSession,
-    stopCurrentAgentForSessionChange,
+    detachSession,
     submitPromptText,
   });
   const initialLaunchPropsRef = useRef({
@@ -1212,7 +839,7 @@ export function ChatApp({
       startDashboardLaunchSession,
       startExternalAssistantLaunchSession,
       startNewSession,
-      stopCurrentAgentForSessionChange,
+      detachSession,
       submitPromptText,
     };
     initialLaunchPropsRef.current = {
@@ -1235,7 +862,7 @@ export function ChatApp({
     startDashboardLaunchSession,
     startExternalAssistantLaunchSession,
     startNewSession,
-    stopCurrentAgentForSessionChange,
+    detachSession,
     submitPromptText,
   ]);
 
@@ -1278,10 +905,10 @@ export function ChatApp({
         const attachedExistingChat =
           externalChatId && (await initialLoadHandlersRef.current.loadSession(externalChatId));
         if (attachedExistingChat) {
-          // loadSession() already reset externalLaunchRef to undefined; restore
-          // it just for this one follow-up turn so its context still reaches
-          // buildSkillRuntime (cleared again right after send, same as a fresh launch).
-          externalLaunchRef.current = { prompt: externalPrompt, context: externalContext, autoSend };
+          // The loaded session has no launch context; attach it just for this
+          // follow-up turn so its context still reaches the model (cleared again
+          // right after send, same as a fresh launch).
+          sessionRef.current.launch = { external: { prompt: externalPrompt, context: externalContext, autoSend } };
           setInput(externalPrompt);
         } else {
           initialLoadHandlersRef.current.startExternalAssistantLaunchSession({
@@ -1338,7 +965,7 @@ export function ChatApp({
 
     return () => {
       mounted = false;
-      initialLoadHandlersRef.current.stopCurrentAgentForSessionChange({ preserveLiveRun: true });
+      initialLoadHandlersRef.current.detachSession({ preserveLiveRun: true });
     };
   }, [initialConfigPending]);
 
@@ -1397,30 +1024,29 @@ export function ChatApp({
   };
 
   const openFullPage = useCallback(async () => {
-    const currentAgent = sessionRef.current.agent;
-    const sessionId = sessionIdRef.current;
+    const current = sessionRef.current;
     let url = `${PLUGIN_BASE_URL}/chat`;
 
-    if (currentAgent && sessionId && hasPersistableMessages(currentAgent.state.messages)) {
-      await saveSession(sessionId, titleRef.current, currentAgent.state.messages);
-      url = buildChatSessionUrl(sessionId);
-    } else if (dashboardLaunchRef.current) {
-      try {
-        const launch = dashboardLaunchRef.current;
+    try {
+      if (current.agent && hasPersistableMessages(current.messages)) {
+        await current.save();
+        url = buildChatSessionUrl(current.id);
+      } else if (current.launch.dashboard) {
+        const launch = current.launch.dashboard;
         const contextId = storeDashboardAssistantLaunch(launch);
         url = buildDashboardAssistantChatUrl(launch.action, contextId);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-        return;
       }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return;
     }
 
     allowNextLocationChangeRef.current = true;
     locationService.push(url);
-  }, [saveSession, setError]);
+  }, [setError]);
 
   const requestOpenFullPage = () => {
-    const launch = dashboardLaunchRef.current;
+    const launch = sessionRef.current.launch.dashboard;
     if (launch && input.trim() === dashboardAssistantPrompt(launch)) {
       void openFullPage();
       return;
@@ -1435,25 +1061,24 @@ export function ChatApp({
   };
 
   const dockToSidebar = useCallback(async () => {
-    const currentAgent = sessionRef.current.agent;
-    const currentSessionId = sessionIdRef.current;
+    const current = sessionRef.current;
     const targetRoute = getAssistantDockRoute() ?? '/';
     const request = { path: targetRoute };
 
     try {
-      if (currentAgent && currentSessionId) {
-        if (currentAgent.state.isStreaming) {
-          preserveCurrentRunForHandoff();
-        }
-        if (!currentAgent.state.isStreaming && hasPersistableMessages(currentAgent.state.messages)) {
-          await saveSession(currentSessionId, titleRef.current, currentAgent.state.messages);
+      if (current.agent) {
+        if (current.isStreaming) {
+          // The run continues without a view; the sidebar attaches to it by session ID.
+          storeChatRun(current);
+        } else if (hasPersistableMessages(current.messages)) {
+          await current.save();
         }
         storeAssistantSidebarDockRequest({
           ...request,
-          sessionId: currentSessionId,
+          sessionId: current.id,
         });
-      } else if (dashboardLaunchRef.current) {
-        const launch = dashboardLaunchRef.current;
+      } else if (current.launch.dashboard) {
+        const launch = current.launch.dashboard;
         const contextId = storeDashboardAssistantLaunch(launch);
         storeAssistantSidebarDockRequest({
           ...request,
@@ -1470,14 +1095,14 @@ export function ChatApp({
 
     allowNextLocationChangeRef.current = true;
     locationService.push(targetRoute);
-  }, [preserveCurrentRunForHandoff, saveSession, setError]);
+  }, [setError]);
 
   const requestDockToSidebar = () => {
     if (!canDockToSidebar || pendingToolConfirmation) {
       return;
     }
 
-    const launch = dashboardLaunchRef.current;
+    const launch = sessionRef.current.launch.dashboard;
     if (launch && input.trim() === dashboardAssistantPrompt(launch)) {
       void dockToSidebar();
       return;
@@ -1495,49 +1120,34 @@ export function ChatApp({
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.stopPropagation();
 
-      const currentAgent = sessionRef.current.agent;
-      const sessionId = sessionIdRef.current;
-      if (!currentAgent || !sessionId || currentAgent.state.isStreaming) {
+      const current = sessionRef.current;
+      if (!current.agent || current.isStreaming) {
         return;
       }
-
-      const messages = currentAgent.state.messages;
-      if (!hasPersistableMessages(messages)) {
+      if (!hasPersistableMessages(current.messages)) {
         setError('There are no chat messages to export.');
         return;
       }
 
       const exportedAt = new Date().toISOString();
-      const indexItem = sessionsRef.current.find((session) => session.id === sessionId);
-      const title = titleRef.current || indexItem?.title || 'New chat';
+      const record = current.record(current.messages, exportedAt);
+      const indexItem = sessionsRef.current.find((item) => item.id === current.id);
       const payload: ChatSessionExport = {
         kind: CHAT_SESSION_EXPORT_KIND,
         schemaVersion: CHAT_SESSION_EXPORT_SCHEMA_VERSION,
         exportedAt,
         pluginId: PLUGIN_ID,
-        session: {
-          id: sessionId,
-          title,
-          createdAt: indexItem?.createdAt ?? exportedAt,
-          updatedAt: exportedAt,
-          modelId: llmModel.id,
-          thinkingLevel,
-          messages,
-          artifacts: sessionRef.current.artifacts.snapshot(),
-          artifactCounter: sessionRef.current.artifacts.counter,
-          workspace: sessionRef.current.workspace.serialize(),
-          compaction: sessionRef.current.compaction.state,
-        },
+        session: { ...record, createdAt: indexItem?.createdAt ?? record.createdAt },
       };
 
       try {
-        downloadJsonFile(payload, chatSessionExportFilename(title));
+        downloadJsonFile(payload, chatSessionExportFilename(record.title));
         setError(undefined);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [llmModel.id, thinkingLevel, setError]
+    [setError]
   );
 
   const openImportSessionPicker = useCallback(() => {
@@ -1562,56 +1172,23 @@ export function ChatApp({
         return;
       }
 
-      if (sessionRef.current.agent?.state.isStreaming) {
+      if (sessionRef.current.isStreaming) {
         setError('Cannot import a session while the assistant is streaming.');
         return;
       }
 
       try {
         const imported = parseChatSessionExport(JSON.parse(await file.text()));
-        const id = createSessionId();
         const title = imported.title || importTitleFromFilename(file.name) || 'Imported chat';
-
-        stopCurrentAgentForSessionChange();
-        dashboardLaunchRef.current = undefined;
-        sessionIdRef.current = id;
-        titleRef.current = title;
-        setSelectedModelId(imported.modelId || undefined);
-        setSelectedThinkingLevel(parseStoredThinkingLevel(imported.thinkingLevel));
-        const importedWorkspace = SessionWorkspace.restore(imported.workspace, { trusted: false });
-        migrateLegacyJsonnetFiles(importedWorkspace, imported.virtualJsonnetFiles);
-        migrateLegacyInvestigationReport(importedWorkspace, imported.investigationReport);
-        replaceWorkspace(importedWorkspace);
-        sessionRef.current.compaction = {
-          state: isCompactionState(imported.compaction) ? imported.compaction : undefined,
-        };
-        setRunStatusSnapshot(undefined);
-        setArtifactSnapshots(imported.artifacts ?? {}, imported.artifactCounter);
-        keepAutoScrollEnabled();
-        setCurrentSessionId(id);
-        setCurrentTitle(title);
-        setError(undefined);
-        setInput('');
-        setToolRuns({});
-        settleToolConfirmation(false);
-        buildAgent(imported.messages);
-        await saveSession(id, title, imported.messages);
+        const next = AssistantSession.restore(imported, { id: createSessionId(), title, trusted: false });
+        activateSession(next);
+        await next.save();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setError(`Could not import chat session: ${message}`);
       }
     },
-    [
-      replaceWorkspace,
-      buildAgent,
-      keepAutoScrollEnabled,
-      saveSession,
-      setArtifactSnapshots,
-      setRunStatusSnapshot,
-      settleToolConfirmation,
-      stopCurrentAgentForSessionChange,
-      setError,
-    ]
+    [activateSession, setError]
   );
 
   const agentMessages = agent?.state.messages;
@@ -1629,10 +1206,12 @@ export function ChatApp({
   const visibleMessages = agent
     ? [
         ...agent.state.messages
+          .map((message, index) => ({ message, index, isStreaming: false }))
           // Results render with their tool call in the assistant message.
-          .filter((message) => message.role !== 'toolResult' || toolResults.get(message.toolCallId) !== message)
-          .map((message) => ({ message, isStreaming: false })),
-        ...(agent.state.streamingMessage ? [{ message: agent.state.streamingMessage, isStreaming: true }] : []),
+          .filter(({ message }) => message.role !== 'toolResult' || toolResults.get(message.toolCallId) !== message),
+        ...(agent.state.streamingMessage
+          ? [{ message: agent.state.streamingMessage, index: agent.state.messages.length, isStreaming: true }]
+          : []),
       ]
     : [];
   const pendingApprovalToolName = pendingToolConfirmation?.toolName;
@@ -1855,10 +1434,7 @@ export function ChatApp({
                 value: model.id,
               }))}
               value={activeModel.id}
-              onChange={(option) => {
-                setSelectedModelId(option.value);
-                setSelectedThinkingLevel(undefined);
-              }}
+              onChange={(option) => sessionRef.current.setModelSettings({ modelId: option.value })}
             />
           </Field>
         )}
@@ -1877,7 +1453,9 @@ export function ChatApp({
               id={thinkingLevelSelectId}
               options={thinkingLevelOptions}
               value={thinkingLevel}
-              onChange={(option) => setSelectedThinkingLevel(option.value)}
+              onChange={(option) =>
+                sessionRef.current.setModelSettings({ modelId: sessionState.modelId, thinkingLevel: option.value })
+              }
             />
           </Field>
         )}
@@ -1949,24 +1527,22 @@ export function ChatApp({
           <div className={styles.titleGroup}>
             <h2 className={styles.title}>{currentTitle}</h2>
             <Badge text={isStreaming ? streamingBadgeText : 'Ready'} color={isStreaming ? 'blue' : 'green'} />
-            {saveState && saveState.id === currentSessionId && (
+            {saveState && (
               <Badge
                 text={saveState.status === 'saving' ? 'Saving…' : saveState.status === 'saved' ? 'Saved' : 'Not saved'}
                 color={saveState.status === 'error' ? 'red' : 'blue'}
               />
             )}
-            {saveState?.status === 'error' && saveState.id === currentSessionId && (
+            {saveState?.status === 'error' && (
               <Button
                 size="sm"
                 variant="secondary"
                 disabled={isBusy}
                 onClick={() => {
-                  const currentAgent = sessionRef.current.agent;
-                  if (currentAgent && currentSessionId) {
-                    void saveSession(currentSessionId, titleRef.current, currentAgent.state.messages)
-                      .then(() => setError(undefined))
-                      .catch(showLoadError);
-                  }
+                  void sessionRef.current
+                    .save()
+                    .then(() => setError(undefined))
+                    .catch(showLoadError);
                 }}
               >
                 Retry save
@@ -2083,9 +1659,16 @@ export function ChatApp({
             Configure the app plugin with an OpenAI-compatible API key and at least one model before sending prompts.
           </Alert>
         )}
-        {error && (
-          <Alert severity="error" title="Assistant error" onRemove={() => setError(undefined)}>
-            {error}
+        {displayedError && (
+          <Alert
+            severity="error"
+            title="Assistant error"
+            onRemove={() => {
+              setError(undefined);
+              setDismissedSave(saveState);
+            }}
+          >
+            {displayedError}
           </Alert>
         )}
 
@@ -2120,9 +1703,15 @@ export function ChatApp({
               />
             ) : (
               <ToolTranscriptContext.Provider value={toolTranscript}>
-                <Transcript isStreaming={isStreaming} messages={visibleMessages} toolResults={toolResults} />
+                <Transcript
+                  compaction={sessionState.compaction}
+                  isStreaming={isStreaming}
+                  messages={visibleMessages}
+                  toolResults={toolResults}
+                />
               </ToolTranscriptContext.Provider>
             )}
+            {sessionState.truncation && <ContextTruncatedNotice event={sessionState.truncation} />}
             {isStreaming && (
               <div className={styles.streaming} role="status" aria-live="polite">
                 <Spinner />
@@ -2345,17 +1934,23 @@ function ReportPanel({
   );
 }
 
-type VisibleMessage = { message: AgentMessage; isStreaming: boolean };
+/** `index` is the message's position in the agent transcript. */
+type VisibleMessage = { message: AgentMessage; index: number; isStreaming: boolean };
 
-/** Renders the messages, folding the steps of finished turns behind their summary line. */
+/**
+ * Renders the messages, folding the steps of finished turns behind their summary line.
+ * With a compaction summary, a divider precedes the first turn the model still sees verbatim.
+ */
 function Transcript({
   messages,
   toolResults,
   isStreaming,
+  compaction,
 }: {
   messages: VisibleMessage[];
   toolResults: ReadonlyMap<string, ToolResultMessage>;
   isStreaming: boolean;
+  compaction?: CompactionState;
 }) {
   const turnSteps = finishedTurnSteps(
     messages.map(({ message }) => message),
@@ -2373,10 +1968,14 @@ function Transcript({
       continuedInTurn={message.role === 'assistant' && messages[index + 1]?.message.role === 'assistant'}
     />
   );
+  const dividerAt = compaction ? compactionDividerIndex(messages, compaction.coveredMessages) : -1;
   const views: React.ReactNode[] = [];
   let index = 0;
   while (index < messages.length) {
     const steps = stepsByStart.get(index);
+    if (dividerAt >= index && dividerAt <= (steps?.end ?? index)) {
+      views.push(<CompactionDivider compaction={compaction!} key="compaction" />);
+    }
     if (!steps) {
       views.push(renderMessage(messages[index], index));
       index += 1;
@@ -2391,6 +1990,17 @@ function Transcript({
     index = steps.end + 1;
   }
   return <>{views}</>;
+}
+
+/**
+ * Where the verbatim part of the model's context begins: the first turn after
+ * the summarized messages, or the first unsummarized message when the cut is in the latest turn.
+ */
+function compactionDividerIndex(messages: VisibleMessage[], coveredMessages: number) {
+  const turnStart = messages.findIndex(
+    ({ message, index }) => index >= coveredMessages && (message.role === 'user' || message.role === 'userShell')
+  );
+  return turnStart >= 0 ? turnStart : messages.findIndex(({ index }) => index >= coveredMessages);
 }
 
 /** The tool-calling steps of a finished turn, folded into one line above its answer. */
@@ -2602,88 +2212,6 @@ function setChatSessionParamInLocation(sessionId: string) {
   }
 }
 
-function createSessionId() {
-  const cryptoApi = globalThis.crypto;
-  if (typeof cryptoApi?.randomUUID === 'function') {
-    return cryptoApi.randomUUID();
-  }
-
-  if (typeof cryptoApi?.getRandomValues === 'function') {
-    const bytes = cryptoApi.getRandomValues(new Uint8Array(16));
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'))
-      .join('')
-      .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5');
-  }
-
-  return `session-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function reduceToolRuns(state: ToolRunState, event: AgentEvent): ToolRunState {
-  if (event.type === 'tool_execution_start') {
-    return {
-      ...state,
-      [event.toolCallId]: {
-        id: event.toolCallId,
-        name: event.toolName,
-        args: event.args,
-        status: 'running',
-        startedAt: Date.now(),
-        updatedAt: Date.now(),
-      },
-    };
-  }
-
-  if (event.type === 'tool_execution_update') {
-    const existing = state[event.toolCallId];
-    return {
-      ...state,
-      [event.toolCallId]: {
-        ...existing,
-        id: event.toolCallId,
-        name: event.toolName,
-        args: event.args,
-        status: toolRunStatusFromPartialResult(event.partialResult),
-        partialResult: event.partialResult,
-        updatedAt: Date.now(),
-      },
-    };
-  }
-
-  if (event.type === 'tool_execution_end') {
-    const existing = state[event.toolCallId];
-    return {
-      ...state,
-      [event.toolCallId]: {
-        ...existing,
-        id: event.toolCallId,
-        name: event.toolName,
-        args: existing?.args,
-        status: event.isError ? 'failed' : 'completed',
-        result: event.result,
-        isError: event.isError,
-        updatedAt: Date.now(),
-      },
-    };
-  }
-
-  return state;
-}
-
-function toolRunStatusFromPartialResult(partialResult: { details?: unknown } | undefined): ToolRunView['status'] {
-  const details = partialResult?.details;
-  if (!details || typeof details !== 'object') {
-    return 'running';
-  }
-  const status = (details as Record<string, unknown>).status;
-  if (status === 'completed' || status === 'failed') {
-    return status;
-  }
-  return 'running';
-}
-
 function shouldBatchRevision(event: AgentEvent) {
   if (event.type === 'tool_execution_update') {
     return true;
@@ -2700,322 +2228,6 @@ function isStreamingMessageMilestone(event: unknown) {
   }
   const type = (event as Record<string, unknown>).type;
   return type === 'thinking_start' || type === 'text_start' || type === 'toolcall_start' || type === 'toolcall_end';
-}
-
-function emitBenchmarkEvent(event: AgentEvent) {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  recordSerializedBenchmarkEvent(serializeBenchmarkEvent(event));
-}
-
-function recordSerializedBenchmarkEvent(serialized: BenchmarkAgentEvent) {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  let recorded = false;
-
-  try {
-    if (typeof window.__PI_AGENT_BENCHMARK_RECORD_EVENT__ === 'function') {
-      window.__PI_AGENT_BENCHMARK_RECORD_EVENT__(serialized);
-      recorded = true;
-    }
-  } catch {
-    // Benchmark instrumentation must not affect chat behavior.
-  }
-
-  try {
-    if (!recorded && Array.isArray(window.__PI_AGENT_BENCHMARK_EVENTS__)) {
-      window.__PI_AGENT_BENCHMARK_EVENTS__.push(serialized);
-    } else if (!recorded && isBenchmarkCaptureEnabled()) {
-      window.__PI_AGENT_BENCHMARK_EVENTS__ = [...(window.__PI_AGENT_BENCHMARK_EVENTS__ ?? []), serialized];
-    }
-
-    if (isBenchmarkCaptureEnabled()) {
-      console.info(`${BENCHMARK_EVENT_CONSOLE_PREFIX}${JSON.stringify(serialized)}`);
-    }
-  } catch {
-    // Benchmark instrumentation must not affect chat behavior.
-  }
-}
-
-function emitBenchmarkTranscriptSnapshot(messages: AgentMessage[]) {
-  if (typeof window === 'undefined' || !isBenchmarkCaptureEnabled()) {
-    return;
-  }
-
-  if ((window.__PI_AGENT_BENCHMARK_EVENTS__?.length ?? 0) > 0) {
-    return;
-  }
-
-  const timestamp = Date.now();
-  const toolCalls = benchmarkToolCallsFromTranscript(messages);
-  for (const message of messages) {
-    const record = message as unknown as Record<string, unknown>;
-    if (record?.role !== 'toolResult') {
-      continue;
-    }
-    const toolCallId = typeof record.toolCallId === 'string' ? record.toolCallId : undefined;
-    const toolCall = toolCallId ? toolCalls.get(toolCallId) : undefined;
-    const toolName = typeof record.toolName === 'string' ? record.toolName : toolCall?.name;
-    if (!toolCallId || !toolName) {
-      continue;
-    }
-    recordSerializedBenchmarkEvent({
-      type: 'tool_execution_end',
-      timestamp,
-      toolCallId,
-      toolName,
-      args: sanitizeBenchmarkValue(toolCall?.args),
-      result: sanitizeBenchmarkValue({
-        content: record.content,
-        details: record.details,
-        isError: record.isError,
-      }),
-      isError: record.isError === true,
-    });
-  }
-
-  const finalAssistantMessage = [...messages]
-    .reverse()
-    .find((message) => (message as unknown as Record<string, unknown>)?.role === 'assistant');
-  if (finalAssistantMessage) {
-    recordSerializedBenchmarkEvent({
-      type: 'message_end',
-      timestamp,
-      message: summarizeBenchmarkMessage(finalAssistantMessage),
-    });
-  }
-  recordSerializedBenchmarkEvent({
-    type: 'agent_end',
-    timestamp,
-    messageCount: messages.length,
-    message: finalAssistantMessage ? summarizeBenchmarkMessage(finalAssistantMessage) : undefined,
-  });
-}
-
-function benchmarkToolCallsFromTranscript(messages: AgentMessage[]) {
-  const toolCalls = new Map<string, { name: string; args: unknown }>();
-  for (const message of messages) {
-    const record = message as unknown as Record<string, unknown>;
-    if (record?.role !== 'assistant' || !Array.isArray(record.content)) {
-      continue;
-    }
-    for (const block of record.content) {
-      if (!block || typeof block !== 'object') {
-        continue;
-      }
-      const content = block as Record<string, unknown>;
-      if (content.type !== 'toolCall' || typeof content.id !== 'string' || typeof content.name !== 'string') {
-        continue;
-      }
-      toolCalls.set(content.id, { name: content.name, args: content.arguments });
-    }
-  }
-  return toolCalls;
-}
-
-function isBenchmarkCaptureEnabled() {
-  if (window.__PI_AGENT_BENCHMARK_CAPTURE__ === true) {
-    return true;
-  }
-
-  try {
-    return new URLSearchParams(window.location.search).get('piAgentBenchmark') === '1';
-  } catch {
-    return false;
-  }
-}
-
-function serializeBenchmarkEvent(event: AgentEvent): BenchmarkAgentEvent {
-  const timestamp = Date.now();
-
-  if (event.type === 'agent_end') {
-    const finalAssistantMessage = [...event.messages]
-      .reverse()
-      .find((message) => (message as unknown as Record<string, unknown>)?.role === 'assistant');
-    return {
-      type: event.type,
-      timestamp,
-      messageCount: event.messages.length,
-      message: finalAssistantMessage ? summarizeBenchmarkMessage(finalAssistantMessage) : undefined,
-    };
-  }
-
-  if (event.type === 'message_update') {
-    return {
-      type: event.type,
-      timestamp,
-      message: summarizeBenchmarkMessage(event.message),
-      assistantMessageEvent: sanitizeBenchmarkValue(event.assistantMessageEvent),
-    };
-  }
-
-  if (event.type === 'message_start' || event.type === 'message_end') {
-    return {
-      type: event.type,
-      timestamp,
-      message: summarizeBenchmarkMessage(event.message),
-    };
-  }
-
-  if (event.type === 'turn_end') {
-    return {
-      type: event.type,
-      timestamp,
-      message: summarizeBenchmarkMessage(event.message),
-      toolResultCount: event.toolResults.length,
-    };
-  }
-
-  if (event.type === 'tool_execution_start') {
-    return {
-      type: event.type,
-      timestamp,
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      args: sanitizeBenchmarkValue(event.args),
-    };
-  }
-
-  if (event.type === 'tool_execution_update') {
-    return {
-      type: event.type,
-      timestamp,
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      args: sanitizeBenchmarkValue(event.args),
-      partialResult: sanitizeBenchmarkValue(event.partialResult),
-    };
-  }
-
-  if (event.type === 'tool_execution_end') {
-    return {
-      type: event.type,
-      timestamp,
-      toolCallId: event.toolCallId,
-      toolName: event.toolName,
-      result: sanitizeBenchmarkValue(event.result),
-      isError: event.isError,
-    };
-  }
-
-  return { type: event.type, timestamp };
-}
-
-function summarizeBenchmarkMessage(message: AgentMessage) {
-  if (!message || typeof message !== 'object') {
-    return undefined;
-  }
-
-  const record = message as unknown as Record<string, unknown>;
-  return {
-    role: record.role,
-    stopReason: record.stopReason,
-    errorMessage: record.errorMessage,
-    content: summarizeBenchmarkContent(record.content),
-    usage: summarizeBenchmarkUsage(record.usage),
-  };
-}
-
-function summarizeBenchmarkUsage(usage: unknown) {
-  if (!usage || typeof usage !== 'object') {
-    return undefined;
-  }
-  const record = usage as Record<string, unknown>;
-  return {
-    input: numberBenchmarkField(record.input),
-    output: numberBenchmarkField(record.output),
-    cacheRead: numberBenchmarkField(record.cacheRead),
-    cacheWrite: numberBenchmarkField(record.cacheWrite),
-    totalTokens: numberBenchmarkField(record.totalTokens),
-    cost: record.cost,
-  };
-}
-
-function numberBenchmarkField(value: unknown) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
-}
-
-function sanitizeBenchmarkValue(value: unknown, seen = new WeakSet<object>(), depth = 0): unknown {
-  if (value === null || value === undefined) {
-    return value;
-  }
-
-  if (typeof value === 'string') {
-    return truncateBenchmarkText(value);
-  }
-
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return Number.isFinite(value as number) || typeof value === 'boolean' ? value : String(value);
-  }
-
-  if (typeof value === 'bigint') {
-    return value.toString();
-  }
-
-  if (typeof value !== 'object') {
-    return String(value);
-  }
-
-  if (seen.has(value)) {
-    return '[Circular]';
-  }
-
-  if (depth >= 8) {
-    return '[MaxDepth]';
-  }
-
-  seen.add(value);
-
-  if (Array.isArray(value)) {
-    return value.slice(0, 100).map((item) => sanitizeBenchmarkValue(item, seen, depth + 1));
-  }
-
-  const output: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(value).slice(0, 100)) {
-    output[key] = sanitizeBenchmarkValue(entry, seen, depth + 1);
-  }
-  return output;
-}
-
-function summarizeBenchmarkContent(content: unknown) {
-  if (typeof content === 'string') {
-    return truncateBenchmarkText(content);
-  }
-  if (!Array.isArray(content)) {
-    return undefined;
-  }
-
-  return content.map((block) => {
-    if (!block || typeof block !== 'object') {
-      return block;
-    }
-
-    const record = block as Record<string, unknown>;
-    if (record.type === 'text') {
-      return { type: record.type, text: truncateBenchmarkText(record.text) };
-    }
-    if (record.type === 'toolCall') {
-      return {
-        type: record.type,
-        id: record.id,
-        name: record.name,
-        arguments: sanitizeBenchmarkValue(record.arguments),
-      };
-    }
-
-    return { type: record.type };
-  });
-}
-
-function truncateBenchmarkText(value: unknown) {
-  if (typeof value !== 'string') {
-    return value;
-  }
-  return value.length > 2000 ? `${value.slice(0, 2000)}...` : value;
 }
 
 type ScheduledFrame = { kind: 'raf'; id: number } | { kind: 'timeout'; id: ReturnType<typeof setTimeout> };
@@ -3112,11 +2324,6 @@ function isNearBottom(element: HTMLElement) {
   return element.scrollHeight - element.scrollTop - element.clientHeight < 80;
 }
 
-function generateTitle(prompt: string): string {
-  const normalized = prompt.replace(/\s+/g, ' ').trim();
-  return normalized.length > 56 ? `${normalized.slice(0, 53)}...` : normalized;
-}
-
 function formatDate(value: string): string {
   return new Date(value).toLocaleString(undefined, {
     month: 'short',
@@ -3155,163 +2362,6 @@ function downloadJsonFile(data: ChatSessionExport, filename: string) {
 
 function stopDownloadClickPropagation(event: MouseEvent) {
   event.stopPropagation();
-}
-
-function chatSessionExportFilename(title: string) {
-  const safeTitle = safeFilenamePart(title) || 'assistant-chat-session';
-  return `${safeTitle}.json`;
-}
-
-function safeFilenamePart(value: string) {
-  return value
-    .trim()
-    .replace(/[^a-z0-9]+/gi, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 64)
-    .toLowerCase();
-}
-
-function importTitleFromFilename(filename: string) {
-  const withoutExtension = filename.replace(/\.json$/i, '').replace(/[-_]+/g, ' ');
-  return normalizeSessionTitle(withoutExtension);
-}
-
-function parseChatSessionExport(value: unknown): StoredSession {
-  if (!isRecord(value)) {
-    throw new Error('Import file must contain a JSON object.');
-  }
-  if (value.kind !== CHAT_SESSION_EXPORT_KIND && !LEGACY_CHAT_SESSION_EXPORT_KINDS.includes(String(value.kind))) {
-    throw new Error('Import file is not an Assistant chat session export.');
-  }
-  if (value.schemaVersion !== CHAT_SESSION_EXPORT_SCHEMA_VERSION) {
-    throw new Error(`Unsupported chat session export version: ${String(value.schemaVersion)}`);
-  }
-  if (!isRecord(value.session)) {
-    throw new Error('Import file is missing a session object.');
-  }
-
-  const rawMessages = value.session.messages;
-  if (!Array.isArray(rawMessages) || !rawMessages.every(isAgentMessageLike)) {
-    throw new Error('Import file session.messages must be an array of chat messages.');
-  }
-
-  const messages = rawMessages as AgentMessage[];
-  if (!hasPersistableMessages(messages)) {
-    throw new Error('Import file does not contain any user or assistant messages.');
-  }
-
-  return {
-    id: typeof value.session.id === 'string' ? value.session.id : '',
-    title: normalizeSessionTitle(value.session.title),
-    createdAt: normalizeDateString(value.session.createdAt),
-    updatedAt: normalizeDateString(value.session.updatedAt),
-    modelId: typeof value.session.modelId === 'string' ? value.session.modelId : undefined,
-    thinkingLevel: parseStoredThinkingLevel(value.session.thinkingLevel),
-    messages,
-    virtualJsonnetFiles: isRecord(value.session.virtualJsonnetFiles) ? value.session.virtualJsonnetFiles : undefined,
-    investigationReport: value.session.investigationReport,
-    artifacts: parseArtifacts(value.session.artifacts),
-    artifactCounter:
-      typeof value.session.artifactCounter === 'number' && Number.isFinite(value.session.artifactCounter)
-        ? Math.max(0, Math.floor(value.session.artifactCounter))
-        : undefined,
-    workspace: isRecord(value.session.workspace) ? (value.session.workspace as PersistedWorkspace) : undefined,
-    compaction: isCompactionState(value.session.compaction) ? value.session.compaction : undefined,
-  };
-}
-
-function parseArtifacts(value: unknown): Record<string, Artifact> | undefined {
-  if (value === null || value === undefined) {
-    return undefined;
-  }
-  if (!isRecord(value)) {
-    throw new Error('Import file session.artifacts must be an object when present.');
-  }
-
-  const artifacts: Record<string, Artifact> = {};
-  for (const [key, artifact] of Object.entries(value)) {
-    if (!isRecord(artifact)) {
-      throw new Error(`Imported artifact ${key} must be an object.`);
-    }
-
-    const id = typeof artifact.id === 'string' && artifact.id ? artifact.id : key;
-    const kind = parseArtifactKind(artifact.kind);
-    const title = typeof artifact.title === 'string' && artifact.title ? artifact.title : id;
-    const toolName = typeof artifact.toolName === 'string' && artifact.toolName ? artifact.toolName : 'tool';
-    const summary = typeof artifact.summary === 'string' ? artifact.summary : `${toolName} result stored as artifact.`;
-
-    artifacts[id] = {
-      id,
-      kind,
-      title,
-      toolName,
-      createdAt: normalizeDateString(artifact.createdAt),
-      bytes: typeof artifact.bytes === 'number' && Number.isFinite(artifact.bytes) ? artifact.bytes : 0,
-      summary,
-      data: artifact.data,
-      preview: parseArtifactPreview(artifact.preview),
-      mimeType: typeof artifact.mimeType === 'string' ? artifact.mimeType : undefined,
-      toolDetails: artifact.toolDetails,
-    };
-  }
-
-  return compactArtifacts(artifacts);
-}
-
-function parseArtifactKind(value: unknown): Artifact['kind'] {
-  return value === 'json' || value === 'table' || value === 'dashboard' || value === 'image' || value === 'text'
-    ? value
-    : 'json';
-}
-
-function parseArtifactPreview(value: unknown): Artifact['preview'] {
-  if (!isRecord(value)) {
-    return undefined;
-  }
-  if (value.type === 'text' && typeof value.text === 'string') {
-    return {
-      type: 'text',
-      text: value.text,
-      truncated: value.truncated === true,
-    };
-  }
-  if (value.type === 'json') {
-    return {
-      type: 'json',
-      data: value.data,
-      truncated: value.truncated === true,
-    };
-  }
-  if (value.type === 'image' && typeof value.mimeType === 'string' && typeof value.data === 'string') {
-    return {
-      type: 'image',
-      mimeType: value.mimeType,
-      data: value.data,
-    };
-  }
-  return undefined;
-}
-
-function isAgentMessageLike(value: unknown): value is AgentMessage {
-  return isRecord(value) && typeof value.role === 'string';
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function parseStoredThinkingLevel(value: unknown): PiAppThinkingLevel | undefined {
-  return value === 'off' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh'
-    ? value
-    : undefined;
-}
-
-function normalizeSessionTitle(value: unknown) {
-  return typeof value === 'string' ? generateTitle(value) : '';
-}
-
-function normalizeDateString(value: unknown) {
-  return typeof value === 'string' && value.trim() ? value : new Date().toISOString();
 }
 
 const getStyles = (theme: GrafanaTheme2) => ({
