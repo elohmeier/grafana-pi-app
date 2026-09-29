@@ -2,6 +2,7 @@ import { EvidenceView, evidencePresentations } from './session/EvidenceView';
 import React, { useMemo, useState } from 'react';
 import { css, cx, keyframes } from '@emotion/css';
 import type { AgentToolResult } from '@earendil-works/pi-agent-core';
+import type { ToolResultMessage } from '@earendil-works/pi-ai';
 import { renderMarkdown, type GrafanaTheme2, type IconName } from '@grafana/data';
 import { Badge, Icon, LinkButton, Spinner, type BadgeColor, useStyles2 } from '@grafana/ui';
 import { structuredPatch } from 'diff';
@@ -35,6 +36,22 @@ export type DashboardAction = {
 
 export type DashboardOpenHandler = (action: DashboardAction) => void;
 
+/** Tool results and in-flight runs, keyed by tool call ID, so calls render with their output in place. */
+export type ToolTranscript = {
+  results: ReadonlyMap<string, ToolResultMessage>;
+  runs: Readonly<Record<string, ToolRunView>>;
+};
+
+export const ToolTranscriptContext = React.createContext<ToolTranscript | undefined>(undefined);
+
+type ToolEntryResult = {
+  content: unknown;
+  details: unknown;
+  isError?: boolean;
+};
+
+type ToolEntryState = 'preparing' | 'running' | 'done' | 'pending';
+
 export function ContentBlocks({
   content,
   isStreaming = false,
@@ -53,9 +70,37 @@ export function ContentBlocks({
     return <pre className={styles.toolCallJson}>{formatJson(content)}</pre>;
   }
 
+  // Consecutive tool calls share one terminal surface.
+  const groups: Array<{ index: number; blocks: unknown[] }> = [];
+  content.forEach((block, index) => {
+    const previous = groups[groups.length - 1];
+    if (isToolCallBlock(block) && previous && isToolCallBlock(previous.blocks[0])) {
+      previous.blocks.push(block);
+    } else {
+      groups.push({ index, blocks: [block] });
+    }
+  });
+
   return (
     <>
-      {content.map((block, index) => {
+      {groups.map(({ index, blocks }) => {
+        const block = blocks[0];
+        if (isToolCallBlock(block)) {
+          return (
+            <Terminal key={index}>
+              {(blocks as Array<Record<string, any>>).map((call, offset) => (
+                <ToolCallEntry
+                  key={offset}
+                  id={typeof call.id === 'string' ? call.id : undefined}
+                  name={call.name}
+                  args={call.arguments}
+                  partialJson={typeof call.partialJson === 'string' ? call.partialJson : undefined}
+                  isStreaming={isStreaming}
+                />
+              ))}
+            </Terminal>
+          );
+        }
         if (!block || typeof block !== 'object') {
           return (
             <pre className={styles.toolCallJson} key={index}>
@@ -79,17 +124,6 @@ export function ContentBlocks({
             </details>
           );
         }
-        if (typedBlock.type === 'toolCall' && typeof typedBlock.name === 'string') {
-          return (
-            <ToolCallBlock
-              key={index}
-              name={typedBlock.name}
-              args={typedBlock.arguments}
-              partialJson={typeof typedBlock.partialJson === 'string' ? typedBlock.partialJson : undefined}
-              isStreaming={isStreaming}
-            />
-          );
-        }
         if (typedBlock.type === 'image') {
           return <img key={index} alt="Tool result" src={`data:${typedBlock.mimeType};base64,${typedBlock.data}`} />;
         }
@@ -101,6 +135,10 @@ export function ContentBlocks({
       })}
     </>
   );
+}
+
+function isToolCallBlock(block: unknown): block is Record<string, any> {
+  return isRecord(block) && block.type === 'toolCall' && typeof block.name === 'string';
 }
 
 export function ToolResultMessageBody({
@@ -117,6 +155,16 @@ export function ToolResultMessageBody({
   onOpenDashboard?: DashboardOpenHandler;
 }) {
   const styles = useStyles2(getToolStyles);
+
+  // Session filesystem results carry their call's command or path, so they render as a terminal entry of their own.
+  if (toolName && WORKSPACE_TOOL_NAMES.has(toolName) && isRecord(details)) {
+    return (
+      <Terminal>
+        <ToolEntry name={toolName} args={details} state="done" result={{ content, details, isError }} />
+      </Terminal>
+    );
+  }
+
   const artifactResult = isError ? undefined : asArtifactResult(details);
   const showArtifactCard = Boolean(artifactResult && !isArtifactReadResult(toolName, details));
   const structuredResult = isError ? undefined : renderStructuredToolResult(toolName, details, content);
@@ -143,33 +191,409 @@ export function ToolResultMessageBody({
   );
 }
 
-export function ToolActivityPanel({ runs, elapsed }: { runs: ToolRunView[]; elapsed?: string }) {
+/** A user `!command`: the same terminal entry as an agent bash call, with the user's prompt. */
+export function UserShellEntry({ result }: { result: unknown }) {
+  return (
+    <Terminal>
+      <ToolEntry name="bash" args={result} state="done" result={{ content: [], details: result }} prompt="!" />
+    </Terminal>
+  );
+}
+
+function Terminal({ children }: { children: React.ReactNode }) {
   const styles = useStyles2(getToolStyles);
-  if (runs.length === 0) {
-    return null;
+  return <div className={styles.terminal}>{children}</div>;
+}
+
+function ToolCallEntry({
+  id,
+  name,
+  args,
+  partialJson,
+  isStreaming,
+}: {
+  id?: string;
+  name: string;
+  args: unknown;
+  partialJson?: string;
+  isStreaming: boolean;
+}) {
+  const transcript = React.useContext(ToolTranscriptContext);
+  const message = id ? transcript?.results.get(id) : undefined;
+  const run = id ? transcript?.runs[id] : undefined;
+  const result: ToolEntryResult | undefined = message
+    ? { content: message.content, details: message.details, isError: message.isError }
+    : run?.result
+      ? { content: run.result.content, details: run.result.details, isError: run.isError }
+      : undefined;
+  const state: ToolEntryState = result
+    ? 'done'
+    : run?.status === 'running'
+      ? 'running'
+      : isStreaming
+        ? 'preparing'
+        : 'pending';
+
+  if (!WORKSPACE_TOOL_NAMES.has(name)) {
+    return <LegacyToolEntry name={name} args={args} partialJson={partialJson} state={state} result={result} />;
   }
+  return <ToolEntry name={name} args={isRecord(args) ? args : {}} state={state} result={result} />;
+}
+
+function ToolEntry({
+  name,
+  args,
+  state,
+  result,
+  prompt = '$',
+}: {
+  name: string;
+  args: unknown;
+  state: ToolEntryState;
+  result?: ToolEntryResult;
+  prompt?: string;
+}) {
+  const record = isRecord(args) ? args : {};
+  const details = isRecord(result?.details) ? result.details : undefined;
+  const error = result?.isError ? extractToolError(name, result.details, result.content).message : undefined;
+
+  switch (name) {
+    case 'bash':
+      return <BashEntry args={record} details={details} error={error} prompt={prompt} result={result} state={state} />;
+    case 'read':
+      return <ReadEntry args={record} details={details} error={error} result={result} state={state} />;
+    case 'write':
+    case 'edit':
+      return <MutationEntry args={record} details={details} error={error} name={name} state={state} />;
+    default:
+      return null;
+  }
+}
+
+function BashEntry({
+  args,
+  details,
+  error,
+  prompt,
+  result,
+  state,
+}: {
+  args: Record<string, unknown>;
+  details?: Record<string, unknown>;
+  error?: string;
+  prompt: string;
+  result?: ToolEntryResult;
+  state: ToolEntryState;
+}) {
+  const styles = useStyles2(getToolStyles);
+  const bash = details && !error ? workspaceBashResultFromRecord(details) : undefined;
+  const command = bash?.command || stringField(args, 'command') || '';
+  const cwd = bash?.cwd ?? stringField(args, 'cwd');
+  const failed = Boolean(error || bash?.timedOut || (bash?.exitCode !== undefined && bash.exitCode !== 0));
+  const status = bash?.timedOut ? 'timed out' : bash?.exitCode ? `exit ${bash.exitCode}` : error ? 'error' : undefined;
+  // Commands such as `grafana-dashboard screenshot` attach images after the text block.
+  const images = Array.isArray(result?.content)
+    ? result.content.filter((block) => isRecord(block) && block.type === 'image')
+    : [];
 
   return (
-    <section className={styles.activity} aria-label="Tool activity">
-      <div className={styles.activityTitle}>
-        <span className={styles.activityTitleLabel}>
-          <Spinner size="sm" />
-          <span>Tool activity</span>
-        </span>
-        {elapsed && <span className={styles.activityElapsed}>{elapsed}</span>}
-      </div>
-      <div className={styles.activityList}>
-        {runs.map((run) => (
-          <div className={styles.activityItem} key={run.id}>
-            <ToolHeader name={run.name} status={run.status} compact />
-            {renderStructuredToolCall(run.name, run.args, undefined, run.status === 'running') ?? (
-              <pre className={styles.toolCallJson}>{formatJson(run.args)}</pre>
-            )}
-            {run.partialResult && <ContentBlocks content={run.partialResult.content} isStreaming />}
-          </div>
-        ))}
-      </div>
-    </section>
+    <div className={styles.terminalEntry}>
+      <PromptLine
+        cwd={cwd}
+        failed={failed}
+        meta={[status, formatDurationMs(bash?.durationMs)].filter(Boolean).join(' · ') || undefined}
+        prompt={prompt}
+        state={state}
+      >
+        <BashCommand command={command} />
+      </PromptLine>
+      {error && <TerminalOutput error text={error} />}
+      {bash?.stdout && <TerminalOutput text={bash.stdout} truncated={bash.stdoutTruncated} />}
+      {bash?.stderr && <TerminalOutput error text={bash.stderr} truncated={bash.stderrTruncated} />}
+      {bash?.discardedChanges && (
+        <div className={styles.terminalError}>discarded uncommitted changes: {bash.discardedChanges}</div>
+      )}
+      {bash && bash.changes.length > 0 && <TerminalFileChanges changes={bash.changes} />}
+      {(evidencePresentations(details?.presentations).length > 0 || images.length > 0) && (
+        <div className={styles.terminalRich}>
+          {evidencePresentations(details?.presentations).map((evidence, i) => (
+            <EvidenceView key={i} evidence={evidence} />
+          ))}
+          {images.length > 0 && <ContentBlocks content={images} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReadEntry({
+  args,
+  details,
+  error,
+  result,
+  state,
+}: {
+  args: Record<string, unknown>;
+  details?: Record<string, unknown>;
+  error?: string;
+  result?: ToolEntryResult;
+  state: ToolEntryState;
+}) {
+  const styles = useStyles2(getToolStyles);
+  const path = stringField(details, 'path') ?? stringField(args, 'path') ?? '';
+  const text = extractToolText(result?.content) ?? '';
+  const isDirectory = stringField(details, 'type') === 'directory';
+  const directory = details && isDirectory ? workspaceDirectoryResultFromRecord(details, text) : undefined;
+  const file = details && !isDirectory && !error ? workspaceReadResultFromRecord(details, text) : undefined;
+  const meta = directory
+    ? formatLabeledCount(directory.entries.length, 'entry', 'entries')
+    : file
+      ? workspaceReadLineSummary(file)
+      : undefined;
+  const line = (
+    <PromptLine failed={Boolean(error)} meta={meta} state={state}>
+      <span className={styles.terminalVerb}>read</span> {directory ? `${directory.path}/` : path}
+    </PromptLine>
+  );
+
+  // File contents are context for the model; keep them one click away.
+  const body = directory ? (
+    <pre className={styles.terminalOutput}>{directory.entries.join('\n') || '(empty directory)'}</pre>
+  ) : file && file.lines.length > 0 ? (
+    <>
+      <CodeViewer lines={file.lines} language={/\.(jsonnet|libsonnet)$/.test(file.path) ? 'jsonnet' : 'plain'} />
+      {file.notes.map((note) => (
+        <div className={styles.terminalMuted} key={note}>
+          {note}
+        </div>
+      ))}
+    </>
+  ) : undefined;
+
+  return (
+    <div className={styles.terminalEntry}>
+      {body ? (
+        <details className={styles.terminalDisclosure}>
+          <summary>{line}</summary>
+          {body}
+        </details>
+      ) : (
+        line
+      )}
+      {error && <TerminalOutput error text={error} />}
+    </div>
+  );
+}
+
+function MutationEntry({
+  name,
+  args,
+  details,
+  error,
+  state,
+}: {
+  name: 'write' | 'edit';
+  args: Record<string, unknown>;
+  details?: Record<string, unknown>;
+  error?: string;
+  state: ToolEntryState;
+}) {
+  const styles = useStyles2(getToolStyles);
+  const path = stringField(details, 'path') ?? stringField(args, 'path') ?? '';
+  const content = stringField(args, 'content');
+  const edits = recordsField(args, 'edits').length;
+  const diff = stringField(details, 'diff');
+  const hasDiff = Boolean(diff && /^@@/m.test(diff));
+  const meta =
+    name === 'write'
+      ? formatBytes(numberField(details, 'bytes') ?? (content !== undefined ? utf8ByteLength(content) : undefined))
+      : edits > 0
+        ? formatLabeledCount(edits, 'edit', 'edits')
+        : undefined;
+
+  return (
+    <div className={styles.terminalEntry}>
+      <PromptLine failed={Boolean(error)} meta={meta} state={state}>
+        <span className={styles.terminalVerb}>{name}</span> {path}
+      </PromptLine>
+      {error && <TerminalOutput error text={error} />}
+      {!error && hasDiff && diff && <TerminalDiff diff={diff} />}
+      {!error && details && isWorkspaceStagedPath(path) && (
+        <div className={styles.terminalMuted}>staged locally; Grafana is unchanged until workspace apply</div>
+      )}
+    </div>
+  );
+}
+
+/** Tools retired before the read/write/edit/bash redesign, still present in older sessions. */
+function LegacyToolEntry({
+  name,
+  args,
+  partialJson,
+  state,
+  result,
+}: {
+  name: string;
+  args: unknown;
+  partialJson?: string;
+  state: ToolEntryState;
+  result?: ToolEntryResult;
+}) {
+  const styles = useStyles2(getToolStyles);
+  return (
+    <div className={styles.terminalEntry}>
+      <details className={styles.terminalDisclosure}>
+        <summary>
+          <PromptLine failed={Boolean(result?.isError)} state={state}>
+            <span className={styles.terminalVerb}>{name}</span>
+          </PromptLine>
+        </summary>
+        <pre className={styles.terminalOutput}>
+          {partialJson && state === 'preparing' ? partialJson : formatJson(args)}
+        </pre>
+      </details>
+      {result && (
+        <div className={styles.terminalRich}>
+          <ToolResultMessageBody
+            toolName={name}
+            content={result.content}
+            details={result.details}
+            isError={result.isError}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PromptLine({
+  children,
+  cwd,
+  failed,
+  meta,
+  prompt = '›',
+  state,
+}: {
+  children: React.ReactNode;
+  cwd?: string;
+  failed?: boolean;
+  meta?: string;
+  prompt?: string;
+  state: ToolEntryState;
+}) {
+  const styles = useStyles2(getToolStyles);
+  return (
+    <div className={styles.terminalPromptLine}>
+      <span className={cx(styles.terminalPrompt, failed && styles.terminalPromptFailed)}>
+        {cwd && cwd !== DEFAULT_CWD && <span className={styles.terminalMuted}>{cwd} </span>}
+        {prompt}
+      </span>
+      <span className={styles.terminalCommand}>
+        {children}
+        {state === 'preparing' && <span className={styles.streamingCursor} aria-hidden="true" />}
+      </span>
+      {state === 'running' ? (
+        <Spinner className={styles.terminalMeta} inline size="xs" />
+      ) : (
+        meta && <span className={cx(styles.terminalMeta, failed && styles.terminalError)}>{meta}</span>
+      )}
+    </div>
+  );
+}
+
+const DEFAULT_CWD = '/workspace';
+
+function BashCommand({ command }: { command: string }) {
+  const tokens = useMemo(() => highlightBash(command), [command]);
+  return (
+    <code className="language-bash">{tokens?.length ? <CodeLineText text={command} tokens={tokens} /> : command}</code>
+  );
+}
+
+const OUTPUT_PREVIEW_LINES = 10;
+
+function TerminalOutput({ text, error, truncated }: { text: string; error?: boolean; truncated?: boolean }) {
+  const styles = useStyles2(getToolStyles);
+  const [expanded, setExpanded] = useState(false);
+  const lines = text.replace(/\n$/, '').split('\n');
+  // Hiding only a line or two saves nothing; show them instead of an expander.
+  const clamp = !expanded && lines.length > OUTPUT_PREVIEW_LINES + 2;
+  return (
+    <>
+      <pre className={cx(styles.terminalOutput, error && styles.terminalError)}>
+        {clamp ? lines.slice(0, OUTPUT_PREVIEW_LINES).join('\n') : lines.join('\n')}
+      </pre>
+      {clamp && (
+        <button className={styles.terminalExpand} type="button" onClick={() => setExpanded(true)}>
+          … {formatLabeledCount(lines.length - OUTPUT_PREVIEW_LINES, 'more line', 'more lines')}
+        </button>
+      )}
+      {truncated && <div className={styles.terminalMuted}>[output truncated]</div>}
+    </>
+  );
+}
+
+function TerminalDiff({ diff }: { diff: string }) {
+  const styles = useStyles2(getToolStyles);
+  const [expanded, setExpanded] = useState(false);
+  const { lines, metadataFlags } = useMemo(() => {
+    // The entry already names the file; keep hunks and drop file headers and end-of-file markers.
+    const allLines = optimizedUnifiedDiffLines(diff);
+    const allFlags = diffMetadataFlags(allLines);
+    const firstHunk = allLines.findIndex((line) => line.startsWith('@@'));
+    const kept = allLines
+      .map((line, index) => ({ line, isMeta: allFlags[index] }))
+      .filter(({ line }, index) => index >= Math.max(firstHunk, 0) && line !== '' && !line.startsWith('\\'));
+    return { lines: kept.map(({ line }) => line), metadataFlags: kept.map(({ isMeta }) => isMeta) };
+  }, [diff]);
+  const clamp = !expanded && lines.length > OUTPUT_PREVIEW_LINES + 2;
+  const visible = clamp ? lines.slice(0, OUTPUT_PREVIEW_LINES) : lines;
+  return (
+    <>
+      <pre className={styles.terminalOutput}>
+        {visible.map((line, index) => {
+          const isMeta = metadataFlags[index];
+          return (
+            <div
+              className={cx(
+                isMeta && styles.terminalMuted,
+                !isMeta && line.startsWith('+') && styles.terminalDiffAdd,
+                !isMeta && line.startsWith('-') && styles.terminalDiffDelete
+              )}
+              key={`${index}:${line}`}
+            >
+              {line || ' '}
+            </div>
+          );
+        })}
+      </pre>
+      {clamp && (
+        <button className={styles.terminalExpand} type="button" onClick={() => setExpanded(true)}>
+          … {formatLabeledCount(lines.length - OUTPUT_PREVIEW_LINES, 'more line', 'more lines')}
+        </button>
+      )}
+    </>
+  );
+}
+
+const FILE_CHANGE_MARKERS: Record<string, string> = { created: 'A', modified: 'M', deleted: 'D' };
+
+function TerminalFileChanges({ changes }: { changes: WorkspaceFileChange[] }) {
+  const styles = useStyles2(getToolStyles);
+  return (
+    <pre className={styles.terminalOutput}>
+      {changes.map((change) => (
+        <div key={change.path}>
+          <span className={styles.terminalVerb}>{FILE_CHANGE_MARKERS[change.change] ?? '?'}</span> {change.path}
+          <span className={styles.terminalMuted}>
+            {[formatBytes(change.bytes), isWorkspaceStagedPath(change.path) ? 'staged' : undefined]
+              .filter(Boolean)
+              .map((part) => `  ${part}`)
+              .join('')}
+          </span>
+        </div>
+      ))}
+    </pre>
   );
 }
 
@@ -210,451 +634,6 @@ function hardenMarkdownHtml(html: string): string {
   return template.innerHTML;
 }
 
-function ToolCallBlock({
-  name,
-  args,
-  partialJson,
-  isStreaming,
-}: {
-  name: string;
-  args: unknown;
-  partialJson?: string;
-  isStreaming?: boolean;
-}) {
-  const styles = useStyles2(getToolStyles);
-  const structuredToolCall = renderStructuredToolCall(name, args, partialJson, Boolean(isStreaming));
-  const icon = toolIconName(name);
-  const shouldCollapse = shouldCollapseToolCallBlock(name, Boolean(isStreaming));
-  const collapsedSummary = toolCallCollapsedSummary(name, args, partialJson, Boolean(isStreaming));
-
-  if (shouldCollapse) {
-    return (
-      <details className={styles.toolCallCollapsed}>
-        <summary className={styles.toolCallCollapsedSummary}>
-          <Badge text="tool call" color="blue" />
-          {icon && <Icon aria-hidden className={styles.toolTypeIcon} name={icon} />}
-          <strong>{name}</strong>
-          {collapsedSummary && <span className={styles.toolCallSummaryText}>{collapsedSummary}</span>}
-        </summary>
-        <div className={styles.toolCallCollapsedBody}>
-          {structuredToolCall ?? (
-            <pre className={styles.toolCallJson}>{partialJson && isStreaming ? partialJson : formatJson(args)}</pre>
-          )}
-        </div>
-      </details>
-    );
-  }
-
-  return (
-    <div className={styles.toolCall}>
-      <div className={styles.toolCallHeader}>
-        <Badge text={isStreaming ? 'preparing' : 'tool call'} color="blue" />
-        {icon && <Icon aria-hidden className={styles.toolTypeIcon} name={icon} />}
-        <strong>{name}</strong>
-      </div>
-      {structuredToolCall ?? (
-        <pre className={styles.toolCallJson}>{partialJson && isStreaming ? partialJson : formatJson(args)}</pre>
-      )}
-    </div>
-  );
-}
-
-function shouldCollapseToolCallBlock(name: string, isStreaming: boolean) {
-  return !isStreaming && WORKSPACE_TOOL_NAMES.has(name);
-}
-
-function toolCallCollapsedSummary(name: string, args: unknown, partialJson: string | undefined, isStreaming: boolean) {
-  const simpleCall = asSimpleToolCallSummary(name, args, partialJson, isStreaming);
-  return simpleCall?.summary;
-}
-
-function renderStructuredToolCall(
-  name: string,
-  args: unknown,
-  partialJson: string | undefined,
-  isStreaming: boolean
-): React.ReactNode | undefined {
-  const simpleCall = asSimpleToolCallSummary(name, args, partialJson, isStreaming);
-  if (simpleCall) {
-    return <SimpleToolCallSummaryView call={simpleCall} />;
-  }
-
-  return undefined;
-}
-
-type SimpleToolCallSummary = {
-  summary: string;
-  items?: Array<{ label: string; value?: React.ReactNode }>;
-  code?: string;
-  language?: 'bash';
-};
-
-function SimpleToolCallSummaryView({ call }: { call: SimpleToolCallSummary }) {
-  const styles = useStyles2(getToolStyles);
-  return (
-    <div className={styles.structuredResult}>
-      <div className={styles.resultSummary}>{call.summary}</div>
-      {call.items && <ResultMetaGrid items={call.items} />}
-      {call.code &&
-        (call.language === 'bash' ? (
-          <BashCodeBlock command={call.code} />
-        ) : (
-          <pre className={styles.queryBlock}>{call.code}</pre>
-        ))}
-    </div>
-  );
-}
-
-function asSimpleToolCallSummary(
-  name: string,
-  args: unknown,
-  partialJson: string | undefined,
-  isStreaming: boolean
-): SimpleToolCallSummary | undefined {
-  const record = toolCallArgsRecord(args, partialJson, isStreaming) ?? {};
-
-  switch (name) {
-    case 'navigate':
-      return navigateToolCallSummary(record);
-    case 'update_report':
-      return updateReportToolCallSummary(record);
-    case 'read_artifact':
-      return readArtifactToolCallSummary(record);
-    case 'read':
-      return workspaceReadToolCallSummary(record);
-    case 'write':
-      return workspaceWriteToolCallSummary(record);
-    case 'edit':
-      return workspaceEditToolCallSummary(record);
-    case 'bash':
-      return workspaceBashToolCallSummary(record);
-    case 'inspect_dashboard_metric_usage':
-      return dashboardToolCallSummary('Inspect dashboard metric usage', record);
-    case 'find_panel_alert_rules':
-      return findPanelAlertRulesToolCallSummary(record);
-    case 'get_alert_rule':
-      return getAlertRuleToolCallSummary(record);
-    case 'search_dashboard_metric_usage':
-      return dashboardMetricSearchToolCallSummary(record);
-    case 'get_metric_neighborhood':
-      return metricNeighborhoodToolCallSummary(record);
-    case 'list_live_dashboard_panels':
-      return liveDashboardToolCallSummary('List live dashboard panels', record);
-    case 'get_live_dashboard_layout':
-      return liveDashboardToolCallSummary('Get live dashboard layout', record);
-    case 'get_live_dashboard_info':
-      return liveDashboardToolCallSummary('Get live dashboard info', record);
-    case 'list_live_dashboard_variables':
-      return liveDashboardToolCallSummary('List live dashboard variables', record);
-    case 'get_live_dashboard_mutation_schema':
-      return liveDashboardToolCallSummary('Get live dashboard mutation schema', record);
-    case 'rename_live_dashboard_panel':
-      return liveDashboardToolCallSummary('Rename live dashboard panel', record);
-    case 'update_live_dashboard_panel_query':
-      return liveDashboardToolCallSummary('Update live dashboard panel query', record);
-    case 'update_live_dashboard_panel_queries':
-      return liveDashboardToolCallSummary('Update live dashboard panel queries', record);
-    case 'apply_live_dashboard_prometheus_label_filter':
-      return liveDashboardToolCallSummary('Apply Prometheus dashboard label filter', record);
-    case 'add_live_dashboard_panel':
-      return liveDashboardToolCallSummary('Add live dashboard panel', record);
-    case 'move_or_resize_live_dashboard_panel':
-      return liveDashboardToolCallSummary('Move or resize live dashboard panel', record);
-    case 'update_live_dashboard_settings':
-      return liveDashboardToolCallSummary('Update live dashboard settings', record);
-    case 'add_live_dashboard_variable':
-      return liveDashboardToolCallSummary('Add live dashboard variable', record);
-    case 'update_live_dashboard_variable':
-      return liveDashboardToolCallSummary('Update live dashboard variable', record);
-    case 'apply_live_dashboard_mutation':
-      return liveDashboardToolCallSummary('Apply live dashboard mutation', record);
-    case 'screenshot_dashboard':
-    case 'grafana_screenshot':
-      return screenshotDashboardToolCallSummary(record);
-    default:
-      return undefined;
-  }
-}
-
-function navigateToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const type = stringField(record, 'type');
-  const uid = stringField(record, 'uid');
-  const path = stringField(record, 'path');
-  const query = stringField(record, 'query');
-  return {
-    summary: summaryLine(['Navigate', type, uid ?? path ?? query]),
-    items: [
-      { label: 'Type', value: type },
-      { label: 'Dashboard', value: uid ? <code>{uid}</code> : undefined },
-      { label: 'Datasource', value: formatSummaryFieldValue(record, 'datasourceUid') },
-      { label: 'Query', value: query ? <code>{query}</code> : undefined },
-      { label: 'Path', value: path ? <code>{path}</code> : undefined },
-    ],
-  };
-}
-
-function updateReportToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const patchCount = recordsField(record, 'patch').length;
-  return {
-    summary: summaryLine(['Update investigation report', stringField(record, 'title'), formatPatchCount(patchCount)]),
-    items: [
-      { label: 'Title', value: stringField(record, 'title') },
-      { label: 'Patch count', value: patchCount > 0 ? formatCount(patchCount) : undefined },
-    ],
-  };
-}
-
-function readArtifactToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const id = stringField(record, 'id');
-  const path = stringField(record, 'path');
-  const jq = stringField(record, 'jq');
-  const mode = stringField(record, 'mode') ?? (jq ? 'jq' : path ? 'field' : 'preview');
-  const offset = numberField(record, 'offset');
-  const limit = numberField(record, 'limit');
-
-  return {
-    summary: summaryLine(['Read artifact', id, mode]),
-    items: [
-      { label: 'Artifact', value: id ? <code>{id}</code> : undefined },
-      { label: 'Mode', value: mode },
-      { label: 'Path', value: path ? <code>{path}</code> : undefined },
-      {
-        label: 'Slice',
-        value: offset !== undefined || limit !== undefined ? `${offset ?? 0}:${limit ?? ''}` : undefined,
-      },
-      { label: 'jq', value: jq ? <code>{jq}</code> : undefined },
-    ],
-    code: jq,
-  };
-}
-
-function workspaceReadToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const path = stringField(record, 'path');
-  const offset = numberField(record, 'offset');
-  const limit = numberField(record, 'limit');
-  return {
-    summary: 'Read file',
-    items: [
-      { label: 'Path', value: path ? <code>{path}</code> : undefined },
-      { label: 'Offset', value: offset !== undefined ? String(offset) : undefined },
-      { label: 'Limit', value: limit !== undefined ? formatLabeledCount(limit, 'line', 'lines') : undefined },
-    ],
-  };
-}
-
-function workspaceWriteToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const path = stringField(record, 'path');
-  const content = stringField(record, 'content');
-  const size = content !== undefined ? formatBytes(utf8ByteLength(content)) : undefined;
-  return {
-    summary: summaryLine(['Write file', size]),
-    items: [
-      { label: 'Path', value: path ? <code>{path}</code> : undefined },
-      { label: 'Revision', value: formatSummaryFieldValue(record, 'revision') },
-      { label: 'Content', value: size },
-    ],
-  };
-}
-
-function workspaceEditToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const path = stringField(record, 'path');
-  const edits = recordsField(record, 'edits');
-  return {
-    summary: summaryLine(['Edit file', edits.length ? formatLabeledCount(edits.length, 'edit', 'edits') : undefined]),
-    items: [
-      { label: 'Path', value: path ? <code>{path}</code> : undefined },
-      { label: 'Revision', value: formatSummaryFieldValue(record, 'revision') },
-      { label: 'Replace all', value: edits.some((edit) => edit.replaceAll === true) ? 'yes' : undefined },
-    ],
-  };
-}
-
-function workspaceBashToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const cwd = stringField(record, 'cwd');
-  return {
-    summary: 'Run bash',
-    items: [
-      { label: 'CWD', value: cwd ? <code>{cwd}</code> : undefined },
-      { label: 'Timeout', value: formatDurationMs(numberField(record, 'timeoutMs')) },
-    ],
-    code: stringField(record, 'command'),
-    language: 'bash',
-  };
-}
-
-function formatSummaryFieldValue(record: Record<string, unknown>, key: string) {
-  const value = stringOrNumberField(record, key);
-  return value ? <code>{value}</code> : undefined;
-}
-
-function formatPatchCount(count: number) {
-  return count > 0 ? `${formatCount(count)} ${count === 1 ? 'patch' : 'patches'}` : undefined;
-}
-
-function dashboardToolCallSummary(action: string, record: Record<string, unknown>): SimpleToolCallSummary {
-  const dashboard = dashboardToolCallIdentifier(record);
-  const path = stringField(record, 'path') ?? stringField(record, 'file');
-  const folder =
-    stringField(record, 'folderUid') ?? stringField(record, 'folder') ?? stringField(record, 'folderTitle');
-  return {
-    summary: summaryLine([action, dashboard]),
-    items: [
-      { label: 'Dashboard', value: dashboard ? <code>{dashboard}</code> : undefined },
-      { label: 'Path', value: path ? <code>{path}</code> : undefined },
-      { label: 'Folder', value: folder },
-      { label: 'Panel', value: stringOrNumberField(record, 'panelId') },
-      { label: 'Dry run', value: booleanLabel(record, 'dryRun') },
-    ],
-  };
-}
-
-function dashboardMetricSearchToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const query = stringField(record, 'query');
-  const tag = stringField(record, 'tag');
-  const seed = stringField(record, 'seedMetric');
-  const seeds = stringArrayField(record, 'seedMetrics') ?? [];
-  const seedCode = seeds.length > 0 ? seeds.join('\n') : seed;
-
-  return {
-    summary: summaryLine(['Search dashboard metric usage', query, tag ? `tag ${tag}` : undefined]),
-    items: [
-      { label: 'Query', value: query },
-      { label: 'Tag', value: tag },
-      { label: 'Datasource', value: formatDatasourceMetaValue(record) },
-      {
-        label: seeds.length > 0 ? 'Seed metrics' : 'Seed metric',
-        value: seedCode ? <code>{seedCode}</code> : undefined,
-      },
-      { label: 'Max dashboards', value: stringOrNumberField(record, 'maxDashboards') },
-    ],
-    code: seedCode,
-  };
-}
-
-function findPanelAlertRulesToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const dashboardUid = stringField(record, 'dashboardUid');
-  const panelId = stringOrNumberField(record, 'panelId');
-  const panelTitle = stringField(record, 'panelTitle');
-  const ruleName = stringField(record, 'ruleName');
-  const query = stringField(record, 'query');
-  const namespace = stringField(record, 'namespace');
-
-  return {
-    summary: summaryLine([
-      'Find panel alert rules',
-      dashboardUid ? `dashboard ${dashboardUid}` : undefined,
-      panelId ? `panel ${panelId}` : panelTitle,
-      ruleName ? `rule ${ruleName}` : query,
-    ]),
-    items: [
-      { label: 'Dashboard', value: dashboardUid ? <code>{dashboardUid}</code> : undefined },
-      { label: 'Panel', value: panelId },
-      { label: 'Panel title', value: panelTitle },
-      { label: 'Rule', value: ruleName ? <code>{ruleName}</code> : undefined },
-      { label: 'Query', value: query },
-      { label: 'Namespace', value: namespace ? <code>{namespace}</code> : undefined },
-      { label: 'Max rules', value: stringOrNumberField(record, 'maxRules') },
-    ],
-  };
-}
-
-function getAlertRuleToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const name = stringField(record, 'name');
-  const namespace = stringField(record, 'namespace');
-  return {
-    summary: summaryLine(['Get alert rule', name, namespace ? `namespace ${namespace}` : undefined]),
-    items: [
-      { label: 'Rule', value: name ? <code>{name}</code> : undefined },
-      { label: 'Namespace', value: namespace ? <code>{namespace}</code> : undefined },
-    ],
-  };
-}
-
-function metricNeighborhoodToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const metric = stringField(record, 'metric');
-  const metrics = stringArrayField(record, 'metrics') ?? [];
-  const seedCode = metrics.length > 0 ? metrics.join('\n') : metric;
-
-  return {
-    summary: summaryLine([
-      'Get metric neighborhood',
-      metric ?? (metrics.length > 0 ? `${metrics.length} seeds` : undefined),
-    ]),
-    items: [
-      {
-        label: metrics.length > 0 ? 'Seed metrics' : 'Seed metric',
-        value: seedCode ? <code>{seedCode}</code> : undefined,
-      },
-      { label: 'Dashboard', value: formatSummaryFieldValue(record, 'dashboardUid') },
-      { label: 'Query', value: stringField(record, 'query') },
-      { label: 'Datasource', value: formatDatasourceMetaValue(record) },
-      { label: 'Max results', value: stringOrNumberField(record, 'maxResults') },
-    ],
-    code: seedCode,
-  };
-}
-
-function liveDashboardToolCallSummary(action: string, record: Record<string, unknown>): SimpleToolCallSummary {
-  const query = stringField(record, 'queryExpression') ?? stringField(record, 'query');
-  const command = stringField(record, 'type') ?? stringField(record, 'command');
-  const element = stringField(record, 'elementName');
-  const elements = liveDashboardElementsSummary(record);
-  const title = stringField(record, 'title');
-  const variable = stringField(record, 'name');
-  const code = liveDashboardToolCallCode(record);
-  return {
-    summary: summaryLine([action, element ?? elements ?? title ?? variable ?? command]),
-    items: [
-      { label: 'Command', value: command },
-      { label: 'Element', value: formatSummaryFieldValue(record, 'elementName') },
-      { label: 'Elements', value: elements ? <code>{elements}</code> : undefined },
-      { label: 'Title', value: title },
-      { label: 'Description', value: stringField(record, 'description') },
-      { label: 'Variable', value: variable ? <code>{variable}</code> : undefined },
-      { label: 'New variable', value: formatSummaryFieldValue(record, 'newName') },
-      { label: 'Visualization', value: stringField(record, 'visualizationType') },
-      { label: 'Variable type', value: stringField(record, 'variableType') },
-      { label: 'Parent path', value: formatSummaryFieldValue(record, 'parentPath') },
-      { label: 'Datasource', value: liveDashboardDatasourceSummary(record) },
-      { label: 'Ref ID', value: formatSummaryFieldValue(record, 'refId') },
-      { label: 'Hidden', value: booleanLabel(record, 'hidden') },
-      { label: 'Query', value: query ? <code>{query}</code> : undefined },
-      { label: 'Unit', value: formatSummaryFieldValue(record, 'unit') },
-      { label: 'Grid', value: liveDashboardGridSummary(record) },
-      { label: 'Time range', value: liveDashboardTimeRangeSummary(record) },
-      { label: 'Refresh', value: stringField(record, 'autoRefresh') },
-      { label: 'Timezone', value: stringField(record, 'timezone') },
-      { label: 'Cursor sync', value: stringField(record, 'cursorSync') },
-      { label: 'Editable', value: booleanLabel(record, 'editable') },
-      { label: 'Live now', value: booleanLabel(record, 'liveNow') },
-      { label: 'Preload', value: booleanLabel(record, 'preload') },
-      { label: 'Current', value: stringField(record, 'current') },
-      { label: 'Position', value: stringOrNumberField(record, 'position') },
-      { label: 'Multi', value: booleanLabel(record, 'multi') },
-      { label: 'Include all', value: booleanLabel(record, 'includeAll') },
-      { label: 'Tags', value: stringArraySummary(record, 'tags') },
-      { label: 'Options', value: stringArraySummary(record, 'options') },
-      { label: 'Evaluate variables', value: booleanLabel(record, 'evaluateVariables') },
-      { label: 'Include status', value: booleanLabel(record, 'includeStatus') },
-    ],
-    code,
-  };
-}
-
-function liveDashboardElementsSummary(record: Record<string, unknown>) {
-  const elements = stringArrayField(record, 'elements');
-  return elements?.length ? elements.join(', ') : undefined;
-}
-
-function liveDashboardDatasourceSummary(record: Record<string, unknown>) {
-  const datasourceType = stringField(record, 'datasourceType');
-  const datasourceName = stringField(record, 'datasourceName');
-  if (datasourceType && datasourceName) {
-    return `${datasourceType}/${datasourceName}`;
-  }
-  return datasourceName ?? datasourceType;
-}
-
 function liveDashboardGridSummary(record: Record<string, unknown>) {
   const fields = ['x', 'y', 'width', 'height']
     .map((key) => {
@@ -677,67 +656,6 @@ function liveDashboardTimeRangeSummary(record: Record<string, unknown>) {
 function stringArraySummary(record: Record<string, unknown>, key: string) {
   const values = stringArrayField(record, key);
   return values?.length ? values.join(', ') : undefined;
-}
-
-function liveDashboardToolCallCode(record: Record<string, unknown>) {
-  if (record.payload !== undefined) {
-    return formatJson(record.payload);
-  }
-  if (record.querySpec !== undefined) {
-    return formatJson(record.querySpec);
-  }
-  return undefined;
-}
-
-function screenshotDashboardToolCallSummary(record: Record<string, unknown>): SimpleToolCallSummary {
-  const dashboard = dashboardToolCallIdentifier(record);
-  const width = numberField(record, 'width');
-  const height = numberField(record, 'height');
-  return {
-    summary: summaryLine(['Capture dashboard screenshot', dashboard]),
-    items: [
-      { label: 'Dashboard', value: dashboard ? <code>{dashboard}</code> : undefined },
-      { label: 'Panel', value: stringOrNumberField(record, 'panelId') },
-      { label: 'Size', value: width && height ? `${width} x ${height}` : undefined },
-    ],
-  };
-}
-
-function toolCallArgsRecord(
-  args: unknown,
-  partialJson: string | undefined,
-  isStreaming: boolean
-): Record<string, unknown> | undefined {
-  if (isStreaming && partialJson) {
-    try {
-      const parsed = JSON.parse(partialJson);
-      if (isRecord(parsed)) {
-        return parsed;
-      }
-    } catch {
-      return isRecord(args) ? args : undefined;
-    }
-  }
-
-  return isRecord(args) ? args : undefined;
-}
-
-function formatDatasourceMetaValue(record: Record<string, unknown>) {
-  return stringField(record, 'datasourceUid') ?? 'default';
-}
-
-function dashboardToolCallIdentifier(record: Record<string, unknown>) {
-  return (
-    stringField(record, 'uid') ??
-    stringField(record, 'dashboardUid') ??
-    stringField(record, 'name') ??
-    stringField(record, 'title')
-  );
-}
-
-function booleanLabel(record: Record<string, unknown>, key: string) {
-  const value = booleanField(record, key);
-  return value === undefined ? undefined : value ? 'yes' : 'no';
 }
 
 function summaryLine(parts: Array<string | undefined>) {
@@ -4003,47 +3921,130 @@ const getToolStyles = (theme: GrafanaTheme2) => ({
       fontSize: theme.typography.bodySmall.fontSize,
     },
   }),
-  activity: css({
-    width: '100%',
-    minWidth: 0,
-    maxWidth: 980,
+  terminal: css({
     display: 'grid',
-    gap: theme.spacing(1),
-    padding: theme.spacing(1.5),
-    border: `1px dashed ${theme.colors.border.medium}`,
-    borderRadius: theme.shape.radius.default,
-    background: theme.colors.background.secondary,
-  }),
-  activityTitle: css({
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: theme.spacing(1),
-    color: theme.colors.text.secondary,
-    fontSize: theme.typography.bodySmall.fontSize,
-    textTransform: 'uppercase',
-  }),
-  activityTitleLabel: css({
-    display: 'flex',
-    alignItems: 'center',
+    gap: theme.spacing(0.75),
     minWidth: 0,
-    gap: theme.spacing(1),
+    maxWidth: '100%',
+    margin: theme.spacing(0.5, 0),
+    padding: theme.spacing(1, 1.5),
+    border: `1px solid ${theme.colors.border.weak}`,
+    borderRadius: theme.shape.radius.default,
+    background: theme.colors.background.canvas,
+    fontFamily: theme.typography.fontFamilyMonospace,
+    fontSize: theme.typography.bodySmall.fontSize,
+    lineHeight: 1.5,
+    whiteSpace: 'normal',
+    overflowWrap: 'normal',
   }),
-  activityElapsed: css({
-    flex: '0 0 auto',
+  terminalEntry: css({
+    display: 'grid',
+    minWidth: 0,
+  }),
+  terminalPromptLine: css({
+    display: 'grid',
+    gridTemplateColumns: 'auto minmax(0, 1fr) auto',
+    alignItems: 'baseline',
+    columnGap: theme.spacing(1),
+    minWidth: 0,
+  }),
+  terminalPrompt: css({
+    color: theme.colors.success.text,
+    fontWeight: theme.typography.fontWeightMedium,
+    whiteSpace: 'nowrap',
+    userSelect: 'none',
+  }),
+  terminalPromptFailed: css({
+    color: theme.colors.error.text,
+  }),
+  terminalCommand: css({
+    minWidth: 0,
+    whiteSpace: 'pre-wrap',
+    overflowWrap: 'break-word',
+    color: theme.colors.text.primary,
+    // Grafana styles every `code` element as an inline box.
+    '& code': {
+      padding: 0,
+      border: 'none',
+      background: 'none',
+      color: 'inherit',
+      fontSize: 'inherit',
+      whiteSpace: 'inherit',
+      overflowWrap: 'inherit',
+    },
+  }),
+  terminalVerb: css({
+    color: theme.colors.text.link,
+  }),
+  terminalMeta: css({
     color: theme.colors.text.secondary,
     fontVariantNumeric: 'tabular-nums',
-    textTransform: 'none',
     whiteSpace: 'nowrap',
   }),
-  activityList: css({
-    display: 'grid',
-    gap: theme.spacing(1),
-    minWidth: 0,
+  terminalOutput: css({
+    // Beats the message container's `pre` rule; terminal output keeps its columns and scrolls sideways.
+    '&&': {
+      margin: 0,
+      padding: 0,
+      minWidth: 0,
+      maxWidth: '100%',
+      overflowX: 'auto',
+      whiteSpace: 'pre',
+      overflowWrap: 'normal',
+      border: 'none',
+      background: 'transparent',
+      color: theme.colors.text.secondary,
+      fontFamily: 'inherit',
+      fontSize: 'inherit',
+    },
   }),
-  activityItem: css({
+  terminalError: css({
+    '&&': {
+      color: theme.colors.error.text,
+    },
+  }),
+  terminalMuted: css({
+    color: theme.colors.text.secondary,
+    opacity: 0.8,
+  }),
+  terminalDiffAdd: css({
+    color: theme.colors.success.text,
+  }),
+  terminalDiffDelete: css({
+    color: theme.colors.error.text,
+  }),
+  terminalExpand: css({
+    justifySelf: 'start',
+    padding: 0,
+    border: 'none',
+    background: 'none',
+    color: theme.colors.text.link,
+    font: 'inherit',
+    cursor: 'pointer',
+    '&:hover': {
+      textDecoration: 'underline',
+    },
+  }),
+  terminalDisclosure: css({
+    minWidth: 0,
+    '& > summary': {
+      display: 'block',
+      listStyle: 'none',
+      cursor: 'pointer',
+    },
+    '& > summary::-webkit-details-marker': {
+      display: 'none',
+    },
+    '&[open] > summary': {
+      marginBottom: theme.spacing(0.5),
+    },
+  }),
+  terminalRich: css({
     display: 'grid',
     gap: theme.spacing(1),
     minWidth: 0,
+    marginTop: theme.spacing(0.5),
+    fontFamily: theme.typography.fontFamily,
+    fontSize: theme.typography.body.fontSize,
   }),
 });

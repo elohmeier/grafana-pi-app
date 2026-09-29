@@ -1,5 +1,5 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { AssistantMessage, Message, ToolCall } from '@earendil-works/pi-ai';
+import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from '@earendil-works/pi-ai';
 import { formatBashResult, type WorkspaceBashResult } from './workspace/shell';
 
 /** A shell command the user ran directly in the session filesystem (`!` in the composer). */
@@ -109,4 +109,23 @@ function normalizeAssistantContent(message: AssistantMessage): AssistantMessage 
 
 function assistantToolCalls(message: AssistantMessage): ToolCall[] {
   return message.content.filter((block): block is ToolCall => block.type === 'toolCall');
+}
+
+/**
+ * Maps each tool call ID to its result message, for results whose call appears in
+ * an earlier assistant message. The transcript shows those results with their call.
+ */
+export function pairToolResults(messages: AgentMessage[]): Map<string, ToolResultMessage> {
+  const callIds = new Set<string>();
+  const results = new Map<string, ToolResultMessage>();
+  for (const message of messages) {
+    if (message.role === 'assistant' && Array.isArray(message.content)) {
+      for (const toolCall of assistantToolCalls(message)) {
+        callIds.add(toolCall.id);
+      }
+    } else if (message.role === 'toolResult' && callIds.has(message.toolCallId)) {
+      results.set(message.toolCallId, message);
+    }
+  }
+  return results;
 }

@@ -42,15 +42,17 @@ import {
   type PiAppJsonData,
   type PiAppThinkingLevel,
 } from './model';
-import { createUserShellMessage, hasPersistableMessages, parseUserShellInput } from './chatMessages';
+import { createUserShellMessage, hasPersistableMessages, pairToolResults, parseUserShellInput } from './chatMessages';
 import { getGrafanaSkills, renderGrafanaSystemPrompt, selectGrafanaSkills } from './skills';
 import {
   ContentBlocks,
-  ToolActivityPanel,
   ToolResultMessageBody,
+  ToolTranscriptContext,
+  UserShellEntry,
   type DashboardAction,
   type DashboardOpenHandler,
   type ToolRunView,
+  type ToolTranscript,
 } from './ToolRenderer';
 import {
   buildDashboardAssistantChatUrl,
@@ -1569,15 +1571,27 @@ export function ChatApp({
     ]
   );
 
+  const agentMessages = agent?.state.messages;
+  const agentMessageCount = agentMessages?.length ?? 0;
+  // The agent appends to its message array in place, so the length keys the memo too.
+  const toolResults = useMemo(
+    () => pairToolResults(agentMessages ?? []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [agentMessages, agentMessageCount]
+  );
+  const toolTranscript = useMemo<ToolTranscript>(
+    () => ({ results: toolResults, runs: toolRuns }),
+    [toolResults, toolRuns]
+  );
   const visibleMessages = agent
     ? [
-        ...agent.state.messages.map((message) => ({ message, isStreaming: false })),
+        ...agent.state.messages
+          // Results render with their tool call in the assistant message.
+          .filter((message) => message.role !== 'toolResult' || toolResults.get(message.toolCallId) !== message)
+          .map((message) => ({ message, isStreaming: false })),
         ...(agent.state.streamingMessage ? [{ message: agent.state.streamingMessage, isStreaming: true }] : []),
       ]
     : [];
-  const activeToolRuns = Object.values(toolRuns)
-    .filter((run) => run.status === 'running')
-    .sort((left, right) => left.updatedAt - right.updatedAt);
   const pendingApprovalToolName = pendingToolConfirmation?.toolName;
   const displayRunStatus = resolveChatRunStatusFromStreamingMessage(runStatus, agent?.state.streamingMessage);
   const runElapsedMs = useRunElapsedMs(Boolean(isStreaming || pendingApprovalToolName), displayRunStatus?.startedAt);
@@ -1932,17 +1946,24 @@ export function ChatApp({
                 }
               />
             ) : (
-              visibleMessages.map(({ message, isStreaming }, index) => (
-                <MessageView
-                  key={messageKey(message, index, isStreaming)}
-                  message={message}
-                  isStreaming={isStreaming}
-                  onOpenDashboard={handleOpenDashboard}
-                />
-              ))
+              <ToolTranscriptContext.Provider value={toolTranscript}>
+                {visibleMessages.map(({ message, isStreaming }, index) => (
+                  <MessageView
+                    key={messageKey(message, index, isStreaming)}
+                    message={message}
+                    isStreaming={isStreaming}
+                    continuesTurn={
+                      message.role === 'assistant' && visibleMessages[index - 1]?.message.role === 'assistant'
+                    }
+                    continuedInTurn={
+                      message.role === 'assistant' && visibleMessages[index + 1]?.message.role === 'assistant'
+                    }
+                    onOpenDashboard={handleOpenDashboard}
+                  />
+                ))}
+              </ToolTranscriptContext.Provider>
             )}
-            <ToolActivityPanel elapsed={formatRunElapsed(runElapsedMs)} runs={activeToolRuns} />
-            {isStreaming && activeToolRuns.length === 0 && (
+            {isStreaming && (
               <div className={styles.streaming} role="status" aria-live="polite">
                 <Spinner />
                 <span className={styles.streamingLabel}>{streamingStatusText}</span>
@@ -2221,23 +2242,35 @@ function ReportPanel({
 const MessageView = memo(function MessageView({
   message,
   isStreaming,
+  continuesTurn,
+  continuedInTurn,
   onOpenDashboard,
 }: {
   message: AgentMessage;
   isStreaming?: boolean;
+  /** An assistant message that directly follows another one in the same turn. */
+  continuesTurn?: boolean;
+  /** An assistant message that another assistant message directly follows. */
+  continuedInTurn?: boolean;
   onOpenDashboard?: DashboardOpenHandler;
 }) {
   const styles = useStyles2(getStyles);
-  const isUser = message.role === 'user' || message.role === 'userShell';
+  const isUser = message.role === 'user';
+  const isShell = message.role === 'userShell';
   const isTool = message.role === 'toolResult';
-  const roleLabel = isTool ? undefined : message.role === 'userShell' ? 'user shell' : message.role;
+  // The `!` prompt of a user shell entry already says who ran it.
+  const roleLabel = isTool || continuesTurn || message.role === 'userShell' ? undefined : message.role;
 
   return (
     <article
       className={cx(
         styles.message,
         isUser && styles.messageUser,
+        isShell && styles.messageShell,
         isTool && styles.messageTool,
+        // Consecutive assistant messages of one turn read as one card.
+        continuesTurn && styles.messageContinuesTurn,
+        continuedInTurn && styles.messageContinuedInTurn,
         isStreaming && styles.messageStreaming
       )}
     >
@@ -2260,7 +2293,7 @@ function renderMessageContent(message: AgentMessage, isStreaming: boolean, onOpe
     return <ContentBlocks content={message.content} isStreaming={isStreaming} />;
   }
   if (message.role === 'userShell') {
-    return <ToolResultMessageBody toolName="bash" content={message.content} details={message.result} />;
+    return <UserShellEntry result={message.result} />;
   }
   if (message.role === 'toolResult') {
     return (
@@ -3534,6 +3567,24 @@ const getStyles = (theme: GrafanaTheme2) => ({
   messageUser: css({
     alignSelf: 'flex-end',
     background: theme.colors.primary.transparent,
+  }),
+  messageContinuesTurn: css({
+    marginTop: `-${theme.spacing(1.5)}`,
+    paddingTop: 0,
+    borderTop: 'none',
+    borderTopLeftRadius: 0,
+    borderTopRightRadius: 0,
+  }),
+  messageContinuedInTurn: css({
+    paddingBottom: theme.spacing(0.5),
+    borderBottom: 'none',
+    borderBottomLeftRadius: 0,
+    borderBottomRightRadius: 0,
+  }),
+  messageShell: css({
+    padding: 0,
+    border: 'none',
+    background: 'none',
   }),
   messageTool: css({
     borderStyle: 'dashed',

@@ -1,8 +1,14 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { structuredPatch } from 'diff';
 import { highlightJsonnetLines } from './jsonnetRendering';
-import { ContentBlocks, ToolActivityPanel, ToolResultMessageBody } from './ToolRenderer';
+import {
+  ContentBlocks,
+  ToolResultMessageBody,
+  ToolTranscriptContext,
+  UserShellEntry,
+  type ToolTranscript,
+} from './ToolRenderer';
 
 jest.mock('./jsonnetRendering', () => {
   const actual = jest.requireActual<typeof import('./jsonnetRendering')>('./jsonnetRendering');
@@ -13,6 +19,22 @@ jest.mock('diff', () => {
   const actual = jest.requireActual<typeof import('diff')>('diff');
   return { ...actual, structuredPatch: jest.fn(actual.structuredPatch) };
 });
+
+function bashDetails(overrides: Record<string, unknown>) {
+  return {
+    command: '',
+    cwd: '/workspace',
+    exitCode: 0,
+    stdout: '',
+    stderr: '',
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    timedOut: false,
+    changes: [],
+    durationMs: 0,
+    ...overrides,
+  };
+}
 
 const alertQuery = 'sum(rate(http_requests_total{status=~"5.."}[5m]))';
 
@@ -111,24 +133,6 @@ function alertSearchResultFixture(source = 'panelRef+annotations') {
 }
 
 describe('ToolRenderer', () => {
-  it('renders tool category icons in generic tool call headers', () => {
-    const { container } = render(
-      <ContentBlocks
-        content={[
-          {
-            type: 'toolCall',
-            name: 'navigate',
-            arguments: { type: 'dashboard', uid: 'service-red' },
-          },
-        ]}
-      />
-    );
-
-    expect(screen.getByTestId('compass')).toBeInTheDocument();
-    expect(screen.getByText('navigate')).toBeInTheDocument();
-    expect(container.textContent).not.toContain('"uid"');
-  });
-
   it('renders removed specialist and Grafana tool calls as plain JSON without summaries', () => {
     const { container } = render(
       <ContentBlocks
@@ -147,28 +151,301 @@ describe('ToolRenderer', () => {
     expect(container.textContent).not.toContain('List metric names');
   });
 
-  it('renders running tool activity with structured call summaries and streamed output', () => {
-    const { container } = render(
-      <ToolActivityPanel
-        runs={[
+  it('renders tool calls with their transcript results and run state in one terminal', () => {
+    const transcript: ToolTranscript = {
+      results: new Map([
+        [
+          'call-1',
           {
-            id: 'run-1',
-            name: 'bash',
-            args: { command: 'grafana-prom query up' },
-            status: 'running',
-            partialResult: { content: [{ type: 'text', text: 'partial output' }], details: { type: 'subagent' } },
-            updatedAt: 1,
+            role: 'toolResult',
+            toolCallId: 'call-1',
+            toolName: 'bash',
+            content: [{ type: 'text', text: '1\n[exit 0]' }],
+            details: bashDetails({ command: 'grafana-prom query up', stdout: '1\n', durationMs: 42 }),
+            isError: false,
+            timestamp: 1,
+          },
+        ],
+      ]),
+      runs: {
+        'call-2': { id: 'call-2', name: 'bash', args: { command: 'sleep 5' }, status: 'running', updatedAt: 1 },
+      },
+    };
+    const { container } = render(
+      <ToolTranscriptContext.Provider value={transcript}>
+        <ContentBlocks
+          content={[
+            { type: 'toolCall', id: 'call-1', name: 'bash', arguments: { command: 'grafana-prom query up' } },
+            { type: 'toolCall', id: 'call-2', name: 'bash', arguments: { command: 'sleep 5' } },
+          ]}
+        />
+      </ToolTranscriptContext.Provider>
+    );
+
+    const commands = Array.from(container.querySelectorAll('code.language-bash')).map((code) => code.textContent);
+    expect(commands).toEqual(['grafana-prom query up', 'sleep 5']);
+    expect(container.querySelector('code.language-bash span')?.textContent).toBe('grafana-prom');
+    expect(container.textContent).toContain('42 ms');
+    expect(container.textContent).not.toContain('/workspace');
+    expect(screen.getAllByTestId('Spinner')).toHaveLength(1);
+    expect(container.textContent).not.toContain('Run bash');
+    expect(container.textContent).not.toContain('"command"');
+  });
+
+  it('renders session filesystem tool calls without results as prompt lines', () => {
+    const { container } = render(
+      <ContentBlocks
+        content={[
+          { type: 'toolCall', name: 'bash', arguments: { command: 'ls', cwd: '/tmp' } },
+          { type: 'toolCall', name: 'read', arguments: { path: '/workspace/notes.txt', offset: 3, limit: 20 } },
+          { type: 'toolCall', name: 'write', arguments: { path: '/workspace/notes.txt', content: 'hello\n' } },
+          {
+            type: 'toolCall',
+            name: 'edit',
+            arguments: {
+              path: '/workspace/notes.txt',
+              edits: [
+                { oldText: 'a', newText: 'b' },
+                { oldText: 'c', newText: 'd', replaceAll: true },
+              ],
+            },
           },
         ]}
       />
     );
 
-    expect(container.textContent).toContain('Run bash');
-    expect(container.textContent).toContain('grafana-prom query up');
-    expect(container.querySelector('code.language-bash')?.textContent).toBe('grafana-prom query up');
-    expect(container.querySelector('code.language-bash span')?.textContent).toBe('grafana-prom');
-    expect(container.textContent).toContain('partial output');
-    expect(container.textContent).not.toContain('Specialist agent');
+    expect(container.textContent).toContain('/tmp $ls');
+    expect(container.textContent).toContain('›read /workspace/notes.txt');
+    expect(container.textContent).toContain('›write /workspace/notes.txt6 B');
+    expect(container.textContent).toContain('›edit /workspace/notes.txt2 edits');
+    expect(container.querySelector('details')).toBeNull();
+  });
+
+  it('marks tool calls that are still streaming with a cursor', () => {
+    const { container } = render(
+      <ContentBlocks content={[{ type: 'toolCall', name: 'bash', arguments: { command: 'grafana se' } }]} isStreaming />
+    );
+
+    expect(container.textContent).toContain('grafana se');
+    expect(container.querySelector('[aria-hidden="true"]')).not.toBeNull();
+  });
+
+  it('renders read results as a collapsed line with numbered contents', () => {
+    (highlightJsonnetLines as jest.Mock).mockClear();
+    const { container } = render(
+      <ToolResultMessageBody
+        toolName="read"
+        content={[
+          {
+            type: 'text',
+            text:
+              '/workspace/a.txt (revision d2a784f1bfa4, 10 lines, 70 bytes)\n' +
+              ' 3\tthird line\n' +
+              ' 4\t  indented fourth\n' +
+              '[showing lines 3-4 of 10; continue with offset=5]',
+          },
+        ]}
+        details={{
+          path: '/workspace/a.txt',
+          type: 'file',
+          revision: 'd2a784f1bfa4',
+          totalLines: 10,
+          startLine: 3,
+          endLine: 4,
+          truncated: true,
+        }}
+      />
+    );
+
+    const summary = container.querySelector('details > summary');
+    expect(summary?.textContent).toBe('›read /workspace/a.txtlines 3-4 of 10');
+    expect((summary?.parentElement as HTMLDetailsElement | undefined)?.open).toBe(false);
+    const lineNumbers = Array.from(container.querySelectorAll('pre > div')).map(
+      (line) => line.firstElementChild?.textContent
+    );
+    expect(lineNumbers).toEqual(['3', '4']);
+    expect(container.textContent).toContain('  indented fourth');
+    expect(container.textContent).toContain('continue with offset=5');
+    expect(container.textContent).not.toContain('70 bytes');
+    expect(highlightJsonnetLines).not.toHaveBeenCalled();
+  });
+
+  it('renders read results for directories as a listing', () => {
+    const { container } = render(
+      <ToolResultMessageBody
+        toolName="read"
+        content={[{ type: 'text', text: '/grafana/dashboards/\nabc/\nxyz/\nREADME.md' }]}
+        details={{ path: '/grafana/dashboards', type: 'directory', entries: 3 }}
+      />
+    );
+
+    expect(container.querySelector('details > summary')?.textContent).toBe('›read /grafana/dashboards/3 entries');
+    expect(container.querySelector('details pre')?.textContent).toBe('abc/\nxyz/\nREADME.md');
+  });
+
+  it('renders write and edit results with inline diffs and marks dashboard copies as staged', () => {
+    const diff =
+      'Index: /workspace/a.json\n' +
+      '--- /workspace/a.json\n' +
+      '+++ /workspace/a.json\n' +
+      '@@ -1,3 +1,3 @@\n' +
+      ' {\n' +
+      '-  "title": "Old"\n' +
+      '+  "title": "New"\n' +
+      ' }\n' +
+      '\\ No newline at end of file\n';
+
+    const { container } = render(
+      <>
+        <ToolResultMessageBody
+          toolName="edit"
+          content={[{ type: 'text', text: `Edited /workspace/a.json (revision 1a2b3c4d5e6f)\n${diff}` }]}
+          details={{ path: '/workspace/a.json', revision: '1a2b3c4d5e6f', edits: 1, diff }}
+        />
+        <ToolResultMessageBody
+          toolName="write"
+          content={[{ type: 'text', text: 'Updated /grafana/dashboards/abc/dashboard.json (120 bytes)' }]}
+          details={{
+            path: '/grafana/dashboards/abc/dashboard.json',
+            change: 'modified',
+            bytes: 120,
+            revision: '9f8e7d6c5b4a',
+            diff,
+          }}
+        />
+      </>
+    );
+
+    const diffs = Array.from(container.querySelectorAll('pre')).map((pre) =>
+      Array.from(pre.children).map((line) => line.textContent)
+    );
+    expect(diffs).toEqual([
+      ['@@ -1,3 +1,3 @@', ' {', '-  "title": "Old"', '+  "title": "New"', ' }'],
+      ['@@ -1,3 +1,3 @@', ' {', '-  "title": "Old"', '+  "title": "New"', ' }'],
+    ]);
+    expect(container.textContent).toContain('›write /grafana/dashboards/abc/dashboard.json120 B');
+    expect(container.textContent).not.toContain('Edited /workspace/a.json');
+    expect(container.textContent?.match(/Grafana is unchanged/g)).toHaveLength(1);
+  });
+
+  it('renders write results without a diff as a single line', () => {
+    const { container } = render(
+      <ToolResultMessageBody
+        toolName="write"
+        content={[{ type: 'text', text: 'Created /workspace/new.txt (6 bytes, revision abcdef012345)' }]}
+        details={{ path: '/workspace/new.txt', change: 'created', bytes: 6, revision: 'abcdef012345' }}
+      />
+    );
+
+    expect(container.textContent).toBe('›write /workspace/new.txt6 B');
+  });
+
+  it('renders bash results with output and git-status style file changes', () => {
+    const { container } = render(
+      <ToolResultMessageBody
+        toolName="bash"
+        content={[{ type: 'text', text: '{ "ok": true }\n[exit 0]' }]}
+        details={bashDetails({
+          command: 'jq . /workspace/a.json > /grafana/dashboards/abc/dashboard.json',
+          stdout: '{ "ok": true }\n',
+          stderr: 'note: reformatted\n',
+          changes: [
+            {
+              path: '/grafana/dashboards/abc/dashboard.json',
+              change: 'modified',
+              bytes: 2048,
+              revision: 'aa11bb22cc33',
+            },
+            { path: '/workspace/out.txt', change: 'created', bytes: 12, revision: 'dd44ee55ff66' },
+          ],
+          durationMs: 42,
+        })}
+      />
+    );
+
+    expect(container.querySelector('code.language-bash')?.textContent).toBe(
+      'jq . /workspace/a.json > /grafana/dashboards/abc/dashboard.json'
+    );
+    expect(container.querySelector('code.language-bash span')?.textContent).toBe('jq');
+    const outputs = Array.from(container.querySelectorAll('pre')).map((pre) => pre.textContent);
+    expect(outputs).toEqual([
+      '{ "ok": true }',
+      'note: reformatted',
+      'M /grafana/dashboards/abc/dashboard.json  2.0 KiB  stagedA /workspace/out.txt  12 B',
+    ]);
+    expect(
+      outputs.slice(0, 2).every((_, index) => container.querySelectorAll('pre')[index].querySelector('span') === null)
+    ).toBe(true);
+    expect(container.textContent).toContain('42 ms');
+    expect(container.textContent).not.toContain('exit');
+    expect(container.textContent).not.toContain('discarded');
+    expect(container.querySelector('details')).toBeNull();
+  });
+
+  it('shows the first lines of long output and expands on request', () => {
+    const stdout = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join('\n') + '\n';
+    const { container } = render(
+      <ToolResultMessageBody toolName="bash" content={[]} details={bashDetails({ command: 'seq', stdout })} />
+    );
+
+    expect(container.querySelector('pre')?.textContent?.split('\n')).toHaveLength(10);
+    fireEvent.click(screen.getByRole('button', { name: '… 20 more lines' }));
+    expect(container.querySelector('pre')?.textContent?.split('\n')).toHaveLength(30);
+    expect(screen.queryByRole('button')).toBeNull();
+  });
+
+  it('renders timed-out bash results with discarded changes', () => {
+    const { container } = render(
+      <ToolResultMessageBody
+        toolName="bash"
+        content={[{ type: 'text', text: '[stderr]\ncommand timed out\n[exit 124]' }]}
+        details={bashDetails({
+          command: 'sleep 999',
+          exitCode: 124,
+          stderr: 'command timed out\n',
+          timedOut: true,
+          discardedChanges: 'timed out after 30000ms',
+          durationMs: 30012,
+        })}
+      />
+    );
+
+    expect(container.textContent).toContain('timed out · 30.0 s');
+    expect(container.textContent).toContain('discarded uncommitted changes: timed out after 30000ms');
+    expect(container.textContent).toContain('command timed out');
+  });
+
+  it('renders the exit code of failed bash results', () => {
+    const { container } = render(
+      <ToolResultMessageBody
+        toolName="bash"
+        content={[{ type: 'text', text: '[stderr]\nboom\n[exit 2]' }]}
+        details={bashDetails({ command: 'false', exitCode: 2, stderr: 'boom\n', durationMs: 3 })}
+      />
+    );
+
+    expect(container.textContent).toBe('$falseexit 2 · 3 msboom');
+  });
+
+  it('renders user shell commands with the user prompt', () => {
+    const { container } = render(
+      <UserShellEntry result={bashDetails({ command: 'ls', stdout: 'a\n', durationMs: 1 })} />
+    );
+
+    expect(container.textContent).toBe('!ls1 msa');
+  });
+
+  it('renders thrown tool errors under the prompt line', () => {
+    const { container } = render(
+      <ToolResultMessageBody
+        toolName="edit"
+        content={[{ type: 'text', text: 'oldText not found in /workspace/a.txt.' }]}
+        details={{ path: '/workspace/a.txt' }}
+        isError
+      />
+    );
+
+    expect(container.textContent).toBe('›edit /workspace/a.txtoldText not found in /workspace/a.txt.');
   });
 
   it('renders stored specialist results with the generic tool result view', () => {
@@ -186,175 +463,6 @@ describe('ToolRenderer', () => {
     expect(screen.queryByTestId('subagent-result')).not.toBeInTheDocument();
   });
 
-  it('renders dashboard tool calls as summaries', () => {
-    const { container } = render(
-      <ContentBlocks
-        content={[
-          {
-            type: 'toolCall',
-            name: 'screenshot_dashboard',
-            arguments: {
-              uid: 'service-health',
-              width: 1200,
-              height: 800,
-            },
-          },
-          {
-            type: 'toolCall',
-            name: 'inspect_dashboard_metric_usage',
-            arguments: {
-              uid: 'service-health',
-            },
-          },
-        ]}
-      />
-    );
-
-    expect(container.textContent).toContain('Capture dashboard screenshot | service-health');
-    expect(container.textContent).toContain('Inspect dashboard metric usage | service-health');
-    expect(container.textContent).toContain('1200 x 800');
-    expect(container.textContent).not.toContain('"uid"');
-  });
-
-  it('renders live dashboard schema tool calls as summaries', () => {
-    const { container } = render(
-      <ContentBlocks
-        content={[
-          {
-            type: 'toolCall',
-            name: 'get_live_dashboard_mutation_schema',
-            arguments: {
-              command: 'UPDATE_PANEL',
-            },
-          },
-        ]}
-      />
-    );
-
-    expect(container.textContent).toContain('Get live dashboard mutation schema | UPDATE_PANEL');
-    expect(container.textContent).not.toContain('"command"');
-    expect(screen.getByTestId('book')).toBeInTheDocument();
-  });
-
-  it('renders live dashboard edit tool calls with audit fields', () => {
-    const { container } = render(
-      <ContentBlocks
-        content={[
-          {
-            type: 'toolCall',
-            name: 'list_live_dashboard_panels',
-            arguments: { elements: ['panel-2'], includeStatus: true },
-          },
-          { type: 'toolCall', name: 'get_live_dashboard_layout', arguments: {} },
-          { type: 'toolCall', name: 'get_live_dashboard_info', arguments: {} },
-          { type: 'toolCall', name: 'list_live_dashboard_variables', arguments: { parentPath: '/rows/0' } },
-          {
-            type: 'toolCall',
-            name: 'rename_live_dashboard_panel',
-            arguments: { elementName: 'panel-2', title: 'Requests', description: 'Updated panel copy' },
-          },
-          {
-            type: 'toolCall',
-            name: 'update_live_dashboard_panel_query',
-            arguments: {
-              elementName: 'panel-2',
-              queryExpression: 'sum(rate(http_requests_total[$__rate_interval]))',
-              datasourceType: 'prometheus',
-              datasourceName: 'prom-prod',
-              refId: 'B',
-              hidden: true,
-            },
-          },
-          {
-            type: 'toolCall',
-            name: 'add_live_dashboard_panel',
-            arguments: {
-              title: 'Errors',
-              visualizationType: 'timeseries',
-              unit: 'reqps',
-              datasourceType: 'prometheus',
-              datasourceName: 'prom-prod',
-              x: 12,
-              y: 8,
-              width: 12,
-              height: 8,
-            },
-          },
-          {
-            type: 'toolCall',
-            name: 'move_or_resize_live_dashboard_panel',
-            arguments: { elementName: 'panel-2', parentPath: '/', x: 0, y: 8, width: 12, height: 8 },
-          },
-          {
-            type: 'toolCall',
-            name: 'update_live_dashboard_settings',
-            arguments: {
-              title: 'Ops',
-              tags: ['service', 'sre'],
-              from: 'now-6h',
-              to: 'now',
-              autoRefresh: '30s',
-              timezone: 'browser',
-              cursorSync: 'Tooltip',
-              editable: false,
-              liveNow: true,
-              preload: true,
-            },
-          },
-          {
-            type: 'toolCall',
-            name: 'add_live_dashboard_variable',
-            arguments: {
-              name: 'env',
-              variableType: 'query',
-              queryExpression: 'label_values(up, job)',
-              datasourceName: 'prom-prod',
-              current: 'prod',
-              multi: true,
-              includeAll: true,
-            },
-          },
-          {
-            type: 'toolCall',
-            name: 'update_live_dashboard_variable',
-            arguments: { name: 'env', newName: 'service', options: ['api', 'worker'], position: 2 },
-          },
-          {
-            type: 'toolCall',
-            name: 'apply_live_dashboard_mutation',
-            arguments: {
-              type: 'REMOVE_PANEL',
-              payload: { elements: [{ kind: 'ElementReference', name: 'panel-9' }] },
-            },
-          },
-        ]}
-      />
-    );
-
-    expect(container.textContent).toContain('List live dashboard panels | panel-2');
-    expect(container.textContent).toContain('Rename live dashboard panel | panel-2');
-    expect(container.textContent).toContain('Updated panel copy');
-    expect(container.textContent).toContain('Update live dashboard panel query | panel-2');
-    expect(container.textContent).toContain('prometheus/prom-prod');
-    expect(container.textContent).toContain('Ref ID');
-    expect(container.textContent).toContain('B');
-    expect(container.textContent).toContain('Add live dashboard panel | Errors');
-    expect(container.textContent).toContain('timeseries');
-    expect(container.textContent).toContain('reqps');
-    expect(container.textContent).toContain('x 12, y 8, width 12, height 8');
-    expect(container.textContent).toContain('Update live dashboard settings | Ops');
-    expect(container.textContent).toContain('now-6h -> now');
-    expect(container.textContent).toContain('30s');
-    expect(container.textContent).toContain('Tooltip');
-    expect(container.textContent).toContain('service, sre');
-    expect(container.textContent).toContain('Add live dashboard variable | env');
-    expect(container.textContent).toContain('label_values(up, job)');
-    expect(container.textContent).toContain('Update live dashboard variable | env');
-    expect(container.textContent).toContain('service');
-    expect(container.textContent).toContain('Apply live dashboard mutation | REMOVE_PANEL');
-    expect(container.textContent).toContain('panel-9');
-  });
-
   it('renders object-shaped failed tool results as readable errors', () => {
     const { container } = render(
       <ToolResultMessageBody
@@ -369,37 +477,6 @@ describe('ToolRenderer', () => {
     expect(container.textContent).toContain('get_alert_rule failed');
     expect(container.textContent).toContain('Alert rule lookup failed');
     expect(container.textContent).not.toContain('[object Object]');
-  });
-
-  it('renders alert tool calls as troubleshooting summaries', () => {
-    const { container } = render(
-      <ContentBlocks
-        content={[
-          {
-            type: 'toolCall',
-            name: 'find_panel_alert_rules',
-            arguments: {
-              dashboardUid: 'service-dashboard',
-              panelId: 2,
-              panelTitle: '5xx rate panel',
-            },
-          },
-          {
-            type: 'toolCall',
-            name: 'get_alert_rule',
-            arguments: {
-              name: 'service-5xx-rate',
-              namespace: 'default',
-            },
-          },
-        ]}
-      />
-    );
-
-    expect(container.textContent).toContain('Find panel alert rules | dashboard service-dashboard | panel 2');
-    expect(container.textContent).toContain('Get alert rule | service-5xx-rate | namespace default');
-    expect(container.textContent).not.toContain('"dashboardUid"');
-    expect(screen.getAllByTestId('bell').length).toBeGreaterThan(0);
   });
 
   it('renders panel alert rule matches with link health', () => {
@@ -819,242 +896,6 @@ describe('ToolRenderer', () => {
     expect(container.textContent).not.toContain('Live dashboard mutation succeeded');
   });
 
-  it('renders session filesystem tool calls as compact summaries', () => {
-    const { container } = render(
-      <ContentBlocks
-        content={[
-          {
-            type: 'toolCall',
-            name: 'bash',
-            arguments: {
-              command: 'grafana-dashboard validate /grafana/dashboards/abc/dashboard.json',
-              timeoutMs: 5000,
-            },
-          },
-          {
-            type: 'toolCall',
-            name: 'read',
-            arguments: { path: '/workspace/notes.txt', offset: 3, limit: 20 },
-          },
-          {
-            type: 'toolCall',
-            name: 'write',
-            arguments: { path: '/workspace/notes.txt', content: 'hello\n', revision: 'd2a784f1bfa4' },
-          },
-          {
-            type: 'toolCall',
-            name: 'edit',
-            arguments: {
-              path: '/workspace/notes.txt',
-              edits: [
-                { oldText: 'a', newText: 'b' },
-                { oldText: 'c', newText: 'd', replaceAll: true },
-              ],
-            },
-          },
-        ]}
-      />
-    );
-
-    const summaries = Array.from(container.querySelectorAll('details > summary')).map((summary) => summary.textContent);
-    expect(summaries).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining('Run bash'),
-        expect.stringContaining('Read file'),
-        expect.stringContaining('Write file | 6 B'),
-        expect.stringContaining('Edit file | 2 edits'),
-      ])
-    );
-    expect(summaries.some((summary) => summary?.includes('/workspace/notes.txt'))).toBe(false);
-    expect(summaries.some((summary) => summary?.includes('grafana-dashboard'))).toBe(false);
-    expect(Array.from(container.querySelectorAll('details')).every((details) => !details.hasAttribute('open'))).toBe(
-      true
-    );
-    expect(container.textContent).toContain('/workspace/notes.txt');
-    expect(container.textContent).toContain('grafana-dashboard validate /grafana/dashboards/abc/dashboard.json');
-    expect(container.textContent).toContain('5.0 s');
-    expect(container.textContent).toContain('20 lines');
-    expect(container.textContent).toContain('d2a784f1bfa4');
-    expect(container.textContent).toContain('Replace all');
-    expect(container.textContent).not.toContain('"command"');
-    expect(container.textContent).not.toContain('"path"');
-  });
-
-  it('renders read results as numbered lines with range and revision', () => {
-    (highlightJsonnetLines as jest.Mock).mockClear();
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="read"
-        content={[
-          {
-            type: 'text',
-            text:
-              '/workspace/a.txt (revision d2a784f1bfa4, 10 lines, 70 bytes)\n' +
-              ' 3\tthird line\n' +
-              ' 4\t  indented fourth\n' +
-              '[showing lines 3-4 of 10; continue with offset=5]',
-          },
-        ]}
-        details={{
-          path: '/workspace/a.txt',
-          type: 'file',
-          revision: 'd2a784f1bfa4',
-          totalLines: 10,
-          startLine: 3,
-          endLine: 4,
-          truncated: true,
-        }}
-      />
-    );
-
-    const summary = Array.from(container.querySelectorAll('details > summary')).find((element) =>
-      element.textContent?.includes('/workspace/a.txt | lines 3-4 of 10 | rev d2a784f1bfa4')
-    );
-    expect(summary).toBeTruthy();
-    expect((summary?.parentElement as HTMLDetailsElement | undefined)?.open).toBe(false);
-    expect(summary?.textContent).not.toContain('third line');
-    const lineNumbers = Array.from(container.querySelectorAll('pre > div')).map(
-      (line) => line.firstElementChild?.textContent
-    );
-    expect(lineNumbers).toEqual(['3', '4']);
-    expect(container.textContent).toContain('third line');
-    expect(container.textContent).toContain('  indented fourth');
-    expect(container.textContent).toContain('continue with offset=5');
-    expect(container.textContent).not.toContain('70 bytes');
-    expect(highlightJsonnetLines).not.toHaveBeenCalled();
-  });
-
-  it('renders read results for directories as a listing', () => {
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="read"
-        content={[{ type: 'text', text: '/grafana/dashboards/\nabc/\nxyz/\nREADME.md' }]}
-        details={{ path: '/grafana/dashboards', type: 'directory', entries: 3 }}
-      />
-    );
-
-    expect(container.querySelector('details > summary')?.textContent).toContain('/grafana/dashboards/ | 3 entries');
-    expect(Array.from(container.querySelectorAll('pre')).length).toBe(0);
-    expect(container.textContent).toContain('abc/');
-    expect(container.textContent).toContain('xyz/');
-    expect(container.textContent).toContain('README.md');
-  });
-
-  it('renders write and edit results with diffs and marks dashboard copies as staged', () => {
-    const diff = '@@ -1,3 +1,3 @@\n' + ' {\n' + '-  "title": "Old"\n' + '+  "title": "New"\n' + ' }\n';
-
-    const { container } = render(
-      <>
-        <ToolResultMessageBody
-          toolName="edit"
-          content={[{ type: 'text', text: `Edited /workspace/a.json (revision 1a2b3c4d5e6f)\n${diff}` }]}
-          details={{ path: '/workspace/a.json', revision: '1a2b3c4d5e6f', edits: 1, diff }}
-        />
-        <ToolResultMessageBody
-          toolName="write"
-          content={[
-            {
-              type: 'text',
-              text:
-                'Updated /grafana/dashboards/abc/dashboard.json (120 bytes, revision 9f8e7d6c5b4a)\n' +
-                'Staged locally only. Validate with `grafana-dashboard validate`, then `workspace apply` to request approval.',
-            },
-          ]}
-          details={{
-            path: '/grafana/dashboards/abc/dashboard.json',
-            change: 'modified',
-            bytes: 120,
-            revision: '9f8e7d6c5b4a',
-            diff,
-          }}
-        />
-      </>
-    );
-
-    const diffSummaries = Array.from(container.querySelectorAll('details > summary')).filter((summary) =>
-      summary.textContent?.includes('Diff | 1 hunk | +1 / -1')
-    );
-    expect(diffSummaries).toHaveLength(2);
-    expect(diffSummaries.every((summary) => (summary.parentElement as HTMLDetailsElement | null)?.open)).toBe(true);
-    expect(container.textContent).toContain('-  "title": "Old"');
-    expect(container.textContent).toContain('+  "title": "New"');
-    expect(container.textContent).not.toContain('Edited /workspace/a.json');
-    expect(container.textContent).toContain('staged');
-    expect(container.textContent).toContain('Grafana is unchanged');
-    expect(container.textContent?.match(/Grafana is unchanged/g)).toHaveLength(1);
-  });
-
-  it('renders write results without a diff as the summary line', () => {
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="write"
-        content={[{ type: 'text', text: 'Created /workspace/new.txt (6 bytes, revision abcdef012345)' }]}
-        details={{ path: '/workspace/new.txt', change: 'created', bytes: 6, revision: 'abcdef012345' }}
-      />
-    );
-
-    expect(container.textContent).toContain('Created /workspace/new.txt (6 bytes, revision abcdef012345)');
-    expect(container.textContent).not.toContain('Diff');
-    expect(container.textContent).not.toContain('staged');
-  });
-
-  it('renders bash results with command output and changed files', () => {
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="bash"
-        content={[{ type: 'text', text: '{ "ok": true }\n[exit 0]' }]}
-        details={{
-          command: 'jq . /workspace/a.json > /grafana/dashboards/abc/dashboard.json',
-          cwd: '/workspace',
-          exitCode: 0,
-          stdout: '{ "ok": true }\n',
-          stderr: 'note: reformatted\n',
-          stdoutTruncated: false,
-          stderrTruncated: false,
-          timedOut: false,
-          changes: [
-            {
-              path: '/grafana/dashboards/abc/dashboard.json',
-              change: 'modified',
-              bytes: 2048,
-              revision: 'aa11bb22cc33',
-            },
-            { path: '/workspace/out.txt', change: 'created', bytes: 12, revision: 'dd44ee55ff66' },
-          ],
-          durationMs: 42,
-        }}
-      />
-    );
-
-    expect(container.textContent).toContain('completed');
-    expect(container.textContent).toContain('Exit code');
-    expect(container.textContent).toContain('42 ms');
-    expect(container.textContent).toContain('jq . /workspace/a.json > /grafana/dashboards/abc/dashboard.json');
-    expect(container.querySelector('code.language-bash')?.textContent).toBe(
-      'jq . /workspace/a.json > /grafana/dashboards/abc/dashboard.json'
-    );
-    expect(container.querySelector('code.language-bash span')?.textContent).toBe('jq');
-    expect(container.textContent).toContain('{ "ok": true }');
-    const outputs = Array.from(container.querySelectorAll('details')).filter((details) =>
-      ['stdout', 'stderr'].includes(details.querySelector('summary')?.textContent ?? '')
-    ) as HTMLDetailsElement[];
-    expect(outputs.map((details) => [details.querySelector('summary')?.textContent, details.open])).toEqual([
-      ['stdout', true],
-      ['stderr', false],
-    ]);
-    expect(outputs.every((details) => details.querySelector('pre span') === null)).toBe(true);
-    const rows = Array.from(container.querySelectorAll('tbody tr')).map((row) =>
-      Array.from(row.querySelectorAll('td')).map((cell) => cell.textContent)
-    );
-    expect(rows).toEqual([
-      ['/grafana/dashboards/abc/dashboard.json', 'modified staged', '2.0 KiB', 'aa11bb22cc33'],
-      ['/workspace/out.txt', 'created', '12 B', 'dd44ee55ff66'],
-    ]);
-    expect(container.textContent).not.toContain('discarded');
-    expect(container.textContent).not.toContain('"stdout"');
-    expect(container.textContent).not.toContain('"changes"');
-  });
-
   it('renders images attached to bash results', () => {
     const { container } = render(
       <ToolResultMessageBody
@@ -1080,64 +921,6 @@ describe('ToolRenderer', () => {
     );
 
     expect(container.querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,aW1n');
-  });
-
-  it('renders timed-out bash results with discarded changes and open stderr', () => {
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="bash"
-        content={[{ type: 'text', text: '[stderr]\ncommand timed out\n[exit 124]' }]}
-        details={{
-          command: 'sleep 999',
-          cwd: '/workspace',
-          exitCode: 124,
-          stdout: '',
-          stderr: 'command timed out\n',
-          stdoutTruncated: false,
-          stderrTruncated: false,
-          timedOut: true,
-          changes: [],
-          discardedChanges: 'timed out after 30000ms',
-          durationMs: 30012,
-        }}
-      />
-    );
-
-    expect(container.textContent).toContain('timed out');
-    expect(container.textContent).toContain('30.0 s');
-    expect(container.textContent).toContain('discarded');
-    expect(container.textContent).toContain('timed out after 30000ms');
-    const stderr = Array.from(container.querySelectorAll('details')).find(
-      (details) => details.querySelector('summary')?.textContent === 'stderr'
-    );
-    expect(stderr?.open).toBe(true);
-    expect(container.querySelectorAll('details > summary')).toHaveLength(1);
-    expect(container.querySelector('table')).toBeNull();
-  });
-
-  it('opens stderr for failed bash results', () => {
-    const { container } = render(
-      <ToolResultMessageBody
-        toolName="bash"
-        content={[{ type: 'text', text: '[stderr]\nboom\n[exit 2]' }]}
-        details={{
-          command: 'false',
-          cwd: '/workspace',
-          exitCode: 2,
-          stdout: '',
-          stderr: 'boom\n',
-          stdoutTruncated: false,
-          stderrTruncated: false,
-          timedOut: false,
-          changes: [],
-          durationMs: 3,
-        }}
-      />
-    );
-
-    expect(container.textContent).toContain('failed');
-    expect(container.querySelector('details')?.open).toBe(true);
-    expect(container.textContent).not.toContain('discarded');
   });
 });
 
@@ -1173,7 +956,8 @@ describe('ToolRenderer hardening', () => {
       />
     );
 
-    expect(container.textContent).toContain('Diff | 1 hunk | +1 / -1');
+    const lines = Array.from(container.querySelectorAll('pre > div')).map((line) => line.textContent);
+    expect(lines).toEqual(['@@ -1,2 +1,2 @@', '---foo', '+++bar', ' context']);
   });
 
   it('does not fabricate hunk positions when the diff header is unparseable', () => {

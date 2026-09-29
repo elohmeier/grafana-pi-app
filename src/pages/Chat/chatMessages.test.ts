@@ -4,6 +4,7 @@ import {
   convertChatMessagesToLlm,
   createUserShellMessage,
   hasPersistableMessages,
+  pairToolResults,
   parseUserShellInput,
 } from './chatMessages';
 
@@ -119,6 +120,29 @@ describe('convertChatMessagesToLlm', () => {
 describe('hasPersistableMessages', () => {
   it('keeps aborted assistant notices persistable for the visible chat history', () => {
     expect(hasPersistableMessages([assistant({ content: [], stopReason: 'aborted' })])).toBe(true);
+  });
+});
+
+describe('pairToolResults', () => {
+  it('pairs results with calls from earlier assistant messages only', () => {
+    const paired = toolResult('call_1');
+    const orphan = toolResult('call_2');
+    const early = toolResult('call_3');
+    const messages: AgentMessage[] = [
+      early,
+      assistant({
+        content: [
+          { type: 'toolCall', id: 'call_1', name: 'bash', arguments: {} },
+          { type: 'toolCall', id: 'call_3', name: 'bash', arguments: {} },
+        ],
+        stopReason: 'toolUse',
+      }),
+      paired,
+      orphan,
+      assistant({ content: null as unknown as AssistantMessage['content'] }),
+    ];
+
+    expect(pairToolResults(messages)).toEqual(new Map([['call_1', paired]]));
   });
 });
 
