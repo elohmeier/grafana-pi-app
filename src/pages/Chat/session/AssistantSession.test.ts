@@ -7,6 +7,7 @@ jest.mock('typebox', () => ({
   ),
 }));
 
+import { createAssistantMessageEventStream } from '@earendil-works/pi-ai';
 import { AssistantSession } from './AssistantSession';
 import { createFakeDashboardBroker } from '../workspace/testUtils';
 
@@ -67,4 +68,58 @@ it('serializes persistence with captured state independently of the view', async
   second.commit();
   await Promise.all([saving, session.save()]);
   expect(seen).toEqual(['first', 'second']);
+});
+
+it('persists the complete history after a run, not only the run’s new messages', async () => {
+  const session = new AssistantSession();
+  const saved: unknown[][] = [];
+  session.persist = async (snapshot) => {
+    saved.push(snapshot.messages);
+  };
+  const answer = {
+    role: 'assistant' as const,
+    content: [{ type: 'text' as const, text: 'second' }],
+    api: 'openai-completions',
+    provider: 'test',
+    model: 'test',
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: 'stop' as const,
+    timestamp: 3,
+  };
+  const earlier = [
+    { role: 'user' as const, content: [{ type: 'text' as const, text: 'first' }], timestamp: 1 },
+    { ...answer, content: [{ type: 'text' as const, text: 'first answer' }], timestamp: 2 },
+  ];
+  const agent = session.createAgent({
+    messages: earlier,
+    systemPrompt: '',
+    tools: [],
+    model: { id: 'test', contextWindow: 100000, maxTokens: 1000 } as never,
+    thinkingLevel: 'off',
+    streamFn: () => {
+      const stream = createAssistantMessageEventStream();
+      queueMicrotask(() => {
+        stream.push({ type: 'done', reason: 'stop', message: answer });
+        stream.end(answer);
+      });
+      return stream;
+    },
+  });
+
+  await agent.prompt('second question');
+  await session.flushSaves();
+
+  expect(saved.at(-1)?.map((message) => (message as { role: string }).role)).toEqual([
+    'user',
+    'assistant',
+    'user',
+    'assistant',
+  ]);
 });

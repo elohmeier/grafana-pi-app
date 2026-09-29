@@ -142,7 +142,8 @@ export class AssistantSession {
     this.unsubscribeAgent = agent.subscribe(async (event) => {
       if (event.type === 'agent_end') {
         try {
-          await this.save(event.messages);
+          // `event.messages` holds only this run's new messages; persist the whole history.
+          await this.save(agent.state.messages);
         } catch {
           /* Exposed as persistenceError for the host. */
         }
