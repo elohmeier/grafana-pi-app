@@ -20,6 +20,10 @@ class MemoryStorage {
   setItem(key: string, value: string) {
     this.values.set(key, value);
   }
+
+  keys() {
+    return [...this.values.keys()];
+  }
 }
 
 describe('Assistant sidebar dock handoff', () => {
@@ -66,6 +70,27 @@ describe('Assistant sidebar dock handoff', () => {
     const storage = new MemoryStorage();
 
     rememberAssistantDockRoute('https://example.com/d/service', storage, 1000);
+
+    expect(getAssistantDockRoute(storage, 1000)).toBeUndefined();
+  });
+
+  it('keeps the last route when the user passes through sign-in pages', () => {
+    const storage = new MemoryStorage();
+
+    rememberAssistantDockRoute('/d/service', storage, 1000);
+    rememberAssistantDockRoute('/login', storage, 1000);
+    rememberAssistantDockRoute('/user/password/change?forceLogin=true', storage, 1000);
+
+    expect(getAssistantDockRoute(storage, 1000)).toBe('/d/service');
+    expect(routeFromLocation({ pathname: '/login/', search: '?redirect=%2F' })).toBeUndefined();
+    expect(routeFromLocation({ pathname: '/loginx' })).toBe('/loginx');
+  });
+
+  it('drops a stored sign-in route', () => {
+    const storage = new MemoryStorage();
+    rememberAssistantDockRoute('/d/service', storage, 1000);
+    const [key] = storage.keys();
+    storage.setItem(key, JSON.stringify({ schemaVersion: 1, createdAt: 1000, route: '/login' }));
 
     expect(getAssistantDockRoute(storage, 1000)).toBeUndefined();
   });

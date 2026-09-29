@@ -149,11 +149,20 @@ function compactRequest(request: AssistantSidebarDockRequest): AssistantSidebarD
 
 function normalizeRoute(route: string | undefined) {
   const value = stringValue(route);
-  if (!value || !value.startsWith('/') || value.startsWith('//')) {
+  if (!value || !value.startsWith('/') || value.startsWith('//') || isAuthRoute(value)) {
     return undefined;
   }
 
   return value;
+}
+
+// Grafana's sign-in pages are never a place to return to: after login the
+// browser has already left them, and docking would land on the login form.
+const AUTH_ROUTE_PREFIXES = ['/login', '/logout', '/signup', '/invite', '/verify', '/user/password'];
+
+function isAuthRoute(route: string) {
+  const pathname = route.split(/[?#]/, 1)[0].replace(/\/+$/, '');
+  return AUTH_ROUTE_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
 function stringValue(value: unknown) {
