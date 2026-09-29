@@ -1,4 +1,8 @@
 import { buildNavigationPath } from '../../domain/navigation';
+import { resourceWriter } from '../apply';
+import { normalizeWorkspacePath } from '../paths';
+import { resourceAtPath } from '../resourceKinds';
+import type { WorkspaceResourceKind } from '../types';
 import { DASHBOARDS_ROOT, HYDRATION_CONCURRENCY, isBaseLoaded } from '../workspace';
 import {
   json,
@@ -123,34 +127,51 @@ export const grafanaCommand: WorkspaceCommandSpec = {
       },
     },
     refresh: {
-      summary: 'Re-fetch base snapshots of loaded dashboards (all unmodified ones when no UID is given).',
-      usage: 'grafana refresh [UID...] [--discard]',
+      summary: 'Re-fetch base snapshots of loaded dashboards and alert rules (all unmodified ones when none is given).',
+      usage: 'grafana refresh [UID|PATH...] [--discard]',
       effect: 'remote-read',
       options: {
-        discard: { type: 'boolean', description: 'Discard local changes of the listed UIDs before refreshing.' },
+        discard: { type: 'boolean', description: 'Discard local changes of the listed resources before refreshing.' },
       },
+      examples: ['grafana refresh checkout-overview', 'grafana refresh /grafana/alert-rules/high-5xx --discard'],
       async run(parsed, ctx) {
-        const dashboards = requireDashboards(ctx);
         const discard = parsed.options.discard === true;
-        const targets = parsed.positionals.length
-          ? uniq(parsed.positionals)
+        // A bare UID names a dashboard; paths name either kind.
+        const targets: Array<{ kind: WorkspaceResourceKind; uid: string }> = parsed.positionals.length
+          ? uniq(parsed.positionals).map((value) => {
+              if (!value.includes('/')) {
+                return { kind: 'dashboard', uid: value };
+              }
+              const target = resourceAtPath(normalizeWorkspacePath(value, ctx.cwd));
+              if (!target) {
+                throw new UsageError(`not a dashboard or alert rule path: ${value}`);
+              }
+              return target;
+            })
           : ctx.workspace
               .resourceEntries()
               .filter((entry) => entry.base && !entry.overlay && isBaseLoaded(entry))
-              .map((entry) => entry.uid);
-        const refreshed: Array<{ uid: string; resourceVersion?: string; changedRemotely: boolean }> = [];
+              .map(({ kind, uid }) => ({ kind, uid }));
+        const refreshed: Array<{ uid: string; path: string; resourceVersion?: string; changedRemotely: boolean }> = [];
         const errors: Array<{ uid: string; error: string }> = [];
-        await mapConcurrent(targets, async (uid) => {
+        await mapConcurrent(targets, async ({ kind, uid }) => {
           try {
-            const snapshot = await dashboards.get(uid, ctx.signal);
+            const writer = resourceWriter(ctx.broker, kind);
+            if (!writer) {
+              throw new Error(
+                `${kind === 'dashboard' ? 'dashboards' : 'alert rules'} are not available in this session`
+              );
+            }
+            const snapshot = await writer.get(uid, ctx.signal);
             if (!snapshot) {
               errors.push({ uid, error: 'not found or not readable by the current user' });
               return;
             }
-            const before = ctx.workspace.getResource(uid)?.base?.meta.resourceVersion;
+            const before = ctx.workspace.getResource(uid, kind)?.base?.meta.resourceVersion;
             ctx.workspace.setResourceBase(snapshot, { discardOverlay: discard });
             refreshed.push({
               uid,
+              path: ctx.workspace.resourcePath(uid, kind),
               resourceVersion: snapshot.meta.resourceVersion,
               changedRemotely: before !== undefined && before !== snapshot.meta.resourceVersion,
             });
@@ -164,7 +185,7 @@ export const grafanaCommand: WorkspaceCommandSpec = {
             schemaVersion: 1,
             refreshed: refreshed.length,
             changedRemotely: changed.map((entry) => entry.uid),
-            ...(refreshed.length <= 50 ? { dashboards: refreshed } : {}),
+            ...(refreshed.length <= 50 ? { resources: refreshed } : {}),
             errors,
           },
           errors.length > 0 ? 1 : 0

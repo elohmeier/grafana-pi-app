@@ -1,6 +1,6 @@
 import { createTwoFilesPatch } from 'diff';
 import { normalizeWorkspacePath, truncateUtf8 } from '../paths';
-import { ApplyError, applyWorkspaceChanges, stageRevert } from '../apply';
+import { ApplyError, applyWorkspaceChanges, selectsEntry, stageRevert } from '../apply';
 import { groupChanges } from '../changeGroups';
 import { fail, json, listOption, ok, UsageError, type WorkspaceCommandSpec } from './registry';
 
@@ -27,14 +27,13 @@ export const workspaceCommand: WorkspaceCommandSpec = {
     },
     diff: {
       summary:
-        'Unified diff of staged resource changes against their fetched base; --stat summarizes changed lines per dashboard and repeated replacements.',
+        'Unified diff of staged resource changes against their fetched base; --stat summarizes changed lines per dashboard or alert rule and repeated replacements.',
       usage: 'workspace diff [--stat] [PATH...]',
       effect: 'local-read',
       options: {
         stat: {
           type: 'boolean',
-          description:
-            'Per-dashboard line counts and the replacements repeated across dashboards, instead of the diff.',
+          description: 'Per-resource line counts and the replacements repeated across resources, instead of the diff.',
         },
       },
       async run(parsed, ctx) {
@@ -43,42 +42,40 @@ export const workspaceCommand: WorkspaceCommandSpec = {
           const entries = ctx.tx
             .view()
             .resourceEntries()
-            .filter(
-              (entry) =>
-                entry.overlay &&
-                (selected.size === 0 ||
-                  selected.has(entry.path) ||
-                  selected.has(entry.path.replace(/\/dashboard\.json$/, '')))
-            );
+            .filter((entry) => entry.overlay && selectsEntry(selected, entry));
           const inputs = entries.map((entry) => ({
             path: entry.path,
             before: entry.base?.content ?? '',
             after: entry.overlay?.content ?? '',
           }));
           const { groups, ungroupedChanges } = groupChanges(inputs);
+          const stat = (entry: (typeof entries)[number]) => {
+            const patch = createTwoFilesPatch(
+              entry.path,
+              entry.path,
+              entry.base?.content ?? '',
+              entry.overlay?.content ?? ''
+            );
+            const lines = patch.split('\n');
+            return {
+              path: entry.path,
+              title: entry.base?.meta.title,
+              ...(entry.base?.meta.group ? { group: entry.base.meta.group } : {}),
+              change: entry.overlay?.content === null ? 'deleted' : entry.base ? 'modified' : 'created',
+              additions: lines.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length,
+              deletions: lines.filter((line) => line.startsWith('-') && !line.startsWith('---')).length,
+            };
+          };
+          const alertRules = entries.filter((entry) => entry.kind === 'alertRule');
           return json({
             schemaVersion: 1,
-            dashboards: entries.map((entry) => {
-              const patch = createTwoFilesPatch(
-                entry.path,
-                entry.path,
-                entry.base?.content ?? '',
-                entry.overlay?.content ?? ''
-              );
-              const lines = patch.split('\n');
-              return {
-                path: entry.path,
-                title: entry.base?.meta.title,
-                change: entry.overlay?.content === null ? 'deleted' : entry.base ? 'modified' : 'created',
-                additions: lines.filter((line) => line.startsWith('+') && !line.startsWith('+++')).length,
-                deletions: lines.filter((line) => line.startsWith('-') && !line.startsWith('---')).length,
-              };
-            }),
+            dashboards: entries.filter((entry) => entry.kind === 'dashboard').map(stat),
+            ...(alertRules.length ? { alertRules: alertRules.map(stat) } : {}),
             groups: groups.map((group) => ({
               before: group.before,
               after: group.after,
               count: group.count,
-              dashboards: group.paths.length,
+              files: group.paths.length,
               example: group.example,
             })),
             ungroupedChanges,
@@ -89,11 +86,7 @@ export const workspaceCommand: WorkspaceCommandSpec = {
           if (!entry.overlay) {
             continue;
           }
-          if (
-            selected.size > 0 &&
-            !selected.has(entry.path) &&
-            !selected.has(entry.path.replace(/\/dashboard\.json$/, ''))
-          ) {
+          if (!selectsEntry(selected, entry)) {
             continue;
           }
           const before = entry.base?.content ?? '';
@@ -136,7 +129,7 @@ export const workspaceCommand: WorkspaceCommandSpec = {
     },
     apply: {
       summary:
-        'Validate staged changes, open the change-set review (the user can uncheck dashboards), and save the approved ones in parallel with revision preconditions.',
+        'Validate staged dashboard and alert rule changes, open the change-set review (the user can uncheck resources), and save the approved ones in parallel with revision preconditions.',
       usage: 'workspace apply [--path PATH]...',
       effect: 'remote-write',
       options: {
@@ -161,7 +154,7 @@ export const workspaceCommand: WorkspaceCommandSpec = {
           const { diff: _diff, ...receipt } = record;
           const counts: Record<string, number> = {};
           record.results.forEach((result) => (counts[result.outcome] = (counts[result.outcome] ?? 0) + 1));
-          // Long receipts list only the dashboards that were not applied; the full receipt is a file.
+          // Long receipts list only the resources that were not applied; the full receipt is a file.
           const results =
             record.results.length > 50
               ? record.results.filter((result) => result.outcome !== 'applied')
@@ -177,7 +170,7 @@ export const workspaceCommand: WorkspaceCommandSpec = {
                 : {}),
               diffPath: `/session/receipts/${record.applyId}.diff`,
               ...(counts.declined
-                ? { note: 'Declined dashboards were unchecked in the review; their working copies keep the change.' }
+                ? { note: 'Declined resources were unchecked in the review; their working copies keep the change.' }
                 : {}),
             },
             record.results.every((r) => r.outcome === 'applied' || r.outcome === 'declined') ? 0 : 1
@@ -192,11 +185,11 @@ export const workspaceCommand: WorkspaceCommandSpec = {
     },
     revert: {
       summary:
-        'Stage the dashboards of an earlier apply as they were before it (previous versions from Grafana history); review and save them with workspace apply.',
+        'Stage the dashboards and alert rules of an earlier apply as they were before it (previous versions from Grafana history); review and save them with workspace apply.',
       usage: 'workspace revert APPLY_ID [--path PATH]...',
       effect: 'local-stage',
       options: {
-        path: { type: 'string[]', description: 'Only revert these dashboards of the apply (repeatable).' },
+        path: { type: 'string[]', description: 'Only revert these resources of the apply (repeatable).' },
       },
       examples: ['workspace revert apply-3f2a9c1b0d4e && workspace apply'],
       async run(parsed, ctx) {
@@ -212,8 +205,8 @@ export const workspaceCommand: WorkspaceCommandSpec = {
             paths: listOption(parsed, 'path').map((path) => normalizeWorkspacePath(path, ctx.cwd)),
             signal: ctx.signal,
             write: (path, content) => (content === null ? ctx.tx.rm(path) : ctx.tx.writeFile(path, content)),
-            hasLocalChanges: (uid) => {
-              const entry = view.getResource(uid);
+            hasLocalChanges: (uid, kind) => {
+              const entry = view.getResource(uid, kind);
               return Boolean(entry?.overlay && entry.overlay.content !== entry.base?.content);
             },
           });
@@ -236,7 +229,7 @@ export const workspaceCommand: WorkspaceCommandSpec = {
       },
     },
     receipts: {
-      summary: 'Print the outcome journal of dashboard saves.',
+      summary: 'Print the outcome journal of dashboard and alert rule saves.',
       usage: 'workspace receipts',
       effect: 'local-read',
       async run(_parsed, ctx) {

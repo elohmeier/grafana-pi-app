@@ -101,7 +101,7 @@ describe('dashboard mass edits', () => {
         before: '5m',
         after: '$__rate_interval',
         count: MATCHING.length,
-        dashboards: MATCHING.length,
+        files: MATCHING.length,
       }),
     ]);
 
