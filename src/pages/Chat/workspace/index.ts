@@ -4,10 +4,12 @@ import type { GrafanaSkill } from '../skills/types';
 import type { ArtifactRuntime } from '../domain/artifacts';
 import type { WorkspaceApprovalService, WorkspaceBroker } from './broker';
 import {
+  createAlertRuleCatalog,
   createArtifactsMount,
   createDashboardCatalog,
   createJsonnetLibraryMount,
   createSkillsMount,
+  type AlertRuleCatalog,
   type DashboardCatalog,
 } from './mounts';
 import { createPythonCommands, type PythonRunner } from './python/pythonCommand';
@@ -28,6 +30,8 @@ export type SessionWorkspaceToolkitOptions = {
   workspace: SessionWorkspace;
   /** Shared across toolkits of one session so the dashboard listing stays cached. */
   catalog?: DashboardCatalog;
+  /** Shared across toolkits of one session so the alert rule listing stays cached. */
+  alertRuleCatalog?: AlertRuleCatalog;
   context?: Record<string, unknown>;
   broker: WorkspaceBroker;
   approvals?: WorkspaceApprovalService;
@@ -86,12 +90,25 @@ export function createSessionWorkspaceToolkit(options: SessionWorkspaceToolkitOp
   if (options.artifacts) {
     mounts.push(createArtifactsMount(options.artifacts));
   }
-  if (broker.dashboards) {
-    const catalog = options.catalog ?? createDashboardCatalog(broker.dashboards);
+  const dashboards = broker.dashboards;
+  const alertRules = broker.alertRules;
+  if (dashboards) {
+    const catalog = options.catalog ?? createDashboardCatalog(dashboards);
     mounts.push(catalog.mount);
-    const dashboards = broker.dashboards;
-    workspace.setHydrator((_kind, uid, signal) => dashboards.get(uid, signal));
     workspace.setResourceIndex(catalog.index);
+  }
+  const alertRuleCatalog = alertRules ? (options.alertRuleCatalog ?? createAlertRuleCatalog(alertRules)) : undefined;
+  if (alertRuleCatalog) {
+    mounts.push(alertRuleCatalog.mount);
+    workspace.setResourceIndex(alertRuleCatalog.index, 'alertRule');
+  }
+  if (dashboards || alertRules) {
+    workspace.setHydrator(async (kind, uid, signal) => {
+      if (kind === 'alertRule') {
+        return alertRuleCatalog?.snapshot(uid) ?? alertRules?.get(uid, signal);
+      }
+      return dashboards?.get(uid, signal);
+    });
   }
   if (broker.jsonnet) {
     mounts.push(createJsonnetLibraryMount(broker.jsonnet));

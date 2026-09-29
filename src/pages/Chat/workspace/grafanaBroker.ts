@@ -15,7 +15,9 @@ import {
 } from '../domain/metrics';
 import type { GrafanaToolConfig, PrometheusMetadataResponse } from '../domain/types';
 import { PLUGIN_ID } from '../../../constants';
+import { ALERT_RULE_API_GROUP, alertRuleWriteBody, toAlertRuleSnapshot } from './alertRuleModel';
 import type {
+  AlertRuleBroker,
   DashboardBroker,
   DashboardDryRunResult,
   DashboardWriteResult,
@@ -61,6 +63,7 @@ export function createGrafanaWorkspaceBroker(toolConfig: GrafanaToolConfig): Wor
       findPanelRules: (params, signal) => findPanelAlertRules(params, toolConfig, signal),
       getRule: (params, signal) => getAlertRule(params, toolConfig, signal),
     },
+    alertRules: createAlertRuleBroker(toolConfig),
     metricUsage: {
       inspect: (params, options) => inspectDashboardMetricUsage(params, toolConfig, options),
       search: (params, signal) => searchDashboardMetricUsage(params, toolConfig, signal),
@@ -344,6 +347,178 @@ function createDashboardBroker(toolConfig: GrafanaToolConfig): DashboardBroker {
       const allowed = (toolConfig.allowedPrometheusDatasourceUids ?? []).filter(Boolean);
       return allowed.length > 0 ? allowed : undefined;
     },
+  };
+}
+
+const ALERT_RULE_LIST_PAGE = 500;
+
+function createAlertRuleBroker(toolConfig: GrafanaToolConfig): AlertRuleBroker {
+  const collection = () =>
+    `/apis/${ALERT_RULE_API_GROUP}/v0alpha1/namespaces/${encodeURIComponent(config.namespace || 'default')}/alertrules`;
+  const notifications = () =>
+    `/apis/notifications.alerting.grafana.app/v0alpha1/namespaces/${encodeURIComponent(config.namespace || 'default')}`;
+  const ruleUrl = (uid: string) => {
+    const base = `${config.appSubUrl ?? ''}/alerting/grafana/${encodeURIComponent(uid)}/view`;
+    return typeof window !== 'undefined' ? new URL(base, window.location.origin).toString() : base;
+  };
+  const snapshot = (resource: K8sResource) =>
+    toAlertRuleSnapshot(resource as Record<string, unknown>, { url: ruleUrl(String(resource.metadata?.name ?? '')) });
+  const getRaw = async (uid: string, signal?: AbortSignal) =>
+    request<K8sResource>('GET', `${collection()}/${encodeURIComponent(uid)}`, undefined, signal);
+  const get = async (uid: string, signal?: AbortSignal) => {
+    const response = await getRaw(uid, signal);
+    if (!response.ok) {
+      if (response.status === 404 || response.status === 403) {
+        return undefined;
+      }
+      throw new Error(response.message);
+    }
+    return snapshot(response.data);
+  };
+  /**
+   * The API accepts writes against any resourceVersion, so compare the stored revision with the
+   * base right before writing. A write by someone else between this read and the write is not
+   * detected.
+   */
+  const current = async (uid: string, baseResourceVersion: string | undefined, signal?: AbortSignal) => {
+    const response = await getRaw(uid, signal);
+    if (!response.ok) {
+      return { failure: writeFailure(response) };
+    }
+    const now = response.data.metadata?.resourceVersion;
+    if (baseResourceVersion !== undefined && now !== baseResourceVersion) {
+      return {
+        failure: {
+          outcome: 'conflicted' as const,
+          error: `the rule changed in Grafana since it was fetched (revision ${baseResourceVersion}, now ${now}); run \`grafana refresh\` on it and edit again`,
+        },
+      };
+    }
+    return { resource: response.data };
+  };
+  const settle = async (uid: string, signal?: AbortSignal): Promise<DashboardWriteResult> => {
+    // Create responses carry no usable resourceVersion; read the stored rule back.
+    const stored = await get(uid, signal).catch(() => undefined);
+    return stored
+      ? { outcome: 'applied', snapshot: stored, url: ruleUrl(uid) }
+      : { outcome: 'unknown', error: 'saved, but the rule could not be read back; run `grafana refresh` to check' };
+  };
+
+  return {
+    async list(signal) {
+      const rules: WorkspaceResourceSnapshot[] = [];
+      let continueToken: string | undefined;
+      do {
+        const params = new URLSearchParams({ limit: String(ALERT_RULE_LIST_PAGE) });
+        if (continueToken) {
+          params.set('continue', continueToken);
+        }
+        const response = await request<{ items?: K8sResource[]; metadata?: { continue?: string } }>(
+          'GET',
+          `${collection()}?${params}`,
+          undefined,
+          signal
+        );
+        if (!response.ok) {
+          throw new Error(response.message);
+        }
+        rules.push(...(response.data.items ?? []).map(snapshot));
+        continueToken = response.data.metadata?.continue || undefined;
+      } while (continueToken);
+      const folders = await request<Array<{ uid?: string; title?: string }>>(
+        'GET',
+        '/api/search?type=dash-folder&limit=5000',
+        undefined,
+        signal
+      );
+      const folderTitles: Record<string, string> = {};
+      if (folders.ok) {
+        for (const folder of folders.data ?? []) {
+          if (folder.uid && folder.title) {
+            folderTitles[folder.uid] = folder.title;
+          }
+        }
+      }
+      return { rules, folderTitles };
+    },
+    get,
+    async create(document, signal) {
+      const uid = (document as K8sResource).metadata?.name;
+      if (!uid) {
+        return { outcome: 'failed', error: 'metadata.name is required' };
+      }
+      const response = await request<K8sResource>(
+        'POST',
+        collection(),
+        alertRuleWriteBody(document as Record<string, any>),
+        signal
+      );
+      return response.ok ? settle(uid, signal) : writeFailure(response);
+    },
+    async update(document, resourceVersion, signal) {
+      const uid = (document as K8sResource).metadata?.name;
+      if (!uid) {
+        return { outcome: 'failed', error: 'metadata.name is required' };
+      }
+      const stored = await current(uid, resourceVersion, signal);
+      if (stored.failure) {
+        return stored.failure;
+      }
+      const response = await request<K8sResource>(
+        'PUT',
+        `${collection()}/${encodeURIComponent(uid)}`,
+        alertRuleWriteBody(document as Record<string, any>, stored.resource as Record<string, any>),
+        signal
+      );
+      return response.ok
+        ? { outcome: 'applied', snapshot: snapshot(response.data), url: ruleUrl(uid) }
+        : writeFailure(response);
+    },
+    async delete(uid, resourceVersion, signal) {
+      const stored = await current(uid, resourceVersion, signal);
+      if (stored.failure) {
+        return stored.failure;
+      }
+      const response = await request<unknown>(
+        'DELETE',
+        `${collection()}/${encodeURIComponent(uid)}`,
+        undefined,
+        signal
+      );
+      return response.ok ? { outcome: 'applied' } : writeFailure(response);
+    },
+    async version(uid, resourceVersion, _apiVersion, signal) {
+      const params = new URLSearchParams({
+        labelSelector: 'grafana.app/get-history=true',
+        fieldSelector: `metadata.name=${uid}`,
+      });
+      const response = await request<{ items?: K8sResource[] }>('GET', `${collection()}?${params}`, undefined, signal);
+      if (!response.ok) {
+        throw new Error(response.message);
+      }
+      const match = response.data.items?.find((item) => item.metadata?.resourceVersion === resourceVersion);
+      return match ? snapshot({ ...match, metadata: { ...match.metadata, name: uid } }) : undefined;
+    },
+    async notificationTargets(signal) {
+      const list = async <T>(resource: string, pick: (item: T) => unknown) => {
+        const response = await request<{ items?: T[] }>('GET', `${notifications()}/${resource}`, undefined, signal);
+        if (!response.ok) {
+          throw new Error(`${resource}: ${response.message}`);
+        }
+        return (response.data.items ?? []).map(pick).filter((value): value is string => typeof value === 'string');
+      };
+      const [receivers, timeIntervals, routingTrees] = await Promise.all([
+        list<{ spec?: { title?: string } }>('receivers', (item) => item.spec?.title),
+        list<{ spec?: { name?: string } }>('timeintervals', (item) => item.spec?.name),
+        list<{ metadata?: { name?: string } }>('routingtrees', (item) => item.metadata?.name),
+      ]);
+      return { receivers, timeIntervals, routingTrees };
+    },
+    allowedDatasourceUids: () => {
+      const allowed = (toolConfig.allowedPrometheusDatasourceUids ?? []).filter(Boolean);
+      return allowed.length > 0 ? allowed : undefined;
+    },
+    prometheusDatasourceUids: () => getPrometheusDatasourceSettings(toolConfig).map((ds) => ds.uid),
   };
 }
 

@@ -1,8 +1,9 @@
 import type { ArtifactRuntime } from '../domain/artifacts';
 import { SKILLS_ROOT } from '../skills/prompt';
 import type { GrafanaSkill } from '../skills/types';
-import type { DashboardBroker, DashboardSearchHit, JsonnetBroker } from './broker';
-import type { GeneratedFile, GeneratedMount, ResourceIndex } from './types';
+import { alertRuleCatalogEntry } from './alertRuleModel';
+import type { AlertRuleBroker, DashboardBroker, DashboardSearchHit, JsonnetBroker } from './broker';
+import type { GeneratedFile, GeneratedMount, ResourceIndex, WorkspaceResourceSnapshot } from './types';
 
 const CATALOG_PAGE_SIZE = 1000;
 const CATALOG_TTL_MS = 5 * 60 * 1000;
@@ -137,6 +138,83 @@ export function createDashboardCatalog(dashboards: DashboardBroker): DashboardCa
 }
 
 const EMPTY_UIDS: readonly string[] = [];
+
+export const ALERT_RULE_CATALOG_PATH = '/grafana/catalog/alert-rules.ndjson';
+
+export type AlertRuleCatalog = DashboardCatalog & {
+  /** The rule as listed, so reading rule.json needs no request of its own. */
+  snapshot: (uid: string) => WorkspaceResourceSnapshot | undefined;
+};
+
+/**
+ * Every Grafana-managed alert rule visible to the current user, listed in one paginated
+ * request and cached briefly. The listing backs /grafana/catalog/alert-rules.ndjson and the
+ * index that lists /grafana/alert-rules/<uid>/; it carries the complete rules, so reading or
+ * scanning rule.json files needs no further requests.
+ */
+export function createAlertRuleCatalog(alertRules: AlertRuleBroker): AlertRuleCatalog {
+  type Loaded = {
+    uids: string[];
+    rules: Map<string, WorkspaceResourceSnapshot>;
+    folderTitles: Record<string, string>;
+    ndjson: string;
+  };
+  let cache: { at: number; promise: Promise<Loaded> } | undefined;
+  let loaded: Loaded | undefined;
+  const load = (signal?: AbortSignal) => {
+    if (!cache || Date.now() - cache.at > CATALOG_TTL_MS) {
+      const promise = alertRules.list(signal).then(({ rules, folderTitles }): Loaded => {
+        const sorted = [...rules].sort((left, right) => left.meta.uid.localeCompare(right.meta.uid));
+        const lines = sorted.map((rule) =>
+          JSON.stringify(
+            alertRuleCatalogEntry(rule, rule.meta.folderUid ? folderTitles[rule.meta.folderUid] : undefined)
+          )
+        );
+        return {
+          uids: sorted.map((rule) => rule.meta.uid),
+          rules: new Map(sorted.map((rule) => [rule.meta.uid, rule])),
+          folderTitles,
+          ndjson: lines.length ? `${lines.join('\n')}\n` : '',
+        };
+      });
+      cache = { at: Date.now(), promise };
+      promise.then(
+        (result) => {
+          loaded = result;
+        },
+        () => {
+          cache = undefined;
+        }
+      );
+    }
+    return cache.promise;
+  };
+  return {
+    mount: {
+      root: ALERT_RULE_CATALOG_PATH,
+      description: 'Alert rule discovery snapshot (metadata only).',
+      files: () => ({ [ALERT_RULE_CATALOG_PATH]: { load: async (signal) => (await load(signal)).ndjson } }),
+    },
+    index: {
+      prepare: async (signal) => {
+        await load(signal);
+      },
+      uids: () => loaded?.uids ?? EMPTY_UIDS,
+      describe: (uid) => {
+        const meta = loaded?.rules.get(uid)?.meta;
+        return meta
+          ? {
+              title: meta.title,
+              folderUid: meta.folderUid,
+              folderTitle: meta.folderUid ? loaded?.folderTitles[meta.folderUid] : undefined,
+              group: meta.group,
+            }
+          : undefined;
+      },
+    },
+    snapshot: (uid) => loaded?.rules.get(uid),
+  };
+}
 
 function ensureTrailingNewline(value: string) {
   return value.endsWith('\n') ? value : `${value}\n`;

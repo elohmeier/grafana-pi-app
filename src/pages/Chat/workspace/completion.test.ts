@@ -13,6 +13,9 @@ const sources: CompletionSources = {
     '/grafana/dashboards/checkout/meta.json',
     '/grafana/dashboards/checkpoint',
     '/grafana/dashboards/checkpoint/dashboard.json',
+    '/grafana/alert-rules',
+    '/grafana/alert-rules/high-5xx',
+    '/grafana/alert-rules/high-5xx/rule.json',
     '/workspace',
     '/workspace/notes.md',
     '/workspace/.hidden',
@@ -41,6 +44,10 @@ describe('completeShellLine', () => {
       '--match',
     ]);
     expect(complete('grafana-dashboard queries --m')?.replacement).toBe('--m');
+    expect(complete('grafana-alert va')?.replacement).toBe('validate ');
+    expect(complete('grafana-alert validate /grafana/alert-rules/high')?.replacement).toBe(
+      '/grafana/alert-rules/high-5xx/'
+    );
   });
 
   it('completes paths relative to the working directory and absolute ones', () => {

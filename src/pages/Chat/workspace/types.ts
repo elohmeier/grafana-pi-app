@@ -1,4 +1,4 @@
-export type WorkspaceResourceKind = 'dashboard';
+export type WorkspaceResourceKind = 'dashboard' | 'alertRule';
 
 /** Provider-owned resource metadata. It lives outside the editable document. */
 export type WorkspaceResourceMeta = {
@@ -19,6 +19,14 @@ export type WorkspaceResourceMeta = {
   url?: string;
   /** Manager/provenance annotation. Managed resources are read-only in the workspace. */
   managedBy?: string;
+  /** Alert rules: evaluation group and its folder-scoped position; ungrouped rules have none. */
+  group?: string;
+  groupIndex?: number;
+  /**
+   * How writes guard against concurrent changes. `server`: the API rejects a stale resourceVersion.
+   * `client`: the API does not, so the workspace compares the current revision right before writing.
+   */
+  preconditions?: 'server' | 'client';
   fetchedAt: string;
   /** Provider-owned annotations and labels preserved on write-back. */
   annotations?: Record<string, string>;
@@ -63,15 +71,15 @@ export const DEFAULT_WORKSPACE_LIMITS: WorkspaceLimits = {
 };
 
 /**
- * Every dashboard visible to the current user, listed under /grafana/dashboards before its
- * content is fetched. `prepare` loads the listing before a tool call or bash invocation reads
+ * Every resource of one kind visible to the current user (dashboards, alert rules), listed before
+ * its content is fetched. `prepare` loads the listing before a tool call or bash invocation reads
  * the filesystem; `uids` returns the loaded listing synchronously.
  */
 export type ResourceIndex = {
   prepare: (signal?: AbortSignal) => Promise<void>;
   uids: () => readonly string[];
-  /** Listing metadata of an indexed dashboard. */
-  describe?: (uid: string) => { title?: string; folderUid?: string; folderTitle?: string } | undefined;
+  /** Listing metadata of an indexed resource. */
+  describe?: (uid: string) => { title?: string; folderUid?: string; folderTitle?: string; group?: string } | undefined;
 };
 
 export type GeneratedFile = {
@@ -105,6 +113,7 @@ export type WorkspaceFileChange = {
 export type WorkspaceChangeStatus = {
   path: string;
   kind: 'resource' | 'scratch';
+  resource?: WorkspaceResourceKind;
   change: 'created' | 'modified' | 'deleted';
   uid?: string;
   resourceVersion?: string;
@@ -115,7 +124,7 @@ export type PersistedWorkspace = {
   schemaVersion: 1;
   files: Record<string, WorkspaceScratchFile>;
   dirs: string[];
-  /** Resources with local changes only; unmodified dashboards are fetched again on demand. */
+  /** Resources with local changes only; unmodified resources are fetched again on demand. */
   resources: Array<{
     kind: WorkspaceResourceKind;
     uid: string;
@@ -133,6 +142,8 @@ export type WorkspaceWriteOperation = {
   operation: 'create' | 'update' | 'delete';
   title?: string;
   folderUid?: string;
+  /** Alert rules: evaluation group. */
+  group?: string;
   apiVersion: string;
   baseResourceVersion?: string;
   beforeHash?: string;
@@ -154,7 +165,7 @@ export type WorkspaceChanges = {
   documents: Record<string, string | null>;
 };
 
-/** `declined`: the reviewer unchecked the dashboard; its working copy keeps the change. */
+/** `declined`: the reviewer unchecked the resource; its working copy keeps the change. */
 export type WorkspaceApplyOutcome = 'applied' | 'failed' | 'conflicted' | 'unknown' | 'not attempted' | 'declined';
 
 export type WorkspaceApplyRecord = {
@@ -166,6 +177,8 @@ export type WorkspaceApplyRecord = {
   approved: boolean;
   results: Array<{
     path: string;
+    /** Missing in receipts written before alert rules could be applied: a dashboard. */
+    kind?: WorkspaceResourceKind;
     uid: string;
     title?: string;
     operation: WorkspaceWriteOperation['operation'];

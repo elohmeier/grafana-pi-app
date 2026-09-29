@@ -1,13 +1,26 @@
 import { applyPatch, createTwoFilesPatch, parsePatch, reversePatch, type StructuredPatch } from 'diff';
-import type { WorkspaceApprovalOperation, WorkspaceApprovalService, WorkspaceBroker } from './broker';
+import { type AlertNotificationTargets, validateAlertRuleDocument } from './alertRuleModel';
+import type {
+  ResourceWriteBroker,
+  WorkspaceApprovalOperation,
+  WorkspaceApprovalService,
+  WorkspaceBroker,
+} from './broker';
 import { groupChanges } from './changeGroups';
 import { validateDashboardDocument } from './dashboardModel';
 import { canonicalJson, sha256Hex } from './hash';
 import type { PromqlParser } from './promqlCheck';
-import type { WorkspaceApplyRecord, WorkspaceChanges, WorkspaceResourceEntry, WorkspaceWriteOperation } from './types';
+import { describeResourceCounts, RESOURCE_KINDS, resourceAtPath } from './resourceKinds';
+import type {
+  WorkspaceApplyRecord,
+  WorkspaceChanges,
+  WorkspaceResourceEntry,
+  WorkspaceResourceKind,
+  WorkspaceWriteOperation,
+} from './types';
 import { HYDRATION_CONCURRENCY, type SessionWorkspace } from './workspace';
 
-/** Parallel validations and dashboard writes of one apply. */
+/** Parallel validations and resource writes of one apply. */
 const APPLY_CONCURRENCY = HYDRATION_CONCURRENCY;
 
 export class ApplyError extends Error {}
@@ -17,7 +30,24 @@ type PreparedChanges = WorkspaceChanges & {
   review: WorkspaceApprovalOperation[];
 };
 
-type ValidationOptions = { allowedDatasourceUids?: string[]; promql?: PromqlParser; signal?: AbortSignal };
+type ValidationOptions = {
+  allowedDatasourceUids?: string[];
+  promql?: PromqlParser;
+  signal?: AbortSignal;
+  /** Alert rules only. */
+  alertRules?: {
+    allowedDatasourceUids?: string[];
+    prometheusDatasourceUids?: string[];
+    notificationTargets?: AlertNotificationTargets;
+  };
+};
+
+/** Whether path arguments select this entry, by its document or its directory; none select all. */
+export function selectsEntry(selected: ReadonlySet<string>, entry: WorkspaceResourceEntry) {
+  return (
+    selected.size === 0 || selected.has(entry.path) || selected.has(entry.path.slice(0, entry.path.lastIndexOf('/')))
+  );
+}
 
 async function prepareChanges(
   workspace: SessionWorkspace,
@@ -27,19 +57,17 @@ async function prepareChanges(
   const entries = workspace
     .resourceEntries()
     .filter((entry) => entry.overlay)
-    .filter(
-      (entry) =>
-        selected.size === 0 || selected.has(entry.path) || selected.has(entry.path.replace(/\/dashboard\.json$/, ''))
-    );
+    .filter((entry) => selectsEntry(selected, entry));
   if (selected.size > 0) {
-    const known = new Set(entries.flatMap((entry) => [entry.path, entry.path.replace(/\/dashboard\.json$/, '')]));
-    const unknown = [...selected].filter((path) => !known.has(path));
+    const unknown = [...selected].filter((path) => !entries.some((entry) => selectsEntry(new Set([path]), entry)));
     if (unknown.length > 0) {
       throw new ApplyError(`no staged resource changes at: ${unknown.join(', ')}`);
     }
   }
   if (entries.length === 0) {
-    throw new ApplyError('no staged resource changes; edit /grafana/dashboards/<uid>/dashboard.json first');
+    throw new ApplyError(
+      'no staged resource changes; edit /grafana/dashboards/<uid>/dashboard.json or /grafana/alert-rules/<uid>/rule.json first'
+    );
   }
 
   const prepared = await mapConcurrent(entries, (entry) => prepareOperation(workspace, entry, options));
@@ -53,7 +81,7 @@ async function prepareChanges(
       .map((operation) => `${operation.path}:\n  ${operation.validation.errors.join('\n  ')}`)
       .join('\n');
     throw new ApplyError(
-      `validation failed for ${failing.length} of ${operations.length} dashboard${operations.length === 1 ? '' : 's'}; fix these errors (errors the fetched dashboard already had do not block), or leave the dashboards out with --path, and run \`workspace apply\` again:\n${details}`
+      `validation failed for ${failing.length} of ${describeResourceCounts(countKinds(operations))}; fix these errors (errors the fetched resource already had do not block), or leave the resources out with --path, and run \`workspace apply\` again:\n${details}`
     );
   }
 
@@ -80,7 +108,9 @@ async function prepareOperation(
   const operation: WorkspaceWriteOperation['operation'] = after === null ? 'delete' : entry.base ? 'update' : 'create';
   let title = meta?.title;
   let folderUid = meta?.folderUid;
-  let apiVersion = meta?.apiVersion ?? 'dashboard.grafana.app/v1';
+  let apiVersion =
+    meta?.apiVersion ??
+    (entry.kind === 'alertRule' ? 'rules.alerting.grafana.app/v0alpha1' : 'dashboard.grafana.app/v1');
   let validation: WorkspaceWriteOperation['validation'] = { ok: true, errors: [], warnings: [] };
   let preexistingErrors: string[] = [];
   if (after !== null) {
@@ -99,7 +129,11 @@ async function prepareOperation(
       // Reported by validation.
     }
   } else if (meta?.managedBy) {
-    validation = { ok: false, errors: [`policy: dashboard is managed by ${meta.managedBy}`], warnings: [] };
+    validation = {
+      ok: false,
+      errors: [`policy: ${RESOURCE_KINDS[entry.kind].noun} is managed by ${meta.managedBy}`],
+      warnings: [],
+    };
   }
   const diff = createTwoFilesPatch(
     before !== undefined ? `a${entry.path}` : '/dev/null',
@@ -110,6 +144,7 @@ async function prepareOperation(
     undefined,
     { context: 3 }
   );
+  const group = meta?.group;
   const writeOperation: WorkspaceWriteOperation = {
     path: entry.path,
     kind: entry.kind,
@@ -117,6 +152,7 @@ async function prepareOperation(
     operation,
     title,
     folderUid,
+    ...(group ? { group } : {}),
     apiVersion,
     baseResourceVersion: meta?.resourceVersion,
     beforeHash: before !== undefined ? sha256Hex(before) : undefined,
@@ -126,11 +162,13 @@ async function prepareOperation(
   const { additions, deletions } = countChangedLines(diff);
   const review: WorkspaceApprovalOperation = {
     operation,
+    kind: entry.kind,
     uid: entry.uid,
     path: entry.path,
     title,
     folderUid,
-    folderTitle: workspace.describeIndexed(entry.uid)?.folderTitle,
+    folderTitle: workspace.describeIndexed(entry.uid, entry.kind)?.folderTitle,
+    ...(group ? { group } : {}),
     additions,
     deletions,
     diff,
@@ -141,13 +179,24 @@ async function prepareOperation(
 }
 
 async function validate(content: string, entry: WorkspaceResourceEntry, options: ValidationOptions) {
-  const report = await validateDashboardDocument(content, {
-    expectedUid: entry.uid,
-    allowedDatasourceUids: options.allowedDatasourceUids,
-    managedBy: entry.base?.meta.managedBy,
-    promql: options.promql,
-    signal: options.signal,
-  });
+  const report =
+    entry.kind === 'alertRule'
+      ? await validateAlertRuleDocument(content, {
+          expectedUid: entry.uid,
+          base: entry.base,
+          allowedDatasourceUids: options.alertRules?.allowedDatasourceUids,
+          prometheusDatasourceUids: options.alertRules?.prometheusDatasourceUids,
+          notificationTargets: options.alertRules?.notificationTargets,
+          promql: options.promql,
+          signal: options.signal,
+        })
+      : await validateDashboardDocument(content, {
+          expectedUid: entry.uid,
+          allowedDatasourceUids: options.allowedDatasourceUids,
+          managedBy: entry.base?.meta.managedBy,
+          promql: options.promql,
+          signal: options.signal,
+        });
   return {
     errors: report.errors.map((error) => `${error.level}${error.path ? ` ${error.path}` : ''}: ${error.message}`),
     warnings: report.warnings.map(
@@ -183,7 +232,7 @@ export function staleChangeReasons(workspace: SessionWorkspace, changes: Workspa
     reasons.push('change digest does not match its contents');
   }
   for (const operation of changes.operations) {
-    const entry = workspace.getResource(operation.uid);
+    const entry = workspace.getResource(operation.uid, operation.kind);
     const current = entry?.overlay ? entry.overlay.content : undefined;
     const expected = changes.documents[operation.path];
     if (!entry?.overlay || current !== expected) {
@@ -197,19 +246,43 @@ export function staleChangeReasons(workspace: SessionWorkspace, changes: Workspa
   return reasons;
 }
 
+/** The writer of a resource kind, or undefined when this session cannot write it. */
+export function resourceWriter(broker: WorkspaceBroker, kind: WorkspaceResourceKind): ResourceWriteBroker | undefined {
+  return kind === 'alertRule' ? broker.alertRules : broker.dashboards;
+}
+
+/** Validation inputs for alert rules; notification references are checked only when they can be listed. */
+export async function alertRuleValidationOptions(broker: WorkspaceBroker, signal?: AbortSignal) {
+  const alertRules = broker.alertRules;
+  if (!alertRules) {
+    return undefined;
+  }
+  return {
+    allowedDatasourceUids: alertRules.allowedDatasourceUids?.(),
+    prometheusDatasourceUids: alertRules.prometheusDatasourceUids?.(),
+    notificationTargets: await alertRules.notificationTargets?.(signal).catch(() => undefined),
+  };
+}
+
 export async function applyWorkspaceChanges(
   workspace: SessionWorkspace,
   deps: { broker: WorkspaceBroker; approvals?: WorkspaceApprovalService; signal?: AbortSignal; paths?: string[] }
 ): Promise<WorkspaceApplyRecord> {
+  const hasAlertRules = workspace.resourceEntries('alertRule').some((entry) => entry.overlay);
   const changes = await prepareChanges(workspace, {
     paths: deps.paths,
     allowedDatasourceUids: deps.broker.dashboards?.allowedDatasourceUids?.(),
     promql: deps.broker.promql,
     signal: deps.signal,
+    alertRules: hasAlertRules ? await alertRuleValidationOptions(deps.broker, deps.signal) : undefined,
   });
-  const dashboards = deps.broker.dashboards;
-  if (!dashboards) {
-    throw new ApplyError('dashboard writes are not available in this session');
+  const missing = [...new Set(changes.operations.map((operation) => operation.kind))].filter(
+    (kind) => !resourceWriter(deps.broker, kind)
+  );
+  if (missing.length > 0) {
+    throw new ApplyError(
+      `${missing.map((kind) => RESOURCE_KINDS[kind].noun).join(' and ')} writes are not available in this session`
+    );
   }
   if (!deps.approvals) {
     throw new ApplyError('no approval channel is available; changes cannot be applied from this session');
@@ -223,6 +296,7 @@ export async function applyWorkspaceChanges(
     approved: false,
     results: changes.operations.map((operation) => ({
       path: operation.path,
+      kind: operation.kind,
       uid: operation.uid,
       title: operation.title,
       operation: operation.operation,
@@ -231,11 +305,10 @@ export async function applyWorkspaceChanges(
     })),
   };
 
-  const count = changes.operations.length;
   const { groups, ungroupedChanges } = groupChanges(
     changes.operations.map((operation) => ({
       path: operation.path,
-      before: workspace.getResource(operation.uid)?.base?.content ?? '',
+      before: workspace.getResource(operation.uid, operation.kind)?.base?.content ?? '',
       after: changes.documents[operation.path] ?? '',
     }))
   );
@@ -243,7 +316,7 @@ export async function applyWorkspaceChanges(
     {
       applyId: changes.id,
       digest: changes.digest,
-      title: `Apply ${count} dashboard change${count === 1 ? '' : 's'}`,
+      title: `Apply changes to ${describeResourceCounts(countKinds(changes.operations))}`,
       summary: changes.operations
         .map((operation) => `${operation.operation} ${operation.uid}${operation.title ? ` (${operation.title})` : ''}`)
         .join('\n'),
@@ -279,19 +352,24 @@ export async function applyWorkspaceChanges(
       return;
     }
     try {
+      const writer = resourceWriter(deps.broker, operation.kind)!;
       const document = changes.documents[operation.path];
       const write =
         operation.operation === 'delete'
-          ? await dashboards.delete(operation.uid, operation.baseResourceVersion, deps.signal)
+          ? await writer.delete(operation.uid, operation.baseResourceVersion, deps.signal)
           : operation.operation === 'create'
-            ? await dashboards.create(JSON.parse(document!), deps.signal)
-            : await dashboards.update(JSON.parse(document!), operation.baseResourceVersion ?? '', deps.signal);
+            ? await writer.create(JSON.parse(document!), deps.signal)
+            : await writer.update(JSON.parse(document!), operation.baseResourceVersion ?? '', deps.signal);
       result.outcome = write.outcome;
       result.error = write.error;
       result.url = write.url;
       result.resourceVersion = write.snapshot?.meta.resourceVersion;
       if (write.outcome === 'applied') {
-        workspace.reconcileResource(operation.uid, operation.operation === 'delete' ? undefined : write.snapshot);
+        workspace.reconcileResource(
+          operation.uid,
+          operation.operation === 'delete' ? undefined : write.snapshot,
+          operation.kind
+        );
       }
     } catch (error) {
       result.outcome = deps.signal?.aborted ? 'unknown' : 'failed';
@@ -304,9 +382,9 @@ export async function applyWorkspaceChanges(
 }
 
 /**
- * Stages the dashboards of an earlier apply as they were before it: the
- * receipt's diff is reversed onto the current dashboard, so exactly the applied
- * change is undone and later edits by others are kept. Created dashboards are
+ * Stages the resources of an earlier apply as they were before it: the
+ * receipt's diff is reversed onto the current resource, so exactly the applied
+ * change is undone and later edits by others are kept. Created resources are
  * staged for deletion. Receipts whose diff was dropped from the journal fall
  * back to the previous version from Grafana's history. The result is reviewed
  * and applied like any change with `workspace apply`.
@@ -319,14 +397,10 @@ export async function stageRevert(
     paths?: string[];
     write: (path: string, content: string | null) => Promise<void>;
     /** Local changes as the invocation sees them, including writes staged earlier in it. */
-    hasLocalChanges: (uid: string) => boolean;
+    hasLocalChanges: (uid: string, kind: WorkspaceResourceKind) => boolean;
     signal?: AbortSignal;
   }
 ) {
-  const dashboards = deps.broker.dashboards;
-  if (!dashboards) {
-    throw new ApplyError('dashboard access is not available in this session');
-  }
   const record = workspace.applyJournal().find((receipt) => receipt.applyId === deps.applyId);
   if (!record) {
     throw new ApplyError(`no apply receipt ${deps.applyId}; see \`workspace receipts\``);
@@ -346,27 +420,33 @@ export async function stageRevert(
   const staged: string[] = [];
   const errors: Array<{ path: string; error: string }> = [];
   await mapConcurrent(targets, async (result) => {
+    const kind = receiptKind(result);
+    const { noun, plural } = RESOURCE_KINDS[kind];
     try {
-      if (deps.hasLocalChanges(result.uid)) {
+      const writer = resourceWriter(deps.broker, kind);
+      if (!writer) {
+        throw new Error(`${noun} access is not available in this session`);
+      }
+      if (deps.hasLocalChanges(result.uid, kind)) {
         throw new Error('has local changes; discard or apply them first');
       }
-      // Revert against the dashboard as it is now, not a copy fetched before the apply.
-      const current = await dashboards.get(result.uid, deps.signal);
+      // Revert against the resource as it is now, not a copy fetched before the apply.
+      const current = await writer.get(result.uid, deps.signal);
       if (current) {
         workspace.setResourceBase(current);
       }
       if (result.operation === 'create') {
         if (!current) {
-          throw new Error('the dashboard no longer exists');
+          throw new Error(`the ${noun} no longer exists`);
         }
         await deps.write(result.path, null);
       } else if (result.operation === 'update') {
         if (!current) {
-          throw new Error('the dashboard no longer exists');
+          throw new Error(`the ${noun} no longer exists`);
         }
-        await deps.write(result.path, await previousContent(result, current.content, current.meta.apiVersion));
+        await deps.write(result.path, await previousContent(writer, result, current.content, current.meta.apiVersion));
       } else {
-        throw new Error('deleted dashboards cannot be restored from here; restore them from Grafana');
+        throw new Error(`deleted ${plural} cannot be restored from here; restore them from Grafana`);
       }
       staged.push(result.path);
     } catch (error) {
@@ -376,27 +456,40 @@ export async function stageRevert(
   return { staged: staged.sort(), errors };
 
   async function previousContent(
+    writer: ResourceWriteBroker,
     result: WorkspaceApplyRecord['results'][number],
     current: string,
     apiVersion: string | undefined
   ) {
+    const noun = RESOURCE_KINDS[receiptKind(result)].noun;
     const patch = patches.get(result.path);
     if (patch) {
       const reverted = applyPatch(current, reversePatch(patch));
       if (reverted === false) {
-        throw new Error('the dashboard changed since the apply in the same lines; revert it by hand');
+        throw new Error(`the ${noun} changed since the apply in the same lines; revert it by hand`);
       }
       return reverted;
     }
-    if (!result.baseResourceVersion || !dashboards!.version) {
+    if (!result.baseResourceVersion || !writer.version) {
       throw new Error('the receipt no longer holds the diff or the previous revision');
     }
-    const previous = await dashboards!.version(result.uid, result.baseResourceVersion, apiVersion, deps.signal);
+    const previous = await writer.version(result.uid, result.baseResourceVersion, apiVersion, deps.signal);
     if (!previous) {
-      throw new Error(`revision ${result.baseResourceVersion} is not in the dashboard's version history`);
+      throw new Error(`revision ${result.baseResourceVersion} is not in the ${noun}'s version history`);
     }
     return previous.content;
   }
+}
+
+/** Receipts written before alert rules could be applied name no kind; their path tells. */
+export function receiptKind(result: WorkspaceApplyRecord['results'][number]): WorkspaceResourceKind {
+  return result.kind ?? resourceAtPath(result.path)?.kind ?? 'dashboard';
+}
+
+function countKinds(operations: Array<{ kind: WorkspaceResourceKind }>) {
+  const counts: Partial<Record<WorkspaceResourceKind, number>> = {};
+  operations.forEach((operation) => (counts[operation.kind] = (counts[operation.kind] ?? 0) + 1));
+  return counts;
 }
 
 async function mapConcurrent<T, R>(items: readonly T[], worker: (item: T) => Promise<R>): Promise<R[]> {

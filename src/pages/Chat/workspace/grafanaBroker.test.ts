@@ -62,3 +62,88 @@ describe('dashboard broker', () => {
     expect(snapshot?.meta).not.toHaveProperty('conversion');
   });
 });
+
+const RULES = '/apis/rules.alerting.grafana.app/v0alpha1/namespaces/default/alertrules';
+
+describe('alert rule broker', () => {
+  const stored = {
+    metadata: {
+      name: 'high-5xx',
+      resourceVersion: '4',
+      labels: { 'grafana.app/folder': 'ops', 'grafana.com/group': 'checkout', 'grafana.com/group-index': '2' },
+      annotations: { 'grafana.app/folder': 'ops', 'grafana.com/provenance': '' },
+    },
+    spec: { title: 'High 5xx', trigger: { interval: '1m' }, expressions: {} },
+  };
+
+  function mockRules() {
+    const fetch = jest.fn(({ url, method, data }: { url: string; method: string; data?: any }) => {
+      if (method === 'PUT') {
+        return of({ status: 200, data: { ...data, metadata: { ...data.metadata, resourceVersion: '5' } } });
+      }
+      if (url.startsWith(`${RULES}?`)) {
+        const page = url.includes('continue=next')
+          ? { items: [{ ...stored, metadata: { ...stored.metadata, name: 'second' } }], metadata: {} }
+          : { items: [stored], metadata: { continue: 'next' } };
+        return of({ status: 200, data: page });
+      }
+      if (url.startsWith('/api/search')) {
+        return of({ status: 200, data: [{ uid: 'ops', title: 'Operations' }] });
+      }
+      return of({ status: 200, data: stored });
+    });
+    (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
+    return fetch;
+  }
+
+  it('lists every page of rules with their groups and folder titles', async () => {
+    mockRules();
+    const { rules, folderTitles } = await createGrafanaWorkspaceBroker({}).alertRules!.list();
+    expect(rules.map((rule) => rule.meta.uid)).toEqual(['high-5xx', 'second']);
+    expect(rules[0].meta).toMatchObject({
+      kind: 'alertRule',
+      group: 'checkout',
+      groupIndex: 2,
+      preconditions: 'client',
+    });
+    expect(JSON.parse(rules[0].content).metadata).toEqual({
+      name: 'high-5xx',
+      annotations: { 'grafana.app/folder': 'ops' },
+    });
+    expect(folderTitles).toEqual({ ops: 'Operations' });
+  });
+
+  it('writes the working copy with the stored group labels and annotations', async () => {
+    const fetch = mockRules();
+    const document = {
+      metadata: { name: 'high-5xx', annotations: { 'grafana.app/folder': 'ops' } },
+      spec: { title: 'Changed' },
+    };
+    const result = await createGrafanaWorkspaceBroker({}).alertRules!.update(document, '4');
+    expect(result).toMatchObject({
+      outcome: 'applied',
+      snapshot: { meta: { resourceVersion: '5', group: 'checkout' } },
+    });
+    const put = fetch.mock.calls.find(([options]) => options.method === 'PUT')![0];
+    expect(put.data).toEqual({
+      apiVersion: 'rules.alerting.grafana.app/v0alpha1',
+      kind: 'AlertRule',
+      metadata: {
+        name: 'high-5xx',
+        resourceVersion: '4',
+        annotations: stored.metadata.annotations,
+        labels: stored.metadata.labels,
+      },
+      spec: { title: 'Changed' },
+    });
+  });
+
+  it('refuses to write over a rule that changed since it was fetched, because Grafana would accept it', async () => {
+    const fetch = mockRules();
+    const broker = createGrafanaWorkspaceBroker({}).alertRules!;
+    const result = await broker.update({ metadata: { name: 'high-5xx' }, spec: {} }, '3');
+    expect(result).toMatchObject({ outcome: 'conflicted', error: expect.stringContaining('revision 3, now 4') });
+    expect((await broker.delete('high-5xx', '3')).outcome).toBe('conflicted');
+    expect(fetch.mock.calls.some(([options]) => options.method === 'PUT' || options.method === 'DELETE')).toBe(false);
+  });
+});

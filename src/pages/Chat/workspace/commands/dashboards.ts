@@ -349,6 +349,9 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
         const validateOne = async (raw: string) => {
           const path = normalizeWorkspacePath(raw, ctx.cwd);
           const target = ctx.workspace.classify(path);
+          if (target.type === 'resource' && target.kind === 'alertRule') {
+            throw new UsageError(`${path} is an alert rule; use grafana-alert validate`);
+          }
           const uid = target.type === 'resource' ? target.uid : undefined;
           // Reading first hydrates the resource, so its base revision is known afterwards.
           const content = await ctx.tx.readFile(path);

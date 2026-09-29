@@ -2,6 +2,15 @@ import { applyPatch, createPatch } from 'diff';
 import { contentRevision } from './hash';
 import { ancestorDirs, isWithin, joinPath, normalizeWorkspacePath, parentPath, utf8ByteLength } from './paths';
 import {
+  RESOURCE_KIND_NAMES,
+  RESOURCE_KINDS,
+  RESOURCE_META,
+  RESOURCE_UID_PATTERN,
+  resourceDocumentPath,
+  resourceKey,
+  resourceMetaPath,
+} from './resourceKinds';
+import {
   DEFAULT_WORKSPACE_LIMITS,
   type GeneratedFile,
   type GeneratedMount,
@@ -12,32 +21,33 @@ import {
   type WorkspaceFileChange,
   type WorkspaceLimits,
   type WorkspaceResourceEntry,
+  type WorkspaceResourceKind,
   type WorkspaceResourceSnapshot,
   type WorkspaceScratchFile,
 } from './types';
 
 export const SCRATCH_MOUNTS = ['/workspace', '/session', '/tmp'] as const;
-export const DASHBOARDS_ROOT = '/grafana/dashboards';
-export const DASHBOARD_DOCUMENT = 'dashboard.json';
-export const DASHBOARD_META = 'meta.json';
+export const DASHBOARDS_ROOT = RESOURCE_KINDS.dashboard.root;
+export const DASHBOARD_DOCUMENT = RESOURCE_KINDS.dashboard.document;
+export const DASHBOARD_META = RESOURCE_META;
+export const ALERT_RULES_ROOT = RESOURCE_KINDS.alertRule.root;
 const PERSISTED_SCRATCH_MOUNTS = ['/workspace', '/session'];
-const RESOURCE_UID_PATTERN = /^[A-Za-z0-9_-]{1,40}$/;
 const MAX_JOURNAL_BYTES = 16 * 1024 * 1024;
-/** Parallel dashboard fetches while loading many dashboards. */
+/** Parallel resource fetches while loading many dashboards or alert rules. */
 export const HYDRATION_CONCURRENCY = 8;
 /** Hydration misses in one transaction after which the rest of the index is prefetched. */
 const SCAN_DETECTION_MISSES = 3;
 
 export type WorkspacePathClass =
   | { type: 'scratch'; mount: string }
-  | { type: 'resource'; kind: 'dashboard'; uid: string }
-  | { type: 'resource-dir'; kind: 'dashboard'; uid: string }
+  | { type: 'resource'; kind: WorkspaceResourceKind; uid: string }
+  | { type: 'resource-dir'; kind: WorkspaceResourceKind; uid: string }
   | { type: 'generated'; mount: string }
   | { type: 'virtual' }
   | { type: 'none' };
 
 export type ResourceHydrator = (
-  kind: 'dashboard',
+  kind: WorkspaceResourceKind,
   uid: string,
   signal?: AbortSignal
 ) => Promise<WorkspaceResourceSnapshot | undefined>;
@@ -78,9 +88,9 @@ export class SessionWorkspace {
   private generated: GeneratedMount[] = [];
   private journal: WorkspaceApplyRecord[] = [];
   private hydrator?: ResourceHydrator;
-  private index?: ResourceIndex;
+  private indexes = new Map<WorkspaceResourceKind, ResourceIndex>();
   private inflight = new Map<string, Promise<WorkspaceResourceEntry | undefined>>();
-  private backgroundPrefetch?: Promise<unknown>;
+  private backgroundPrefetch = new Map<WorkspaceResourceKind, Promise<unknown>>();
   private listeners = new Set<() => void>();
   private revisionCounter = 0;
   private pathRevisionCounter = 0;
@@ -102,31 +112,47 @@ export class SessionWorkspace {
     this.hydrator = hydrator;
   }
 
-  setResourceIndex(index: ResourceIndex | undefined) {
-    this.index = index;
+  setResourceIndex(index: ResourceIndex | undefined, kind: WorkspaceResourceKind = 'dashboard') {
+    if (index) {
+      this.indexes.set(kind, index);
+    } else {
+      this.indexes.delete(kind);
+    }
     this.pathRevisionCounter++;
   }
 
-  /** UIDs of every visible dashboard, listed before their content is fetched. */
-  indexedUids(): readonly string[] {
-    return this.index?.uids() ?? [];
+  /** Whether resources of this kind are mounted (always true for dashboards). */
+  hasResourceKind(kind: WorkspaceResourceKind) {
+    return kind === 'dashboard' || this.indexes.has(kind) || this.resourceEntries(kind).length > 0;
   }
 
-  describeIndexed(uid: string) {
-    return this.index?.describe?.(uid);
+  /** Kinds whose root is mounted. */
+  resourceKinds(): WorkspaceResourceKind[] {
+    return RESOURCE_KIND_NAMES.filter((kind) => this.hasResourceKind(kind));
   }
 
-  isIndexed(uid: string) {
-    return this.indexedUidSet().has(uid);
+  /** UIDs of every visible resource of a kind, listed before their content is fetched. */
+  indexedUids(kind: WorkspaceResourceKind = 'dashboard'): readonly string[] {
+    return this.indexes.get(kind)?.uids() ?? EMPTY_UIDS;
   }
 
-  private indexedSet?: { source: readonly string[]; set: Set<string> };
-  private indexedUidSet() {
-    const source = this.indexedUids();
-    if (this.indexedSet?.source !== source) {
-      this.indexedSet = { source, set: new Set(source) };
+  describeIndexed(uid: string, kind: WorkspaceResourceKind = 'dashboard') {
+    return this.indexes.get(kind)?.describe?.(uid);
+  }
+
+  isIndexed(uid: string, kind: WorkspaceResourceKind = 'dashboard') {
+    return this.indexedUidSet(kind).has(uid);
+  }
+
+  private indexedSets = new Map<WorkspaceResourceKind, { source: readonly string[]; set: Set<string> }>();
+  private indexedUidSet(kind: WorkspaceResourceKind) {
+    const source = this.indexedUids(kind);
+    let cached = this.indexedSets.get(kind);
+    if (cached?.source !== source) {
+      cached = { source, set: new Set(source) };
+      this.indexedSets.set(kind, cached);
     }
-    return this.indexedSet.set;
+    return cached.set;
   }
 
   setGeneratedMounts(mounts: GeneratedMount[]) {
@@ -139,12 +165,13 @@ export class SessionWorkspace {
 
   /** Runs mount preparation; a mount that fails to prepare stays empty for this call. */
   async prepareMounts(signal?: AbortSignal) {
-    const before = this.index?.uids();
+    const indexes = [...this.indexes.values()];
+    const before = indexes.map((index) => index.uids());
     await Promise.all([
       ...this.generated.map((mount) => mount.prepare?.(signal).catch(() => undefined)),
-      this.index?.prepare(signal).catch(() => undefined),
+      ...indexes.map((index) => index.prepare(signal).catch(() => undefined)),
     ]);
-    if (this.index && this.index.uids() !== before) {
+    if (indexes.some((index, position) => index.uids() !== before[position])) {
       this.pathRevisionCounter++;
     }
   }
@@ -164,18 +191,22 @@ export class SessionWorkspace {
         return { type: 'scratch', mount };
       }
     }
-    if (isWithin(path, DASHBOARDS_ROOT) && path !== DASHBOARDS_ROOT) {
-      const rest = path.slice(DASHBOARDS_ROOT.length + 1).split('/');
+    for (const kind of this.resourceKinds()) {
+      const { root, document } = RESOURCE_KINDS[kind];
+      if (!isWithin(path, root) || path === root) {
+        continue;
+      }
+      const rest = path.slice(root.length + 1).split('/');
       const uid = rest[0];
       if (RESOURCE_UID_PATTERN.test(uid)) {
         if (rest.length === 1) {
-          return { type: 'resource-dir', kind: 'dashboard', uid };
+          return { type: 'resource-dir', kind, uid };
         }
-        if (rest.length === 2 && rest[1] === DASHBOARD_DOCUMENT) {
-          return { type: 'resource', kind: 'dashboard', uid };
+        if (rest.length === 2 && rest[1] === document) {
+          return { type: 'resource', kind, uid };
         }
-        if (rest.length === 2 && rest[1] === DASHBOARD_META) {
-          return { type: 'generated', mount: DASHBOARDS_ROOT };
+        if (rest.length === 2 && rest[1] === RESOURCE_META) {
+          return { type: 'generated', mount: root };
         }
       }
       return { type: 'none' };
@@ -196,12 +227,15 @@ export class SessionWorkspace {
     if (path === '/') {
       return true;
     }
-    const roots = [...SCRATCH_MOUNTS, DASHBOARDS_ROOT, ...this.generated.map((mount) => mount.root)];
-    return roots.some((root) => root === path || isWithin(root, path));
+    return this.mountRoots().some((root) => root === path || isWithin(root, path));
   }
 
   mountRoots() {
-    return [...SCRATCH_MOUNTS, DASHBOARDS_ROOT, ...this.generated.map((mount) => mount.root)];
+    return [
+      ...SCRATCH_MOUNTS,
+      ...this.resourceKinds().map((kind) => RESOURCE_KINDS[kind].root),
+      ...this.generated.map((mount) => mount.root),
+    ];
   }
 
   getScratchFile(path: string) {
@@ -216,16 +250,23 @@ export class SessionWorkspace {
     return this.dirs;
   }
 
-  getResource(uid: string) {
-    return this.resources.get(uid);
+  getResource(uid: string, kind: WorkspaceResourceKind = 'dashboard') {
+    return this.resources.get(resourceKey(kind, uid));
   }
 
-  resourceEntries() {
-    return [...this.resources.values()].sort((left, right) => left.uid.localeCompare(right.uid));
+  /** Loaded resources, dashboards first, of one kind or all kinds. */
+  resourceEntries(kind?: WorkspaceResourceKind) {
+    return [...this.resources.values()]
+      .filter((entry) => !kind || entry.kind === kind)
+      .sort(
+        (left, right) =>
+          RESOURCE_KIND_NAMES.indexOf(left.kind) - RESOURCE_KIND_NAMES.indexOf(right.kind) ||
+          left.uid.localeCompare(right.uid)
+      );
   }
 
-  resourcePath(uid: string) {
-    return `${DASHBOARDS_ROOT}/${uid}/${DASHBOARD_DOCUMENT}`;
+  resourcePath(uid: string, kind: WorkspaceResourceKind = 'dashboard') {
+    return resourceDocumentPath(kind, uid);
   }
 
   /** Effective content of a resource working copy, or undefined when absent/deleted. */
@@ -245,18 +286,20 @@ export class SessionWorkspace {
     }
     for (const entry of this.resources.values()) {
       if (entry.base && entry.overlay?.content !== null) {
-        files.set(`${DASHBOARDS_ROOT}/${entry.uid}/${DASHBOARD_META}`, { content: metaFileContent(entry) });
+        files.set(resourceMetaPath(entry.kind, entry.uid), { content: metaFileContent(entry) });
       }
     }
-    for (const uid of this.indexedUids()) {
-      const path = `${DASHBOARDS_ROOT}/${uid}/${DASHBOARD_META}`;
-      if (!this.resources.has(uid) && !files.has(path)) {
-        files.set(path, {
-          load: async (signal) => {
-            const entry = await this.hydrate(uid, signal);
-            return entry?.base ? metaFileContent(entry) : '';
-          },
-        });
+    for (const kind of this.indexes.keys()) {
+      for (const uid of this.indexedUids(kind)) {
+        const path = resourceMetaPath(kind, uid);
+        if (!this.resources.has(resourceKey(kind, uid)) && !files.has(path)) {
+          files.set(path, {
+            load: async (signal) => {
+              const entry = await this.hydrate(uid, signal, kind);
+              return entry?.base ? metaFileContent(entry) : '';
+            },
+          });
+        }
       }
     }
     return files;
@@ -267,24 +310,26 @@ export class SessionWorkspace {
    * of a resource with local changes unless `discardOverlay` is set.
    */
   setResourceBase(snapshot: WorkspaceResourceSnapshot, options: { discardOverlay?: boolean } = {}) {
-    const uid = snapshot.meta.uid;
+    const { uid, kind } = snapshot.meta;
     if (!RESOURCE_UID_PATTERN.test(uid)) {
       throw new WorkspaceError('EPERM', `invalid resource UID ${JSON.stringify(uid)}`);
     }
-    const existing = this.resources.get(uid);
+    const key = resourceKey(kind, uid);
+    const existing = this.resources.get(key);
+    const path = this.resourcePath(uid, kind);
     if (existing?.overlay && !options.discardOverlay) {
       throw new WorkspaceError(
         'ECONFLICT',
-        `${this.resourcePath(uid)} has local changes; run \`workspace discard ${this.resourcePath(uid)}\` before refreshing`
+        `${path} has local changes; run \`workspace discard ${path}\` before refreshing`
       );
     }
-    if (!existing && !this.isIndexed(uid)) {
+    if (!existing && !this.isIndexed(uid, kind)) {
       this.pathRevisionCounter++;
     }
-    this.resources.set(uid, {
-      kind: 'dashboard',
+    this.resources.set(key, {
+      kind,
       uid,
-      path: this.resourcePath(uid),
+      path,
       base: snapshot,
       overlay: options.discardOverlay ? undefined : existing?.overlay,
     });
@@ -292,12 +337,16 @@ export class SessionWorkspace {
   }
 
   /** Replaces a resource's base after a successful remote write and clears its overlay. */
-  reconcileResource(uid: string, snapshot: WorkspaceResourceSnapshot | undefined) {
+  reconcileResource(
+    uid: string,
+    snapshot: WorkspaceResourceSnapshot | undefined,
+    kind: WorkspaceResourceKind = 'dashboard'
+  ) {
     this.pathRevisionCounter++;
     if (!snapshot) {
-      this.resources.delete(uid);
+      this.resources.delete(resourceKey(kind, uid));
     } else {
-      this.resources.set(uid, { kind: 'dashboard', uid, path: this.resourcePath(uid), base: snapshot });
+      this.resources.set(resourceKey(kind, uid), { kind, uid, path: this.resourcePath(uid, kind), base: snapshot });
     }
     this.changed();
   }
@@ -306,14 +355,15 @@ export class SessionWorkspace {
     const normalized = normalizeWorkspacePath(path);
     const target = this.classify(normalized);
     if (target.type === 'resource' || target.type === 'resource-dir') {
-      const entry = this.resources.get(target.uid);
+      const key = resourceKey(target.kind, target.uid);
+      const entry = this.resources.get(key);
       if (!entry?.overlay) {
         return false;
       }
       if (entry.base) {
-        this.resources.set(target.uid, { ...entry, overlay: undefined });
+        this.resources.set(key, { ...entry, overlay: undefined });
       } else {
-        this.resources.delete(target.uid);
+        this.resources.delete(key);
       }
       this.pathRevisionCounter++;
       this.changed();
@@ -328,51 +378,56 @@ export class SessionWorkspace {
    * changes always keep their base content, so they are never rehydrated.
    * Concurrent requests for the same UID share one fetch.
    */
-  async hydrate(uid: string, signal?: AbortSignal): Promise<WorkspaceResourceEntry | undefined> {
-    const existing = this.resources.get(uid);
+  async hydrate(
+    uid: string,
+    signal?: AbortSignal,
+    kind: WorkspaceResourceKind = 'dashboard'
+  ): Promise<WorkspaceResourceEntry | undefined> {
+    const key = resourceKey(kind, uid);
+    const existing = this.resources.get(key);
     if (existing && (existing.overlay || isBaseLoaded(existing))) {
       return existing;
     }
     if (!this.hydrator) {
       return existing;
     }
-    let pending = this.inflight.get(uid);
+    let pending = this.inflight.get(key);
     if (!pending) {
       const hydrator = this.hydrator;
       pending = (async () => {
-        const snapshot = await hydrator('dashboard', uid, signal);
-        const current = this.resources.get(uid);
+        const snapshot = await hydrator(kind, uid, signal);
+        const current = this.resources.get(key);
         if (!snapshot || (current && (current.overlay || isBaseLoaded(current)))) {
           // Missing remotely, or a local change landed while the fetch was in flight.
           return current;
         }
         this.setResourceBase(snapshot);
-        return this.resources.get(uid);
-      })().finally(() => this.inflight.delete(uid));
-      this.inflight.set(uid, pending);
+        return this.resources.get(key);
+      })().finally(() => this.inflight.delete(key));
+      this.inflight.set(key, pending);
     }
     return pending;
   }
 
-  /** Whether the content of a dashboard is in memory (no fetch needed to read it). */
-  isResourceLoaded(uid: string) {
-    const entry = this.resources.get(uid);
+  /** Whether the content of a resource is in memory (no fetch needed to read it). */
+  isResourceLoaded(uid: string, kind: WorkspaceResourceKind = 'dashboard') {
+    const entry = this.resources.get(resourceKey(kind, uid));
     return Boolean(entry && (entry.overlay || isBaseLoaded(entry)));
   }
 
   /**
-   * Fetches many dashboards in parallel (every indexed dashboard when `uids` is
-   * omitted). Unreadable dashboards are reported, not thrown.
+   * Fetches many resources of a kind in parallel (every indexed one when `uids` is
+   * omitted). Unreadable resources are reported, not thrown.
    */
-  async prefetch(uids?: readonly string[], signal?: AbortSignal) {
-    const targets = [...new Set(uids ?? this.indexedUids())].filter((uid) => !this.isResourceLoaded(uid));
+  async prefetch(uids?: readonly string[], signal?: AbortSignal, kind: WorkspaceResourceKind = 'dashboard') {
+    const targets = [...new Set(uids ?? this.indexedUids(kind))].filter((uid) => !this.isResourceLoaded(uid, kind));
     const failed: Array<{ uid: string; error: string }> = [];
     let next = 0;
     const worker = async () => {
       while (next < targets.length && !signal?.aborted) {
         const uid = targets[next++];
         try {
-          const entry = await this.hydrate(uid, signal);
+          const entry = await this.hydrate(uid, signal, kind);
           if (!entry) {
             failed.push({ uid, error: 'not found or not readable by the current user' });
           }
@@ -386,20 +441,23 @@ export class SessionWorkspace {
   }
 
   /**
-   * Starts loading every indexed dashboard without waiting, so a scan such as
-   * `rg PATTERN /grafana/dashboards` reads dashboards that are already in flight.
+   * Starts loading every indexed resource of a kind without waiting, so a scan such as
+   * `rg PATTERN /grafana/dashboards` reads resources that are already in flight.
    * The fetch outlives the invocation that started it; its results stay cached.
    */
-  prefetchInBackground() {
-    if (this.backgroundPrefetch || !this.hydrator) {
+  prefetchInBackground(kind: WorkspaceResourceKind = 'dashboard') {
+    if (this.backgroundPrefetch.has(kind) || !this.hydrator) {
       return;
     }
-    if (this.indexedUids().every((uid) => this.isResourceLoaded(uid))) {
+    if (this.indexedUids(kind).every((uid) => this.isResourceLoaded(uid, kind))) {
       return;
     }
-    this.backgroundPrefetch = this.prefetch().finally(() => {
-      this.backgroundPrefetch = undefined;
-    });
+    this.backgroundPrefetch.set(
+      kind,
+      this.prefetch(undefined, undefined, kind).finally(() => {
+        this.backgroundPrefetch.delete(kind);
+      })
+    );
   }
 
   status(): WorkspaceChangeStatus[] {
@@ -412,6 +470,7 @@ export class SessionWorkspace {
       changes.push({
         path: entry.path,
         kind: 'resource',
+        resource: entry.kind,
         uid: entry.uid,
         change: content === null ? 'deleted' : entry.base ? 'modified' : 'created',
         resourceVersion: entry.base?.meta.resourceVersion,
@@ -432,17 +491,23 @@ export class SessionWorkspace {
         tmpBytes += bytes;
       }
     }
-    let loaded = 0;
-    let modified = 0;
-    for (const entry of this.resources.values()) {
-      loaded += this.isResourceLoaded(entry.uid) ? 1 : 0;
-      modified += entry.overlay ? 1 : 0;
-    }
+    const counts = (kind: WorkspaceResourceKind) => {
+      let loaded = 0;
+      let modified = 0;
+      for (const entry of this.resources.values()) {
+        if (entry.kind === kind) {
+          loaded += this.isResourceLoaded(entry.uid, kind) ? 1 : 0;
+          modified += entry.overlay ? 1 : 0;
+        }
+      }
+      return { visible: this.indexedUids(kind).length, loaded, modified };
+    };
     return {
       files: this.files.size,
       persistedBytes,
       tmpBytes,
-      dashboards: { visible: this.indexedUids().length, loaded, modified },
+      dashboards: counts('dashboard'),
+      ...(this.hasResourceKind('alertRule') ? { alertRules: counts('alertRule') } : {}),
     };
   }
 
@@ -454,7 +519,7 @@ export class SessionWorkspace {
     copy.resources = new Map(this.resources);
     copy.generated = this.generated;
     copy.hydrator = this.hydrator;
-    copy.index = this.index;
+    copy.indexes = this.indexes;
     copy.journal = [...this.journal];
     return copy;
   }
@@ -487,24 +552,25 @@ export class SessionWorkspace {
     for (const dir of dirsAdded) {
       this.dirs.add(dir);
     }
-    for (const [uid, content] of resources) {
-      const entry = this.resources.get(uid);
+    for (const [key, content] of resources) {
+      const { kind, uid } = parseResourceKey(key);
+      const entry = this.resources.get(key);
       if (content === null) {
         if (entry?.base) {
-          this.resources.set(uid, { ...entry, overlay: { content: null, updatedAt: new Date(now).toISOString() } });
+          this.resources.set(key, { ...entry, overlay: { content: null, updatedAt: new Date(now).toISOString() } });
         } else {
-          this.resources.delete(uid);
+          this.resources.delete(key);
         }
         continue;
       }
       if (entry?.base && entry.base.content === content) {
-        this.resources.set(uid, { ...entry, overlay: undefined });
+        this.resources.set(key, { ...entry, overlay: undefined });
         continue;
       }
-      this.resources.set(uid, {
-        kind: 'dashboard',
+      this.resources.set(key, {
+        kind,
         uid,
-        path: this.resourcePath(uid),
+        path: this.resourcePath(uid, kind),
         base: entry?.base,
         overlay: { content, updatedAt: new Date(now).toISOString() },
       });
@@ -546,7 +612,7 @@ export class SessionWorkspace {
       schemaVersion: 1,
       files,
       dirs: [...this.dirs].filter((dir) => PERSISTED_SCRATCH_MOUNTS.some((mount) => isWithin(dir, mount))),
-      // Unmodified dashboards are listed by the index and fetched again on demand; working copies
+      // Unmodified resources are listed by the index and fetched again on demand; working copies
       // keep their base (for diffs and revision preconditions) plus a patch against it.
       resources: this.resourceEntries()
         .filter((entry) => entry.overlay)
@@ -598,7 +664,7 @@ export class SessionWorkspace {
       }
     }
     for (const resource of data.resources ?? []) {
-      if (!resource || resource.kind !== 'dashboard' || !RESOURCE_UID_PATTERN.test(resource.uid)) {
+      if (!resource || !RESOURCE_KIND_NAMES.includes(resource.kind) || !RESOURCE_UID_PATTERN.test(resource.uid)) {
         continue;
       }
       const base = resource.base ? { meta: resource.base.meta, content: resource.base.content ?? '' } : undefined;
@@ -607,10 +673,10 @@ export class SessionWorkspace {
         // Unmodified dashboards from older sessions are listed by the index instead.
         continue;
       }
-      workspace.resources.set(resource.uid, {
-        kind: 'dashboard',
+      workspace.resources.set(resourceKey(resource.kind, resource.uid), {
+        kind: resource.kind,
         uid: resource.uid,
-        path: workspace.resourcePath(resource.uid),
+        path: workspace.resourcePath(resource.uid, resource.kind),
         base,
         overlay,
       });
@@ -639,13 +705,14 @@ type DirListing = Map<string, 'file' | 'dir'>;
  */
 export class WorkspaceTransaction {
   private files = new Map<string, string | null>();
+  /** Staged resource documents keyed by {@link resourceKey}; `null` stages a deletion. */
   private resources = new Map<string, string | null>();
   private dirsAdded = new Set<string>();
   private dirsRemoved = new Set<string>();
   private generatedCache = new Map<string, string>();
   private generatedFiles?: Map<string, GeneratedFile>;
   private hydrationAttempts = new Set<string>();
-  private hydrationMisses = 0;
+  private hydrationMisses = new Map<WorkspaceResourceKind, number>();
   private closed = false;
   private checkpointed: WorkspaceFileChange[] = [];
   private pathsCache?: { key: string; paths: string[] };
@@ -676,11 +743,11 @@ export class WorkspaceTransaction {
         return content;
       }
       case 'resource': {
-        const content = await this.resourceContent(target.uid, true);
+        const content = await this.resourceContent(target.kind, target.uid, true);
         if (content === undefined) {
           throw new WorkspaceError(
             'ENOENT',
-            `no such file or directory, open '${path}'${this.hydrationHint(target.uid)}`
+            `no such file or directory, open '${path}'${this.hydrationHint(target.kind, target.uid)}`
           );
         }
         return content;
@@ -713,15 +780,15 @@ export class WorkspaceTransaction {
         return this.scratchDirExists(path) ? 'dir' : undefined;
       case 'resource':
         if (
-          !this.resources.has(target.uid) &&
-          this.workspace.isIndexed(target.uid) &&
-          this.resourceDirExists(target.uid)
+          !this.resources.has(resourceKey(target.kind, target.uid)) &&
+          this.workspace.isIndexed(target.uid, target.kind) &&
+          this.resourceDirExists(target.kind, target.uid)
         ) {
           return 'file';
         }
-        return (await this.resourceContent(target.uid, true)) !== undefined ? 'file' : undefined;
+        return (await this.resourceContent(target.kind, target.uid, true)) !== undefined ? 'file' : undefined;
       case 'resource-dir':
-        return this.resourceDirExists(target.uid) ? 'dir' : undefined;
+        return this.resourceDirExists(target.kind, target.uid) ? 'dir' : undefined;
       case 'generated': {
         const files = this.generated();
         if (files.has(path)) {
@@ -772,9 +839,9 @@ export class WorkspaceTransaction {
       throw new WorkspaceError('ENOTDIR', `not a directory, scandir '${path}'`);
     }
     const target = this.workspace.classify(path);
-    if (target.type === 'resource-dir' && !this.workspace.isResourceLoaded(target.uid)) {
-      // Descending into dashboard directories is how rg, grep -r, and find scan.
-      this.noteDashboardMiss();
+    if (target.type === 'resource-dir' && !this.workspace.isResourceLoaded(target.uid, target.kind)) {
+      // Descending into resource directories is how rg, grep -r, and find scan.
+      this.noteResourceMiss(target.kind);
     }
     const listing: DirListing = new Map();
     const addPath = (candidate: string, kind: 'file' | 'dir') => {
@@ -794,12 +861,16 @@ export class WorkspaceTransaction {
     for (const dir of this.allScratchDirs()) {
       addPath(dir, 'dir');
     }
-    if (isWithin(DASHBOARDS_ROOT, path) || isWithin(path, DASHBOARDS_ROOT)) {
-      for (const uid of this.allResourceUids()) {
-        if (this.resourceDirExists(uid)) {
-          addPath(`${DASHBOARDS_ROOT}/${uid}`, 'dir');
-          if (this.resourceFileListed(uid)) {
-            addPath(this.workspace.resourcePath(uid), 'file');
+    for (const kind of this.workspace.resourceKinds()) {
+      const root = RESOURCE_KINDS[kind].root;
+      if (!isWithin(root, path) && !isWithin(path, root)) {
+        continue;
+      }
+      for (const uid of this.allResourceUids(kind)) {
+        if (this.resourceDirExists(kind, uid)) {
+          addPath(`${root}/${uid}`, 'dir');
+          if (this.resourceFileListed(kind, uid)) {
+            addPath(this.workspace.resourcePath(uid, kind), 'file');
           }
         }
       }
@@ -835,10 +906,12 @@ export class WorkspaceTransaction {
     for (const dir of this.allScratchDirs()) {
       paths.add(dir);
     }
-    for (const uid of this.allResourceUids()) {
-      if (this.resourceDirExists(uid) && this.resourceFileListed(uid)) {
-        paths.add(`${DASHBOARDS_ROOT}/${uid}`);
-        paths.add(this.workspace.resourcePath(uid));
+    for (const kind of this.workspace.resourceKinds()) {
+      for (const uid of this.allResourceUids(kind)) {
+        if (this.resourceDirExists(kind, uid) && this.resourceFileListed(kind, uid)) {
+          paths.add(`${RESOURCE_KINDS[kind].root}/${uid}`);
+          paths.add(this.workspace.resourcePath(uid, kind));
+        }
       }
     }
     for (const file of this.generated().keys()) {
@@ -872,20 +945,21 @@ export class WorkspaceTransaction {
       return;
     }
     if (target.type === 'resource') {
-      // Dashboard documents end with a newline like fetched ones; scripts that drop it would change every file's last line.
+      // Resource documents end with a newline like fetched ones; scripts that drop it would change every file's last line.
       content = content.endsWith('\n') ? content : `${content}\n`;
-      const entry = this.workspace.getResource(target.uid);
+      const { kind, uid } = target;
+      let entry = this.workspace.getResource(uid, kind);
+      if ((entry && !entry.overlay && !isBaseLoaded(entry)) || (!entry && this.workspace.isIndexed(uid, kind))) {
+        // Writing over an unfetched resource still needs its base for the diff and revision precondition.
+        entry = await this.remoteWait(this.workspace.hydrate(uid, this.signal, kind));
+      }
       if (entry?.base?.meta.managedBy) {
         throw new WorkspaceError(
           'EROFS',
           `read-only file system, write '${path}' (managed by ${entry.base.meta.managedBy}; change it in its source)`
         );
       }
-      if ((entry && !entry.overlay && !isBaseLoaded(entry)) || (!entry && this.workspace.isIndexed(target.uid))) {
-        // Writing over an unfetched dashboard still needs its base for the diff and revision precondition.
-        await this.remoteWait(this.workspace.hydrate(target.uid, this.signal));
-      }
-      this.resources.set(target.uid, content);
+      this.resources.set(resourceKey(kind, uid), content);
       return;
     }
     if (target.type === 'generated' && this.generated().get(path)?.writable) {
@@ -958,16 +1032,20 @@ export class WorkspaceTransaction {
       if (target.type === 'resource-dir' && !options.recursive) {
         throw new WorkspaceError('EISDIR', `is a directory, rm '${path}'`);
       }
-      const entry = this.workspace.getResource(target.uid);
-      if (entry?.base?.meta.managedBy) {
-        throw this.readOnly(path, 'rm');
-      }
-      if (!entry?.base && this.workspace.isIndexed(target.uid)) {
+      const { kind, uid } = target;
+      let entry = this.workspace.getResource(uid, kind);
+      if (!entry?.base && this.workspace.isIndexed(uid, kind)) {
         // A deletion needs the base revision as its precondition.
-        await this.remoteWait(this.workspace.hydrate(target.uid, this.signal));
+        entry = await this.remoteWait(this.workspace.hydrate(uid, this.signal, kind));
+      }
+      if (entry?.base?.meta.managedBy) {
+        throw new WorkspaceError(
+          'EROFS',
+          `read-only file system, rm '${path}' (managed by ${entry.base.meta.managedBy}; change it in its source)`
+        );
       }
       // Deleting a mounted resource stages a reviewable tombstone.
-      this.resources.set(target.uid, null);
+      this.resources.set(resourceKey(kind, uid), null);
       return;
     }
     if (target.type === 'generated' && this.generated().get(path)?.writable) {
@@ -1048,9 +1126,9 @@ export class WorkspaceTransaction {
     return view;
   }
 
-  /** Whether this transaction staged a write or deletion of the dashboard. */
-  stagedResource(uid: string) {
-    return this.resources.has(uid);
+  /** Whether this transaction staged a write or deletion of the resource. */
+  stagedResource(uid: string, kind: WorkspaceResourceKind = 'dashboard') {
+    return this.resources.has(resourceKey(kind, uid));
   }
 
   stagedFile(path: string) {
@@ -1063,7 +1141,7 @@ export class WorkspaceTransaction {
     if (target.type !== 'resource' && target.type !== 'resource-dir') {
       throw new WorkspaceError('EPERM', `only resource working copies can be discarded: ${path}`);
     }
-    const entry = this.view().getResource(target.uid);
+    const entry = this.view().getResource(target.uid, target.kind);
     if (!entry?.overlay) {
       return false;
     }
@@ -1126,15 +1204,16 @@ export class WorkspaceTransaction {
     }
 
     const effectiveResources = new Map<string, string | null>();
-    for (const [uid, content] of this.resources) {
-      const entry = this.workspace.getResource(uid);
+    for (const [key, content] of this.resources) {
+      const { kind, uid } = parseResourceKey(key);
+      const entry = this.workspace.getResource(uid, kind);
       const before = entry ? this.workspace.resourceContent(entry) : undefined;
       if (content === before || (content === null && before === undefined)) {
         continue;
       }
-      effectiveResources.set(uid, content);
+      effectiveResources.set(key, content);
       changes.push({
-        path: this.workspace.resourcePath(uid),
+        path: this.workspace.resourcePath(uid, kind),
         change: content === null ? 'deleted' : before === undefined ? 'created' : 'modified',
         bytes: content === null ? 0 : utf8ByteLength(content),
         revision: content === null ? undefined : contentRevision(content),
@@ -1223,50 +1302,62 @@ export class WorkspaceTransaction {
     return [...dirs];
   }
 
-  private allResourceUids() {
-    const uids = new Set(this.workspace.indexedUids());
-    this.workspace.resourceEntries().forEach((entry) => uids.add(entry.uid));
-    this.resources.forEach((_content, uid) => uids.add(uid));
+  private allResourceUids(kind: WorkspaceResourceKind) {
+    const uids = new Set(this.workspace.indexedUids(kind));
+    this.workspace.resourceEntries(kind).forEach((entry) => uids.add(entry.uid));
+    this.resources.forEach((_content, key) => {
+      const staged = parseResourceKey(key);
+      if (staged.kind === kind) {
+        uids.add(staged.uid);
+      }
+    });
     return [...uids].sort();
   }
 
-  private resourceDirExists(uid: string) {
-    const staged = this.resources.has(uid) ? this.resources.get(uid) : undefined;
+  private resourceDirExists(kind: WorkspaceResourceKind, uid: string) {
+    const key = resourceKey(kind, uid);
+    const staged = this.resources.has(key) ? this.resources.get(key) : undefined;
     if (staged !== undefined) {
       return staged !== null;
     }
-    const entry = this.workspace.getResource(uid);
+    const entry = this.workspace.getResource(uid, kind);
     if (entry) {
       return entry.overlay?.content !== null;
     }
-    return this.workspace.isIndexed(uid);
+    return this.workspace.isIndexed(uid, kind);
   }
 
-  /** Whether dashboard.json is listed: indexed dashboards are listed before their content is fetched. */
-  private resourceFileListed(uid: string) {
-    if (this.resources.has(uid)) {
-      return this.resources.get(uid) !== null;
+  /** Whether the document is listed: indexed resources are listed before their content is fetched. */
+  private resourceFileListed(kind: WorkspaceResourceKind, uid: string) {
+    const key = resourceKey(kind, uid);
+    if (this.resources.has(key)) {
+      return this.resources.get(key) !== null;
     }
-    const entry = this.workspace.getResource(uid);
+    const entry = this.workspace.getResource(uid, kind);
     if (entry) {
-      return this.workspace.resourceContent(entry) !== undefined || this.workspace.isIndexed(uid);
+      return this.workspace.resourceContent(entry) !== undefined || this.workspace.isIndexed(uid, kind);
     }
-    return this.workspace.isIndexed(uid);
+    return this.workspace.isIndexed(uid, kind);
   }
 
-  private async resourceContent(uid: string, hydrate: boolean): Promise<string | undefined> {
-    if (this.resources.has(uid)) {
-      return this.resources.get(uid) ?? undefined;
+  private async resourceContent(
+    kind: WorkspaceResourceKind,
+    uid: string,
+    hydrate: boolean
+  ): Promise<string | undefined> {
+    const key = resourceKey(kind, uid);
+    if (this.resources.has(key)) {
+      return this.resources.get(key) ?? undefined;
     }
-    let entry = this.workspace.getResource(uid);
+    let entry = this.workspace.getResource(uid, kind);
     const needsHydration = !entry || (!entry.overlay && !isBaseLoaded(entry));
-    if (hydrate && needsHydration && !this.hydrationAttempts.has(uid)) {
-      this.hydrationAttempts.add(uid);
-      if (this.workspace.isIndexed(uid)) {
-        this.noteDashboardMiss();
+    if (hydrate && needsHydration && !this.hydrationAttempts.has(key)) {
+      this.hydrationAttempts.add(key);
+      if (this.workspace.isIndexed(uid, kind)) {
+        this.noteResourceMiss(kind);
       }
       try {
-        entry = await this.remoteWait(this.workspace.hydrate(uid, this.signal));
+        entry = await this.remoteWait(this.workspace.hydrate(uid, this.signal, kind));
       } catch (error) {
         if (error instanceof WorkspaceError) {
           throw error;
@@ -1278,19 +1369,24 @@ export class WorkspaceTransaction {
   }
 
   /**
-   * Several unloaded dashboards touched in one invocation (a recursive search, a
+   * Several unloaded resources touched in one invocation (a recursive search, a
    * glob, xargs, a loop) mean a scan: load the rest of the index in parallel.
    */
-  private noteDashboardMiss() {
-    if (++this.hydrationMisses === SCAN_DETECTION_MISSES) {
-      this.workspace.prefetchInBackground();
+  private noteResourceMiss(kind: WorkspaceResourceKind) {
+    const misses = (this.hydrationMisses.get(kind) ?? 0) + 1;
+    this.hydrationMisses.set(kind, misses);
+    if (misses === SCAN_DETECTION_MISSES) {
+      this.workspace.prefetchInBackground(kind);
     }
   }
 
-  private hydrationHint(uid: string) {
-    return this.workspace.getResource(uid)?.overlay?.content === null
-      ? ' (staged for deletion)'
-      : ` (dashboard ${uid} was not found or is not readable; use \`grafana search\` to find UIDs)`;
+  private hydrationHint(kind: WorkspaceResourceKind, uid: string) {
+    if (this.workspace.getResource(uid, kind)?.overlay?.content === null) {
+      return ' (staged for deletion)';
+    }
+    return kind === 'dashboard'
+      ? ` (dashboard ${uid} was not found or is not readable; use \`grafana search\` to find UIDs)`
+      : ` (alert rule ${uid} was not found or is not readable; see /grafana/catalog/alert-rules.ndjson)`;
   }
 
   private generated() {
@@ -1345,10 +1441,17 @@ export class WorkspaceTransaction {
       target.type === 'generated'
         ? ' (generated, read-only mount)'
         : target.type === 'none' || target.type === 'virtual'
-          ? ' (writable locations: /workspace, /session, /tmp, /grafana/dashboards/<uid>/dashboard.json, /live/dashboard/dashboard.json)'
+          ? ' (writable locations: /workspace, /session, /tmp, /grafana/dashboards/<uid>/dashboard.json, /grafana/alert-rules/<uid>/rule.json, /live/dashboard/dashboard.json)'
           : '';
     return new WorkspaceError('EROFS', `read-only file system, ${op} '${path}'${hint}`);
   }
+}
+
+const EMPTY_UIDS: readonly string[] = [];
+
+function parseResourceKey(key: string): { kind: WorkspaceResourceKind; uid: string } {
+  const separator = key.indexOf(':');
+  return { kind: key.slice(0, separator) as WorkspaceResourceKind, uid: key.slice(separator + 1) };
 }
 
 /** Restored unmodified resources keep metadata only; their content is refetched on first read. */

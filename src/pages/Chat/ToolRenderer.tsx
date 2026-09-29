@@ -800,11 +800,11 @@ function extractErrorMessageFromText(text: string | undefined): string | undefin
 // Renderers for the session filesystem tools (read/write/edit/bash) in src/pages/Chat/workspace/tools.ts.
 const WORKSPACE_TOOL_NAMES = new Set(['read', 'write', 'edit', 'bash']);
 
-// Dashboard files under this prefix are local working copies until a plan is approved and applied.
-const WORKSPACE_STAGED_RESOURCE_PREFIX = '/grafana/dashboards/';
+// Dashboard and alert rule files under these prefixes are local working copies until a change set is applied.
+const WORKSPACE_STAGED_RESOURCE_PREFIXES = ['/grafana/dashboards/', '/grafana/alert-rules/'];
 
 function isWorkspaceStagedPath(path: string | undefined) {
-  return Boolean(path?.startsWith(WORKSPACE_STAGED_RESOURCE_PREFIX));
+  return WORKSPACE_STAGED_RESOURCE_PREFIXES.some((prefix) => path?.startsWith(prefix));
 }
 
 type WorkspaceDirectoryResult = {

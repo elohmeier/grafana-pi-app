@@ -60,6 +60,13 @@ const MACRO_PLACEHOLDERS: Record<string, string> = {
 const MACRO_RE = /\$\{(__[a-z_]+)(?::[^}]*)?\}|\$(__[a-z_]+)/g;
 const IGNORED_BUILTINS = /\$\{?__(?:dashboard|org|user|name|all)\b[^}\s]*\}?/g;
 
+/** Replaces Grafana macros such as `$__rate_interval` with placeholder values for a syntax probe. */
+export function promqlProbe(expr: string) {
+  return expr
+    .replace(MACRO_RE, (match, braced, bare) => MACRO_PLACEHOLDERS[braced || bare] ?? match)
+    .replace(IGNORED_BUILTINS, 'builtin');
+}
+
 /**
  * Collects PromQL targets from every panel, including collapsed rows, hidden
  * targets, and inactive tabs, interpolated with the saved variable values.
@@ -92,9 +99,7 @@ export function collectPromqlQueries(resource: unknown): {
       if (!expr.trim()) {
         return;
       }
-      const probe = asText(prepared[index]?.expr)
-        .replace(MACRO_RE, (match, braced, bare) => MACRO_PLACEHOLDERS[braced || bare] ?? match)
-        .replace(IGNORED_BUILTINS, 'builtin');
+      const probe = promqlProbe(asText(prepared[index]?.expr));
       const missing = unresolvedVariables(probe);
       if (missing.length > 0) {
         unresolved.push({

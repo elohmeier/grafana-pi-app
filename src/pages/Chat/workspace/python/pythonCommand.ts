@@ -1,7 +1,8 @@
 import type { ExecResult } from 'just-bash/browser';
 import { isWithin } from '../paths';
 import type { WorkspaceShellCommand } from '../shell';
-import { DASHBOARDS_ROOT, SCRATCH_MOUNTS, WorkspaceError, type WorkspaceTransaction } from '../workspace';
+import { RESOURCE_KINDS, resourceAtPath } from '../resourceKinds';
+import { SCRATCH_MOUNTS, WorkspaceError, type WorkspaceTransaction } from '../workspace';
 import type { PythonRunInput, PythonRunOutput } from './pythonCore';
 
 export type PythonRunner = {
@@ -33,7 +34,7 @@ export function createPythonCommands(runner: PythonRunner): WorkspaceShellComman
           cwd: ctx.cwd,
           env: { HOME: '/workspace', TMPDIR: '/tmp', LANG: 'C.UTF-8', ...pickEnv(ctx.env) },
           files: snapshot.files,
-          collectRoots: [...SCRATCH_MOUNTS, DASHBOARDS_ROOT],
+          collectRoots: [...SCRATCH_MOUNTS, ...tx.workspace.resourceKinds().map((kind) => RESOURCE_KINDS[kind].root)],
           maxOutputBytes: MAX_OUTPUT_BYTES,
           maxFileBytes: Number.POSITIVE_INFINITY,
         },
@@ -94,9 +95,13 @@ async function snapshotFiles(tx: WorkspaceTransaction) {
   const files: Record<string, string> = {};
   const writable: string[] = [];
   for (const path of tx.allPaths()) {
-    const dashboard = /^\/grafana\/dashboards\/([A-Za-z0-9_-]{1,40})\//.exec(path);
-    if (dashboard && !tx.workspace.isResourceLoaded(dashboard[1]) && !tx.stagedResource(dashboard[1])) {
-      // Copying means fetching: dashboards that were never read or fetched stay out of the snapshot.
+    const resource = resourceAtPath(path.replace(/\/meta\.json$/, ''));
+    if (
+      resource &&
+      !tx.workspace.isResourceLoaded(resource.uid, resource.kind) &&
+      !tx.stagedResource(resource.uid, resource.kind)
+    ) {
+      // Copying means fetching: resources that were never read or fetched stay out of the snapshot.
       continue;
     }
     const stageable = isStageable(path);
@@ -123,9 +128,10 @@ async function snapshotFiles(tx: WorkspaceTransaction) {
 }
 
 function isStageable(path: string) {
+  const resource = resourceAtPath(path);
   return (
     SCRATCH_MOUNTS.some((mount) => isWithin(path, mount)) ||
-    /^\/grafana\/dashboards\/[A-Za-z0-9_-]{1,40}\/dashboard\.json$/.test(path)
+    (resource !== undefined && path.endsWith(`/${RESOURCE_KINDS[resource.kind].document}`))
   );
 }
 

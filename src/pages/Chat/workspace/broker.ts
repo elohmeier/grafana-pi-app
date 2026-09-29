@@ -1,4 +1,5 @@
 import type { AlertRuleParams, PanelAlertRuleSearchParams } from '../domain/alerts';
+import type { AlertNotificationTargets } from './alertRuleModel';
 import type {
   DashboardMetricContextParams,
   DashboardMetricSearchParams,
@@ -6,7 +7,7 @@ import type {
 } from '../domain/dashboardMetricContext';
 import type { ScreenshotParams } from '../domain/types';
 import type { PromqlParser } from './promqlCheck';
-import type { WorkspaceResourceSnapshot } from './types';
+import type { WorkspaceResourceKind, WorkspaceResourceSnapshot } from './types';
 
 /**
  * Typed capabilities that shell commands may use. Commands never receive
@@ -20,8 +21,10 @@ export type WorkspaceBroker = {
   jsonnet?: JsonnetBroker;
   /** Upstream Prometheus parser in the plugin backend. */
   promql?: PromqlParser;
-  /** Read-only Grafana-managed alert rules. */
+  /** Panel-linked alert rule lookup (`grafana-alert find|get`). */
   alerts?: AlertBroker;
+  /** Grafana-managed alert rules as working copies under /grafana/alert-rules. */
+  alertRules?: AlertRuleBroker;
   /** Prometheus metric usage derived from visible dashboards. */
   metricUsage?: MetricUsageBroker;
   /** Browser navigation and Grafana image rendering. */
@@ -117,6 +120,40 @@ export type DashboardWriteResult = {
 
 export type DashboardDryRunResult = { ok: boolean; status?: number; message?: string };
 
+/** Reads and conditional writes of one resource kind, used by `workspace apply` and `workspace revert`. */
+export type ResourceWriteBroker = {
+  get: (uid: string, signal?: AbortSignal) => Promise<WorkspaceResourceSnapshot | undefined>;
+  /** Creates a resource; must fail rather than overwrite an existing UID. */
+  create: (document: unknown, signal?: AbortSignal) => Promise<DashboardWriteResult>;
+  /** Conditional update against the base resourceVersion. */
+  update: (document: unknown, resourceVersion: string, signal?: AbortSignal) => Promise<DashboardWriteResult>;
+  /** Conditional delete against the base resourceVersion. */
+  delete: (uid: string, resourceVersion: string | undefined, signal?: AbortSignal) => Promise<DashboardWriteResult>;
+  /** The resource as it was at an earlier resourceVersion, from Grafana's version history. */
+  version?: (
+    uid: string,
+    resourceVersion: string,
+    apiVersion: string | undefined,
+    signal?: AbortSignal
+  ) => Promise<WorkspaceResourceSnapshot | undefined>;
+};
+
+/**
+ * Grafana-managed alert rules through the App Platform AlertRule API. That API does not
+ * enforce resourceVersion preconditions, so update and delete compare the stored revision
+ * with the base right before writing and report `conflicted` when it moved.
+ */
+export type AlertRuleBroker = ResourceWriteBroker & {
+  /** Every alert rule visible to the current user, with the titles of their folders. */
+  list: (signal?: AbortSignal) => Promise<{ rules: WorkspaceResourceSnapshot[]; folderTitles: Record<string, string> }>;
+  /** Contact points, time intervals, and routing trees that notification settings may name. */
+  notificationTargets?: (signal?: AbortSignal) => Promise<AlertNotificationTargets>;
+  /** Datasource UIDs rules may query, when a central allow-list is configured. */
+  allowedDatasourceUids?: () => string[] | undefined;
+  /** Prometheus datasource UIDs, to recognize PromQL queries. */
+  prometheusDatasourceUids?: () => string[];
+};
+
 export type DashboardBroker = {
   search: (
     query: { query?: string; tags?: string[]; folderUids?: string[]; limit: number; page: number },
@@ -200,20 +237,24 @@ export type PrometheusBroker = {
   ) => Promise<Record<string, unknown>>;
 };
 
-/** One dashboard of a change set, as shown in the review. */
+/** One resource of a change set, as shown in the review. */
 export type WorkspaceApprovalOperation = {
   operation: 'create' | 'update' | 'delete';
+  /** Missing means a dashboard. */
+  kind?: WorkspaceResourceKind;
   uid: string;
   path: string;
   title?: string;
   folderUid?: string;
   folderTitle?: string;
+  /** Alert rules: evaluation group. */
+  group?: string;
   additions: number;
   deletions: number;
-  /** Unified diff of this dashboard. */
+  /** Unified diff of this resource. */
   diff: string;
   warnings: string[];
-  /** Validation errors that the fetched dashboard already had; they do not block the change. */
+  /** Validation errors that the fetched resource already had; they do not block the change. */
   preexistingErrors: string[];
 };
 
@@ -239,7 +280,7 @@ export type WorkspaceApprovalRequest = {
   summary: string;
   operations: WorkspaceApprovalOperation[];
   groups: WorkspaceChangeGroup[];
-  /** Changed lines that belong to no group of two or more (reviewed per dashboard). */
+  /** Changed lines that belong to no group of two or more (reviewed per resource). */
   ungroupedChanges: number;
 };
 

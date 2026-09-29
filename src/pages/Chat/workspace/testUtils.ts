@@ -1,6 +1,184 @@
-import type { DashboardBroker, WorkspaceBroker } from './broker';
+import {
+  alertRuleWriteBody,
+  GROUP_INDEX_LABEL,
+  GROUP_LABEL,
+  PROVENANCE_ANNOTATION,
+  toAlertRuleSnapshot,
+} from './alertRuleModel';
+import type { AlertRuleBroker, DashboardBroker, WorkspaceBroker } from './broker';
 import { sha256Hex } from './hash';
 import type { WorkspaceResourceSnapshot } from './types';
+
+/** A Grafana-managed alert rule on a 5xx rate with a threshold, as the App Platform API returns it. */
+export function alertRuleResource(
+  uid: string,
+  options: {
+    title?: string;
+    folder?: string;
+    group?: string;
+    groupIndex?: number;
+    provenance?: string;
+    threshold?: number;
+    expr?: string;
+    datasourceUid?: string;
+    interval?: string;
+  } = {}
+) {
+  const folder = options.folder ?? 'ops';
+  return {
+    apiVersion: 'rules.alerting.grafana.app/v0alpha1',
+    kind: 'AlertRule',
+    metadata: {
+      name: uid,
+      namespace: 'default',
+      resourceVersion: '1',
+      labels: {
+        'grafana.app/folder': folder,
+        ...(options.group
+          ? { [GROUP_LABEL]: options.group, [GROUP_INDEX_LABEL]: String(options.groupIndex ?? 0) }
+          : {}),
+      },
+      annotations: {
+        'grafana.app/folder': folder,
+        'grafana.app/updatedBy': '0',
+        [PROVENANCE_ANNOTATION]: options.provenance ?? '',
+      },
+    },
+    spec: {
+      title: options.title ?? uid,
+      trigger: { interval: options.interval ?? '1m' },
+      labels: { severity: 'warning' },
+      annotations: { __dashboardUid__: 'checkout', __panelId__: '1' },
+      for: '2m0s',
+      noDataState: 'NoData',
+      execErrState: 'Error',
+      expressions: {
+        A: {
+          relativeTimeRange: { from: '10m0s', to: '0s' },
+          datasourceUID: options.datasourceUid ?? 'prometheus',
+          model: {
+            datasource: { type: 'prometheus', uid: options.datasourceUid ?? 'prometheus' },
+            expr: options.expr ?? 'sum(rate(http_requests_total{status=~"5.."}[5m]))',
+            refId: 'A',
+          },
+        },
+        B: { model: { expression: 'A', reducer: 'last', refId: 'B', type: 'reduce' } },
+        C: {
+          model: {
+            conditions: [{ evaluator: { params: [options.threshold ?? 0], type: 'gt' } }],
+            expression: 'B',
+            refId: 'C',
+            type: 'threshold',
+          },
+          source: true,
+        },
+      },
+    },
+  };
+}
+
+/**
+ * In-memory App Platform AlertRule API. Like Grafana's, it does not check resourceVersion on
+ * writes; the fake broker compares revisions before writing, as the real one does.
+ */
+export function createFakeAlertRuleBroker(initial: Array<ReturnType<typeof alertRuleResource>>) {
+  const store = new Map<string, Record<string, any>>();
+  const history = new Map<string, Array<Record<string, any>>>();
+  const calls: string[] = [];
+  /** Request bodies of writes, as the API received them. */
+  const writes: Array<Record<string, any>> = [];
+  const remember = (uid: string) => {
+    history.set(uid, [...(history.get(uid) ?? []), JSON.parse(JSON.stringify(store.get(uid)))]);
+  };
+  for (const rule of initial) {
+    store.set(rule.metadata.name, JSON.parse(JSON.stringify(rule)));
+    remember(rule.metadata.name);
+  }
+  const snapshot = (resource: Record<string, any> | undefined) =>
+    resource ? toAlertRuleSnapshot(resource, { url: `/alerting/grafana/${resource.metadata.name}/view` }) : undefined;
+  const conflict = (uid: string, resourceVersion: string | undefined) => {
+    const stored = store.get(uid);
+    if (!stored) {
+      return { outcome: 'failed' as const, error: 'not found' };
+    }
+    return resourceVersion !== undefined && stored.metadata.resourceVersion !== resourceVersion
+      ? {
+          outcome: 'conflicted' as const,
+          error: `the rule changed (revision ${resourceVersion}, now ${stored.metadata.resourceVersion})`,
+        }
+      : undefined;
+  };
+
+  const alertRules: AlertRuleBroker = {
+    async list() {
+      calls.push('list');
+      return {
+        rules: [...store.values()].map((resource) => snapshot(resource)!),
+        folderTitles: { ops: 'Operations' },
+      };
+    },
+    async get(uid) {
+      calls.push(`get:${uid}`);
+      return snapshot(store.get(uid));
+    },
+    async create(document: any) {
+      const uid = document.metadata.name;
+      calls.push(`create:${uid}`);
+      if (store.has(uid)) {
+        return { outcome: 'conflicted', error: 'already exists' };
+      }
+      const body = alertRuleWriteBody(document);
+      writes.push(body);
+      store.set(uid, { ...body, metadata: { ...body.metadata, resourceVersion: '1' } });
+      remember(uid);
+      return { outcome: 'applied', snapshot: snapshot(store.get(uid)) };
+    },
+    async update(document: any, resourceVersion) {
+      const uid = document.metadata.name;
+      calls.push(`update:${uid}@${resourceVersion}`);
+      const failure = conflict(uid, resourceVersion);
+      if (failure) {
+        return failure;
+      }
+      const current = store.get(uid)!;
+      const body = alertRuleWriteBody(document, current);
+      writes.push(body);
+      store.set(uid, {
+        ...body,
+        metadata: { ...body.metadata, resourceVersion: String(Number(current.metadata.resourceVersion) + 1) },
+      });
+      remember(uid);
+      return { outcome: 'applied', snapshot: snapshot(store.get(uid)) };
+    },
+    async delete(uid, resourceVersion) {
+      calls.push(`delete:${uid}@${resourceVersion}`);
+      const failure = conflict(uid, resourceVersion);
+      if (failure) {
+        return failure;
+      }
+      store.delete(uid);
+      return { outcome: 'applied' };
+    },
+    async version(uid, resourceVersion) {
+      calls.push(`version:${uid}@${resourceVersion}`);
+      return snapshot(history.get(uid)?.find((entry) => entry.metadata.resourceVersion === resourceVersion));
+    },
+    notificationTargets: async () => ({
+      receivers: ['oncall'],
+      timeIntervals: ['weekends'],
+      routingTrees: ['user-defined'],
+    }),
+    allowedDatasourceUids: () => ['prometheus'],
+    prometheusDatasourceUids: () => ['prometheus'],
+  };
+
+  /** Simulates a concurrent edit by another user. */
+  const touch = (uid: string) => {
+    const stored = store.get(uid)!;
+    stored.metadata.resourceVersion = String(Number(stored.metadata.resourceVersion) + 1);
+  };
+  return { alertRules, store, calls, writes, touch };
+}
 
 type StoredDashboard = { resource: Record<string, any>; resourceVersion: number; managedBy?: string };
 

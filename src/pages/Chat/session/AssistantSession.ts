@@ -37,9 +37,14 @@ import { renderGrafanaSystemPrompt, selectGrafanaSkills, type GrafanaSkill } fro
 import { createInitialRunStatus, reduceChatRunStatus, withRunPhase, type ChatRunStatus } from '../streamingStatus';
 import type { PromptTelemetryContext } from '../telemetry';
 import { createSessionWorkspaceToolkit, type SessionWorkspaceToolkitOptions, SessionWorkspace } from '../workspace';
-import type { DashboardBroker, WorkspaceBroker } from '../workspace/broker';
+import type { AlertRuleBroker, DashboardBroker, WorkspaceBroker } from '../workspace/broker';
 import { migrateLegacyInvestigationReport, migrateLegacyJsonnetFiles } from '../workspace/migration';
-import { createDashboardCatalog, type DashboardCatalog } from '../workspace/mounts';
+import {
+  createAlertRuleCatalog,
+  createDashboardCatalog,
+  type AlertRuleCatalog,
+  type DashboardCatalog,
+} from '../workspace/mounts';
 import type { PythonRunner } from '../workspace/python/pythonCommand';
 import type { WorkspaceBashResult } from '../workspace/shell';
 import type { PersistedWorkspace } from '../workspace/types';
@@ -148,6 +153,7 @@ export class AssistantSession {
   private listeners = new Set<(event: AgentEvent, agent: Agent) => void>();
   private unsubscribeAgent?: () => void;
   private catalog?: { broker: DashboardBroker; catalog: DashboardCatalog };
+  private alertRuleCatalog?: { broker: AlertRuleBroker; catalog: AlertRuleCatalog };
   private initialMessages: AgentMessage[];
 
   constructor(init: SessionInit = {}) {
@@ -369,7 +375,15 @@ export class AssistantSession {
     if (dashboards && this.catalog?.broker !== dashboards) {
       this.catalog = { broker: dashboards, catalog: createDashboardCatalog(dashboards) };
     }
-    return createSessionWorkspaceToolkit({ ...options, catalog: this.catalog?.catalog });
+    const alertRules = options.broker.alertRules;
+    if (alertRules && this.alertRuleCatalog?.broker !== alertRules) {
+      this.alertRuleCatalog = { broker: alertRules, catalog: createAlertRuleCatalog(alertRules) };
+    }
+    return createSessionWorkspaceToolkit({
+      ...options,
+      catalog: this.catalog?.catalog,
+      alertRuleCatalog: this.alertRuleCatalog?.catalog,
+    });
   }
 
   private toolkitFor(environment: SessionEnvironment) {
