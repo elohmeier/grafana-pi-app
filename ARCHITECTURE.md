@@ -29,8 +29,8 @@ three more pieces:
   continue.
 
 In this app the loop is provided by `@earendil-works/pi-agent-core`. The central
-class is `Agent`, created in `buildAgent` in
-`src/pages/Chat/ChatSceneObject.tsx`. The important inputs are:
+class is `Agent`, created by `AssistantSession.attach` in
+`src/pages/Chat/session/AssistantSession.ts`. The important inputs are:
 
 - `systemPrompt`: built from `src/pages/Chat/systemPrompt.ts`, the skill
   catalog, active skills, and the session filesystem section.
@@ -158,21 +158,42 @@ prompt block from the current route (dashboard UID, panel, time range,
 variables, and whether live dashboard editing is available). It also feeds skill
 selection hints such as `hasPanelContext`.
 
-`src/pages/Chat/chatRunRegistry.ts` keeps in-memory live run snapshots (agent,
-artifacts, tool runs, session workspace, compaction state, approval handler) so a
-chat can move between the full page and the sidebar without losing state.
+`src/pages/Chat/chatRunRegistry.ts` keeps sessions whose run continues without a
+view, so a chat can move between the full page and the sidebar mid-run.
 
 ## Chat And Agent Lifecycle
 
-`session/AssistantSession.ts` owns the Pi Agent, workspace, artifacts, compaction,
-approval channel, catalog cache, and serialized persistence queue. It exposes
-subscriptions and snapshots independently of React. The chat view injects the
-Grafana broker, storage adapter, current model, skills, and page context.
+`session/AssistantSession.ts` is one conversation, independent of React. It owns:
 
-Page/sidebar handoffs share the same session instance through `chatRunRegistry.ts`.
-Artifacts and pending approvals are not copied or redirected through UI callbacks.
-The agent persists its captured state at completion even when no view is attached.
-React owns navigation, scrolling, the composer, session selection, and rendering.
+- identity and title (a new chat is titled from its first prompt or `!` command),
+- the launch context (dashboard panel action or `@grafana/assistant` launch),
+  which reaches the model with the first prompt only,
+- the model and thinking-level choice of the chat,
+- the Pi Agent, the system prompt and tools of each turn (skill selection,
+  launch and page context blocks, workspace toolkit),
+- `prompt()` and `runUserShell()` (`!command` in the composer),
+- the session filesystem, artifacts, approval channel, and catalog cache,
+- run progress (`runStatus`, per-call `toolRuns`), compaction state, and the
+  truncation notice,
+- restore from stored or imported records (`AssistantSession.restore`, with
+  legacy migrations), the stored record, and the serialized save queue with
+  its save status.
+
+Views read this through `getState()`/`subscribeState()` and agent events through
+`subscribe()`. A view attaches as the session's `SessionHost`
+(`attach(host)`): the host supplies the environment for each prompt and shell
+command (stream function, resolved model, Grafana broker, skills, Python runner,
+live dashboard API, page context) and the storage adapter, and receives
+telemetry and benchmark hooks. The core has no imports from React, Scenes, or
+`@grafana/runtime`; `session/sessionRecord.ts` holds the stored and export
+formats. React (`ChatSceneObject.tsx`) owns navigation, the session list,
+scrolling, the composer, the leave guard, and rendering.
+
+Page/sidebar handoffs share the same session instance through `chatRunRegistry.ts`;
+the receiving view attaches as the new host. Artifacts, pending approvals, and
+run progress stay with the session. The agent persists its captured state at
+completion even when no view is attached. Page and sidebar share one
+`SessionRepository`, so storage revisions survive a handoff.
 
 Each turn refreshes model settings, skill instructions, and the context snapshot.
 Tools are always `read`, `write`, `edit`, and `bash`. The catalog mount survives
@@ -633,19 +654,37 @@ state and the UI transcript stay complete.
 2. Under 80% of the budget, the transcript is sent unchanged, after any
    earlier summary.
 3. Over it, large tool results outside the recent window (the last 35% of the
-   budget) are elided.
-4. If that is still too much, older messages are summarized by the current
+   budget) are elided, and if that is not enough, those of every step except
+   the latest, whose results the model acts on next. Elided output can be read
+   or run again, so this comes before summarizing, which loses detail for good.
+   Without it, a turn that prints several large files summarized again on
+   every step.
+4. Output of the latest step that alone exceeds the budget is clipped (head and
+   tail, with a note to read the file in parts or filter it). Summarizing
+   cannot make room for it: before this stage, every step summarized again,
+   truncation dropped the tool call, and the model repeated the command.
+5. If that is still too much, older messages are summarized by the current
    model into a rolling `<conversation_summary>`, extended incrementally. The
    summarizer is told to keep identifiers, paths, queries, and receipt IDs
-   verbatim. Cuts are placed at message boundaries that do not separate tool
+   verbatim, and to stay under about a quarter of the history budget, so the
+   summary and the recent window leave room for several steps before the next
+   compaction. Transcript chunks per summarizer request are sized from the
+   window, since that request does not carry the agent's system prompt and tools. Cuts are placed at message boundaries that do not separate tool
    calls from their results, and the latest message is never summarized.
-5. If summarization fails or the result is still too large, the oldest
+6. If summarization fails or the result is still too large, the oldest
    messages are dropped.
 
 The compaction state (summary, covered message count, and an anchor
 fingerprint that invalidates it when the history changes) is cached per
 session, shared across page/sidebar handoff, and persisted with the session.
-Compaction events are recorded for benchmarks. The system prompt asks the model
+
+The chat shows compaction: while the summarizer runs, the run status reads
+"Summarizing earlier conversation", and the transcript shows a divider before
+the first turn the model still sees verbatim. The divider expands to the
+summary. When messages were dropped without a summary, a warning follows the
+latest reply. Compaction events are also recorded for benchmarks, and
+`npm run benchmark:compaction` checks that facts from early turns survive
+summarization (see `tests/agentCompactionBenchmark.spec.ts`). The system prompt asks the model
 to keep `/session/findings.md` for long tasks because
 those files survive compaction.
 
@@ -915,8 +954,9 @@ For a quick onboarding path:
 3. `src/module.tsx`: how the frontend enters Grafana, extension points, and the
    variant gate.
 4. `src/components/App/App.tsx`: access check and Scenes app shell.
-5. `src/pages/Chat/ChatSceneObject.tsx`: chat UI, agent lifecycle
-   (`buildSkillRuntime`, `buildAgent`, `saveSession`), sessions, approvals.
+5. `src/pages/Chat/session/AssistantSession.ts`: one conversation (agent,
+   turns, shell, run state, persistence); `src/pages/Chat/ChatSceneObject.tsx`:
+   the chat view that hosts it, session list, approvals.
 6. `src/pages/Chat/systemPrompt.ts` and `src/pages/Chat/workspace/prompt.ts`:
    top-level behavior rules and the filesystem contract.
 7. `src/pages/Chat/domain/index.ts`: the fixed tool list.

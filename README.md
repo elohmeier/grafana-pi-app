@@ -126,7 +126,7 @@ Live edits (`live apply`) change only the unsaved dashboard open in the browser 
 
 ## Context window and compaction
 
-Before each model request, the assistant estimates tokens for the system prompt, tool schemas, and history. The budget is `contextWindow − maxOutputTokens − margin`. Above 80% of it, older bulky tool outputs are elided first. If that is not enough, older turns are summarized by the model into a rolling summary that keeps identifiers, paths, and receipt IDs verbatim. Cuts never separate a tool call from its result, the summary is persisted with the session, and truncation is the fallback. The visible transcript stays complete. For long tasks, the assistant keeps notes in `/session/findings.md`.
+Before each model request, the assistant estimates tokens for the system prompt, tool schemas, and history. The budget is `contextWindow − maxOutputTokens − margin`. Above 80% of it, bulky tool outputs outside the recent window are elided first, then those of every step except the latest one. Output of the latest step that alone does not fit is clipped, with a note to read it in parts. If that is not enough, older turns are summarized by the model into a rolling summary of about a quarter of the history budget that keeps identifiers, paths, and receipt IDs verbatim. Cuts never separate a tool call from its result, the summary is persisted with the session, and truncation is the fallback. The visible transcript stays complete: while the summary is written the status reads "Summarizing earlier conversation", a divider marks where the model's verbatim context begins and expands to the summary, and a warning follows a reply for which messages were dropped without a summary. For long tasks, the assistant keeps notes in `/session/findings.md`.
 
 ## Skills
 
@@ -393,6 +393,14 @@ npm run benchmark:alert-troubleshooting
 ```
 
 This benchmark seeds a dashboard panel and a Grafana-managed AlertRule linked through the App Platform AlertRule API, then validates that Assistant looks up the linked rule with `grafana-alert find` or `grafana-alert get`, runs `grafana-prom query` evidence, and explain an alert-vs-panel threshold mismatch without editing alerts or dashboards. It writes reports to `test-results/alert-troubleshooting-benchmark/latest-report.txt`, `latest-answer.md`, and `latest-events.json`.
+
+To benchmark whether facts survive context compaction, run:
+
+```bash
+npm run benchmark:compaction
+```
+
+This benchmark seeds three dashboards with unusual panel titles, lowers the configured model's context window to `BENCH_COMPACTION_CONTEXT_WINDOW` (default `20000`, which leaves about 6k tokens of history next to the system prompt and tool schemas) for the run, and restores the plugin settings afterwards. Over five turns the assistant inspects these dashboards, then three others (explaining what each of their panels measures), and finally answers without tools with the two facts the user stated in the first turn and every panel title of the first three dashboards. It fails when no earlier turn was summarized, when the recall turn uses tools, or when a fact is missing, and writes reports to `test-results/compaction-benchmark/latest-report.txt`, `latest-answer.md`, and `latest-events.json`.
 
 To benchmark dashboard-derived metric discovery, run:
 

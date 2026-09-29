@@ -1,170 +1,170 @@
 # Architecture review and roadmap
 
-Review date: 2026-09-25. Repository baseline: `4857f8c`, package version `4.0.0`.
-This is a proposed breaking redesign, not a description of implemented features.
-The current implementation is documented in [ARCHITECTURE.md](ARCHITECTURE.md).
+Review date: 2026-09-25, status updated 2026-09-29. Repository baseline of the
+review: `4857f8c`, package version `4.0.0`. The review proposed a breaking
+redesign; [Status](#status-2026-09-29) records what is implemented. The current
+implementation is documented in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## Implementation update (2026-09-28)
+## Status (2026-09-29)
 
-The frontend now uses direct `workspace apply` with complete-diff approval; there
-is no planning command, plan ID, or persisted plan catalog. Read-only workspace
-commands no longer commit staged writes. Apply receipts are read-only files.
+This section is the current state. Everything from [Recommendation](#recommendation)
+on is the original review (baseline `4857f8c`, 2026-09-25). It stays as the
+design rationale, but two of its proposals were superseded:
 
-A UI-independent session owns the agent, artifacts, approval channel, compaction,
-and persistence queue. Page/sidebar handoffs share it. Bash and jq execute in a
-terminable worker; filesystem and command RPC remain mediated by the host.
-Evidence presentation uses `evidence show` over captured files. Context is exposed
-as read-only JSON, skill bundling accepts scripts, and PromQL accepts file/stdin
-batches. Domain command registrations are split into modules; obsolete tool
-factories and runtime skill tool groups are removed.
+- `workspace plan` and plan IDs: replaced by direct `workspace apply`. The user
+  reviews the complete diff of the change set and can leave dashboards out;
+  approval is bound to the change-set digest, and there is no stored plan.
+- The `show_evidence` model tool: replaced by the `evidence show` shell command,
+  which presents captured files without running queries again. The model-facing
+  tools stay `read`, `write`, `edit`, and `bash`.
 
-The earlier review below is historical and includes superseded recommendations.
-Server hosting, server-enforced policy, restricted data sources, and broader
-compaction quality work remain separate follow-ups.
+### Implemented
 
-## Status (2026-09-25)
-
-Parts of this roadmap are now implemented. The findings table below describes
-the baseline and has not been rewritten.
-
-Implemented:
-
-- **M0, workspace removal:** the external workspace/VFS integration
-  (`agentWorkspace/`), its provider contract, the sample provider, and the
-  launch wiring are deleted. The backend no longer saves dashboards with the
-  service account; the old render/save/virtual-file routes are gone.
-- **M1, partly done:**
+- **M0, workspace removal:** the unused external workspace/VFS integration, its
+  provider contract, the sample provider, and the launch wiring are deleted. The
+  backend no longer saves dashboards with the service account, and `plugin.json`
+  grants the service account only `users.permissions:read` for the app-access check.
+- **M1, core and model budgets:**
   - Per-model `contextWindow` and `maxOutputTokens` flow through the settings UI,
     provisioning, the Pi importer, benchmark profiles, the frontend model, and
     the backend, which clamps request `maxTokens`.
   - `transformContext` compaction elides old tool output, keeps a persisted
-    rolling summary, and falls back to truncation.
-  - A single agent with a fixed tool set replaces the specialist subagents.
-- **M2 and M3, partly done:**
-  - A persistent per-chat session filesystem, used through `read`, `write`,
-    `edit`, and `bash` (just-bash).
-  - Workspace commands: `grafana`, `grafana-prom`, `grafana-dashboard`,
-    `jsonnet`, and `workspace`.
-  - `python3` (CPython-WASM in a worker).
-  - A lazy dashboard catalog with coverage, and skills and artifacts as
-    read-only mounts.
-  - Transactions and quotas.
-  - Digest-bound `workspace plan`, then `workspace apply`. Apply requires
-    approval, writes as the current user with `resourceVersion` preconditions,
-    and keeps an outcome journal.
+    rolling summary, and falls back to truncation. The chat shows it: a
+    "Summarizing earlier conversation" run status, a transcript divider that
+    expands to the summary, and a warning when messages were dropped without a
+    summary. `npm run benchmark:compaction` measures summary fidelity (see
+    [Evidence](#evidence-from-live-testing)).
+  - One agent with a fixed tool set replaces the specialist subagents.
+  - `AssistantSession` is the UI-independent session controller. It owns identity
+    and title, launch context, model choice, the agent and the system prompt and
+    tools of each turn, prompts and user shell commands, run and tool-run state,
+    compaction state, restore/import/export records, and the save queue. Views
+    attach as a `SessionHost` that supplies the environment (model stream,
+    Grafana broker, skills, page context) and storage. A test keeps React,
+    Scenes, and `@grafana/runtime` out of its import graph. Page/sidebar handoffs
+    re-attach the running session to the new view.
+- **M2, four-tool shell:**
+  - A persistent per-chat session filesystem used through `read`, `write`,
+    `edit`, and `bash` (just-bash), with transactions and quotas.
+  - Bash, jq (jq 1.8 as WebAssembly), and `python3` (CPython-WASM) run in
+    terminable Web Workers; filesystem and command calls are mediated by the host.
+  - A lazy dashboard catalog with coverage; skills (including `scripts/`),
+    artifacts, receipts, and `/session/context.json` as read-only mounts.
+  - Domain commands in modules: `grafana`, `grafana-prom` (with file/stdin
+    batches), `grafana-dashboard`, `grafana-usage`, `grafana-alert`, `jsonnet`,
+    `workspace`, `live`, and `evidence`.
+  - Typed tools, the tool-name result renderers of retired tools, and runtime
+    skill tool groups are removed.
+  - Users can run commands in the same shell (`!command`), with history, Ctrl+R
+    search, and Tab completion.
+- **M3, dashboard change sets and validation:**
+  - One dashboard walker (`workspace/dashboardPanels.ts`, ported from
+    `grafana-inspect`) backs `inspect`, `queries`, `validate`, and `data`. `data`
+    runs panel queries and applies transformations, overrides, and reducers with
+    `@grafana/data`.
+  - PromQL validation uses the upstream Prometheus parser in the backend
+    (`/promql/parse`); `validate --server` adds a Grafana dry-run. v1 dry-runs do
+    not validate the spec and v2 dry-runs miss dangling layout references, so the
+    local structure checks stay.
+  - `validate` and `fix` are separate; repairs are visible edits.
+  - `workspace apply` writes as the current user with `resourceVersion`
+    preconditions and bounded parallelism, keeps a per-operation journal
+    (`applied`, `declined`, `conflicted`, `failed`, `unknown`, `not attempted`),
+    and `workspace revert` stages the reverse of an apply for the same review.
+    Mass edits across all visible dashboards go through one reviewed change set.
+  - A dashboard Grafana cannot convert to the preferred API version is edited in
+    its stored version, and `meta.json`, `grafana fetch`, and `inspect` report it.
+  - The live dashboard is a file: `/live/dashboard/dashboard.json` (`GET_SPEC`)
+    and `live diff|apply|discard|status` (`APPLY_SPEC`, with a spec-hash
+    precondition against browser changes). `add-panel`, `set-panel`, and
+    `label-filter` write schema-correct panels into working copies and the live file.
+- **Session storage:** chat sessions, including the session filesystem, are
+  stored per Grafana user in PostgreSQL for HA deployments, with plugin user
+  storage kept for existing installations.
 
-Decisions taken since the review:
+### Decisions taken since the review
 
 - **No specialists or scoped delegation.** The specialist subagents looped on
-  metric discovery and lost context at handoffs; in live tests the single
-  agent with `read`/`write`/`edit`/`bash` completed tasks the specialists
-  failed. Long tasks rely on one session plus compaction and on durable notes
-  in `/session/plan.md` and `/session/findings.md`.
-- **Jsonnet is a shell command.** The `write_jsonnet`/`render_dashboard`/
-  `save_dashboard` tool chain is replaced by `jsonnet` (backed by stateless
-  `/jsonnet/eval` and `/jsonnet/fix`), `grafana-dashboard fix|validate`, and
-  plan/apply. Implicit save-time normalization became `grafana-dashboard fix`.
-- **Skills are files** under `/.agents/skills`; skill tool groups no longer
-  select tools.
-- **`python3` is available** in the shell (CPython-WASM from just-bash's
-  vendor build, one Web Worker per invocation, no network, files staged back
-  through the transaction policy). `fd` was dropped in favor of `find`.
-- **Local default model** is Ornith-1.5-35B-A3B (Q4_K_M). Ornith-1.5-9B
-  produced comparable results in a spot check but was about 2.8x slower on the
-  reference Strix Halo host (dense 9B vs. ~3B active parameters).
+  metric discovery and lost context at handoffs; in live tests the single agent
+  with `read`/`write`/`edit`/`bash` completed tasks the specialists failed. Long
+  tasks rely on one session plus compaction and on durable notes in
+  `/session/findings.md`.
+- **Jsonnet is a shell command** (`jsonnet`, backed by stateless `/jsonnet/eval`
+  and `/jsonnet/fix`), and implicit save-time normalization became
+  `grafana-dashboard fix`.
+- **Skills are files** under `/.agents/skills`; skill tool groups no longer select tools.
+- **`fd` was dropped** in favor of `find`. **jq is the real jq** (1.8 via
+  `jq-wasm`): just-bash's reimplementation evaluated parenthesized assignment
+  targets such as `(.a.b) = 5` to the value alone and silently corrupted files.
+- **Typed file edits stay behind commands.** The local model broke large v2 JSON
+  when hand-editing it, so `add-panel`, `set-panel`, and `label-filter` exist.
+- **Local default model** is Ornith-1.5-35B-A3B (Q4_K_M). Ornith-1.5-9B gave
+  comparable results in a spot check but was about 2.8x slower on the reference
+  Strix Halo host (dense 9B vs. ~3B active parameters).
+- **Server-side enforcement waits for the server host.** Datasource queries run in
+  the browser as the current user through Grafana's datasource API, so an
+  allow-list check in the plugin backend would not constrain them, and the model
+  cannot fabricate an approval because `workspace apply` is the only write path
+  and the review is a trusted UI. Both become enforceable, and necessary, once
+  runs continue without the browser (M4) and channels deliver approvals (M7).
 
-Evidence from live testing (sidebar variant, local model): multi-dashboard
-edits, new-dashboard creation, and a four-dashboard audit completed end to
-end; `workspace apply` conflicts are enforced by Grafana (409 on stale
-`resourceVersion`, duplicate create, and delete preconditions); a forced 20k
-context window triggered elision and summarization, and the task finished
-with one panel dropped from the final table (summary fidelity needs a
-benchmark).
+### Evidence from live testing
 
-- **Chezmoi tool reuse, partly done:** one dashboard walker
-  (`workspace/dashboardPanels.ts`, ported from `grafana-inspect`) now backs
-  `inspect`, `validate`, and the new `grafana-dashboard data`, which runs panel
-  queries and applies transformations, overrides, and reducers with
-  `@grafana/data`. PromQL validation uses the upstream Prometheus parser in the
-  backend (`/promql/parse`) with interpolated saved variables. The
-  `--server` option of `validate` adds a Grafana dry-run (level 5). A live
-  check found that v1 dry-runs do not validate the spec and v2 dry-runs miss
-  dangling layout references, so the local structure checks stay. The typed
-  tools in `tools/alerts.ts` and `dashboardMetricContext.ts` read panels
-  through the same walker. `inspect_dashboard_context` is removed:
-  `grafana-dashboard inspect` now returns row paths, layout, display
-  settings, and variable values, and `grafana-dashboard data` replaces its
-  query validation.
-- **Dashboard-context benchmark fixes:** production builds had broken
-  `python3` (the AMD library wrapped the worker, and Grafana served the
-  `.cjs` runtime as `text/plain`); both are fixed in `webpack.config.ts`. The
-  demo datasources now set `timeInterval: 60s` to match the seeded history,
-  so `$__rate_interval` panels are no longer empty. The `pi-dashboard` helper
-  gained `variables=`, `d.variable.custom|labelValues|constant|textbox`, a
-  `panels=` argument, header-less sections, chainable `withVariables`, and a
-  `legendFormat` alias; `jsonnet --resource` rejects non-dashboard output
-  with the helper usage. `grafana-prom query` series carry the same `calcs`
-  reducer fields as `grafana-dashboard data`.
+- Sidebar variant, local model: multi-dashboard edits, new-dashboard creation,
+  and a four-dashboard audit completed end to end.
+- `workspace apply` conflicts are enforced by Grafana: 409 on stale
+  `resourceVersion`, duplicate create, and delete preconditions.
+- A forced 20k context window triggered elision and summarization, and the task
+  finished with one panel dropped from the final table. This motivated the
+  compaction fidelity benchmark (`npm run benchmark:compaction`): three seeded
+  dashboards with unusual panel titles, two user-stated facts, turns about
+  three other dashboards, and a final no-tools recall turn under a 20k window.
+  It fails when nothing was summarized, when the recall turn uses tools, or
+  when any fact is missing.
+  First runs (2026-09-29, DeepSeek V4 Flash on the local DS4 server) found three
+  compaction faults, now fixed: a turn that printed several large files
+  summarized again on every step; output of one step larger than the history
+  budget was kept verbatim, so truncation dropped the tool call and the model
+  repeated the command; and summarizer requests were chunked by the agent's
+  history budget instead of the window, so one summary took several model
+  calls. Summaries now target about a quarter of the history budget. After the
+  fixes, the benchmark passed with 14/14 facts recalled after two summaries
+  (about 110 s per summary on that model).
+- Production builds had broken `python3` (the AMD library wrapped the worker, and
+  Grafana served the `.cjs` runtime as `text/plain`); both are fixed in
+  `webpack.config.ts`. The demo datasources set `timeInterval: 60s` to match the
+  seeded history, so `$__rate_interval` panels are no longer empty.
 
-- **Typed tools moved into the shell:** `read_artifact`, `update_report`,
-  `navigate`, `screenshot_dashboard`, `find_panel_alert_rules`,
-  `get_alert_rule`, and the three dashboard metric-usage tools are removed.
-  Their logic is reached through new broker capabilities as `grafana open`,
-  `grafana-dashboard screenshot`, `grafana-alert find|get`,
-  `grafana-usage dashboard|search|related`. The investigation report is the
-  Markdown file `/session/report.md`, which the chat renders; older structured
-  reports migrate into it on load. Commands can
-  return images, which the bash tool attaches to its result.
-- **Live dashboard as a file:** the 15 typed live dashboard tools are removed.
-  `/live/dashboard/dashboard.json` is a writable v2 resource read with
-  `GET_SPEC`; `live diff|apply|discard|status` apply it with `APPLY_SPEC`, with
-  a spec-hash precondition against browser changes. `grafana-dashboard
-label-filter` replaces the dashboard-wide label filter tool for working
-  copies and the live file alike. The model-facing tool list is now `read`,
-  `write`, `edit`, and `bash`.
-- **Shell compatibility from the first benchmark run:** `jq` is jq 1.8 via
-  `jq-wasm` instead of just-bash's reimplementation, which evaluated
-  parenthesized assignment targets such as `(.a.b) = 5` to the value alone and
-  silently corrupted files. `/dev/null` works as a sink. `grafana-prom query`
-  accepts `--step` and always prints `{queryType, failed, results}`.
-- **Typed file edits:** the benchmark showed the local model breaking large v2
-  JSON when hand-editing it. `grafana-dashboard add-panel` and `set-panel`
-  write schema-correct panels, queries, units, and positions into classic or
-  v2 files (working copies and the live file), so typed domain operations stay
-  behind commands as planned.
-- **Conversion fallback is visible:** a dashboard Grafana cannot convert to
-  the preferred API version is edited in its stored version, and `meta.json`,
-  `grafana fetch`, and `grafana-dashboard inspect` report `conversion`
-  (preferred version and Grafana's error). Grafana reports only failed
-  conversions, not lossy successful ones.
-- **Service-account permissions trimmed:** `plugin.json` grants only
-  `users.permissions:read` for the backend's app-access check.
-- **User shell mode:** composer input starting with `!` runs in the chat's
-  session shell without a model call. The result is stored as a `userShell`
-  message, and the model receives it as user context on the next prompt.
+### Not yet implemented
 
-Not yet implemented:
+- **Durable server host (M4)** and the OpenClaw/Mattermost host and identity
+  pilot (A0). Sessions run in the browser; a run survives page/sidebar handoffs
+  but not closing Grafana.
+- **Server-side policy:** the datasource allow-list and dashboard validation run
+  in the browser, and approval is bound to the change-set digest but not to the
+  actor or an expiry (see the decision above).
+- **Alert resources and commands (M5).** Alerting is read-only: `grafana-alert`
+  finds and prints rules.
+- **Restricted MSSQL/Elasticsearch sources and the output policy (M6).**
+- **Conversational alerting and channels (M7)**, including presentation events
+  that channel adapters can render; `evidence show` renders only in the Grafana chat.
+- **Pi upgrade.** The app pins `pi-agent-core` 0.75.5; the reviewed checkout is
+  0.87.1. Upgrade it with stream, cancellation, tool, reasoning, and resume tests
+  before the host pilot rather than during it.
+- **Release.** The redesign is on the `bash` branch and not yet released.
 
-- `show_evidence` and presentation events. Rich views still dispatch by tool
-  name.
-- Worker isolation for bash. The interpreter runs on the main thread, and only
-  Python has a hard kill.
-- A UI-independent session controller and a durable server host (M1
-  extraction, M4).
-- Alert resources and commands (M5). Alerting remains typed and read-only.
-- Restricted MSSQL/log sources and the output policy (M6).
-- Server-side approval binding. Approval is still a UI callback in the
-  browser, bound to the plan digest but not to the actor or an expiry. The
-  datasource allow-list and dashboard validation also run only in the
-  frontend.
-- Compaction visibility and quality: there is no UI notice when history is
-  summarized, and no benchmark for summary fidelity over long sessions.
+### Next steps
 
-Suggested next steps, in order: server-side enforcement of the datasource
-allow-list and plan approval (bind approval to actor, digest, and expiry);
-a compaction fidelity
-benchmark and UI notice; bash worker isolation; `show_evidence`; then the
-session controller extraction and server host (M1/M4).
+1. Run the compaction benchmark for each model profile in use and tune the
+   summarizer prompt or trigger ratios where recall drops.
+2. Upgrade Pi and add protocol parity tests for the backend's Chat
+   Completions/Responses translation (reasoning items, usage, tool-call IDs,
+   cancellation, retries), so a host can take over protocol handling.
+3. Run the OpenClaw/Mattermost host and identity pilot (A0) with `AssistantSession`
+   as the unit a server host runs.
+4. With a server host: a query broker that enforces the datasource allow-list,
+   approvals bound to actor, change-set digest, and expiry, and read-only alert
+   commands and silences toward M5 and the companion plan's A1–A4.
 
 The follow-up [conversational alerting and OpenClaw analysis](docs/alerting-chat-openclaw.md)
 extends this roadmap with proactive Mattermost/Webex incident threads, screenshots,
