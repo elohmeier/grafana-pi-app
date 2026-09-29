@@ -35,6 +35,14 @@ import { PLUGIN_BASE_URL, PLUGIN_ID } from '../../constants';
 import { testIds } from '../../components/testIds';
 import { ChangeSetReviewModal } from './ChangeSetReview';
 import { HistorySearch } from './HistorySearch';
+import { ShellCompletions } from './ShellCompletions';
+import {
+  completeShellLine,
+  workspaceCompletionSources,
+  type CompletionCandidate,
+  type CompletionResult,
+} from './workspace/completion';
+import { DEFAULT_SHELL_CWD } from './workspace/shell';
 import { navigatePromptHistory, promptHistory, type PromptHistoryState } from './promptHistory';
 import { usePluginMeta } from '../../utils/utils.plugin';
 import type { Artifact } from './domain';
@@ -846,11 +854,16 @@ export function ChatApp({
   const historyRef = useRef<PromptHistoryState>(undefined);
   const [historySearch, setHistorySearch] = useState<{ entries: string[] }>();
   const historySearchOpenRef = useRef(false);
-  const handleInputChange = useCallback((value: string) => {
-    // Typing ends history browsing and keeps the text as the new draft.
-    historyRef.current = undefined;
-    setInput(value);
-  }, []);
+  const [completions, setCompletions] = useState<CompletionResult>();
+  const handleInputChange = useCallback(
+    (value: string) => {
+      // Typing ends history browsing and keeps the text as the new draft.
+      historyRef.current = undefined;
+      setCompletions(undefined);
+      setInput(value);
+    },
+    [setCompletions]
+  );
 
   /** Up/Down recall earlier prompts and shell commands, like the pi coding agent's editor. */
   const handleHistoryKey = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1633,10 +1646,77 @@ export function ChatApp({
     !isBusy &&
     (isShellInput ? Boolean(parseUserShellInput(input)) : Boolean(input.trim()) && hasLLMConfig);
 
+  /** Replaces the word being completed in the composer and puts the caret after it. */
+  const applyCompletion = (value: string, start: number, end: number, replacement: string) => {
+    // Offsets are relative to the shell command after the leading `!`.
+    const next = `${value.slice(0, start + 1)}${replacement}${value.slice(end + 1)}`;
+    const caret = start + 1 + replacement.length;
+    historyRef.current = undefined;
+    setInput(next);
+    requestAnimationFrame(() => composerRef.current?.setSelectionRange(caret, caret));
+  };
+
+  /** Tab in shell mode completes commands, subcommands, options, and paths; ambiguous completions list candidates. */
+  const completeShellInput = async (element: HTMLTextAreaElement) => {
+    const value = element.value;
+    const caret = element.selectionStart;
+    if (element.selectionEnd !== caret || caret < 1) {
+      return;
+    }
+    const sources = await workspaceCompletionSources(sessionRef.current.workspace, DEFAULT_SHELL_CWD);
+    if (composerRef.current?.value !== value) {
+      // The user kept typing while the listing loaded.
+      return;
+    }
+    const result = completeShellLine(value.slice(1), caret - 1, sources);
+    if (!result) {
+      setCompletions(undefined);
+      return;
+    }
+    const word = value.slice(result.start + 1, result.end + 1);
+    if (result.replacement !== word) {
+      applyCompletion(value, result.start, result.end, result.replacement);
+      setCompletions(result.candidates.length > 1 ? result : undefined);
+    } else {
+      setCompletions(result.candidates.length > 1 ? result : undefined);
+    }
+  };
+
+  const selectCompletion = (candidate: CompletionCandidate) => {
+    const element = composerRef.current;
+    if (!element || !completions) {
+      return;
+    }
+    const current = element.value;
+    // The word may have grown by the common prefix since the list opened.
+    const end = element.selectionStart - 1;
+    applyCompletion(
+      current,
+      completions.start,
+      end,
+      candidate.kind === 'directory' ? candidate.value : `${candidate.value} `
+    );
+    setCompletions(undefined);
+    element.focus();
+  };
+
   /** Ctrl+R history search, Esc to leave history or shell mode, Ctrl+C in an empty composer to stop the run. */
   const handleReadlineKey = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const element = event.currentTarget;
     const plainCtrl = event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey;
+    if (
+      event.key === 'Tab' &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      element.value.startsWith('!')
+    ) {
+      // In shell mode Tab completes instead of moving focus; elsewhere it keeps its keyboard-navigation role.
+      event.preventDefault();
+      void completeShellInput(element);
+      return true;
+    }
     if (plainCtrl && event.key === 'r') {
       // Also keeps Linux and Windows browsers from reloading the page.
       event.preventDefault();
@@ -1645,6 +1725,11 @@ export function ChatApp({
       return true;
     }
     if (event.key === 'Escape' && !event.nativeEvent.isComposing) {
+      if (completions) {
+        event.preventDefault();
+        setCompletions(undefined);
+        return true;
+      }
       if (historyRef.current) {
         event.preventDefault();
         setInput(historyRef.current.draft);
@@ -2067,6 +2152,9 @@ export function ChatApp({
           onSubmit={submitPrompt}
         >
           <div className={styles.composerInputGroup}>
+            {completions && isShellInput && (
+              <ShellCompletions candidates={completions.candidates} onSelect={selectCompletion} />
+            )}
             {historySearch && (
               <HistorySearch
                 entries={historySearch.entries}
@@ -2083,6 +2171,7 @@ export function ChatApp({
             <TextArea
               ref={composerRef}
               className={cx(isShellInput && styles.composerShellInput)}
+              spellCheck={!isShellInput}
               data-testid={testIds.chat.composer}
               rows={isSidebarVariant ? 2 : 3}
               value={input}
