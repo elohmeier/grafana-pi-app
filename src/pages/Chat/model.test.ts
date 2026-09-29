@@ -3,8 +3,21 @@ import {
   getConfiguredModels,
   getDefaultConfiguredModel,
   normalizeModelLimits,
+  normalizeThinkingLevel,
   resolveConfiguredModel,
 } from './model';
+import { parseStoredThinkingLevel } from './session/sessionRecord';
+
+describe('thinking levels', () => {
+  it('accepts the extended xhigh and max levels', () => {
+    for (const level of ['xhigh', 'max']) {
+      expect(normalizeThinkingLevel(level)).toBe(level);
+      expect(parseStoredThinkingLevel(level)).toBe(level);
+    }
+    expect(normalizeThinkingLevel('minimal')).toBe('off');
+    expect(parseStoredThinkingLevel('ultra')).toBeUndefined();
+  });
+});
 
 describe('getConfiguredModels', () => {
   it('trims, dedupes, and normalizes model entries', () => {
@@ -87,6 +100,7 @@ describe('createOpenAICompatibleModel', () => {
       throw new Error('expected Chat Completions model');
     }
     expect(model.thinkingLevelMap?.xhigh).toBe('xhigh');
+    expect(model.thinkingLevelMap?.max).toBe('max');
     expect(model.compat?.thinkingFormat).toBe('openai');
     expect(model.compat?.supportsReasoningEffort).toBe(true);
   });

@@ -22,7 +22,7 @@ export type PiAppCustomSkill = {
 
 export type PiAppAccessMode = 'all' | 'admins' | 'users' | 'rbac';
 export type PiAppOpenAIProtocol = 'auto' | 'chat-completions' | 'responses';
-export type PiAppThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'xhigh';
+export type PiAppThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type PiAppThinkingFormat = 'openai' | 'qwen' | 'qwen-chat-template' | 'deepseek';
 
 export type PiAppModelConfig = {

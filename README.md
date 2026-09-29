@@ -49,7 +49,7 @@ Configure the app plugin from Grafana's plugin settings page:
 - `openAIBaseUrl`: OpenAI-compatible API base URL, for example `https://api.openai.com/v1`.
 - `models`: List of models chat users can pick from the assistant model selector. Each entry has an `id` (the upstream model ID), an optional display `name`, an optional `default` flag marking the model preselected for new chats, and per-model request settings:
   - `protocol`: Upstream API protocol, one of `auto`, `chat-completions`, or `responses`. `auto` starts with Chat Completions and switches to Responses only when the provider returns the specific `reasoning_effort` compatibility error that directs the caller to `/v1/responses`. Defaults to `auto`.
-  - `thinkingLevel`: Optional model reasoning effort, one of `off`, `low`, `medium`, or `high`. Defaults to `off`.
+  - `thinkingLevel`: Optional model reasoning effort, one of `off`, `low`, `medium`, `high`, `xhigh`, or `max`. `xhigh` and `max` are sent as-is (`reasoning_effort` or `reasoning.effort`), so use them only for models that accept them. Defaults to `off`.
   - `thinkingFormat`: Chat Completions thinking parameter format, one of `openai`, `qwen`, `qwen-chat-template`, or `deepseek`. Responses always uses `reasoning.effort`. Defaults to `openai`.
   - `contextWindow`: The endpoint's input-plus-output token capacity. Defaults to `131072`. The assistant compacts conversation history to fit it.
   - `maxOutputTokens`: Output tokens requested per model call. Defaults to `16384` and is capped at half the context window. The backend clamps every request's output budget to this value.

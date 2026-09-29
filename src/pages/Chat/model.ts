@@ -138,6 +138,7 @@ export function createOpenAICompatibleModel(
       medium: 'medium',
       high: 'high',
       xhigh: 'xhigh',
+      max: 'max',
     },
     input: ['text'],
     cost: {
@@ -186,7 +187,7 @@ export function normalizeOpenAIProtocol(value?: string): PiAppOpenAIProtocol {
 }
 
 export function normalizeThinkingLevel(value?: string): PiAppThinkingLevel {
-  return value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh'
+  return value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh' || value === 'max'
     ? value
     : DEFAULT_THINKING_LEVEL;
 }

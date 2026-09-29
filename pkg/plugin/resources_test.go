@@ -525,6 +525,23 @@ func TestOpenAIRequestUsesRequestedThinkingLevel(t *testing.T) {
 		t.Fatalf("expected requested reasoning_effort high, got %q", overridden.ReasoningEffort)
 	}
 
+	for _, level := range []string{thinkingLevelXHigh, thinkingLevelMax} {
+		extended := app.buildOpenAIChatRequest(proxyStreamRequest{
+			Context: proxyContext{Messages: []proxyMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}}},
+			Options: proxyOptions{Reasoning: level},
+		}, model)
+		if extended.ReasoningEffort != level {
+			t.Fatalf("expected requested reasoning_effort %s, got %q", level, extended.ReasoningEffort)
+		}
+		responses := app.buildOpenAIResponsesRequest(proxyStreamRequest{
+			Context: proxyContext{Messages: []proxyMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}}},
+			Options: proxyOptions{Reasoning: level},
+		}, model)
+		if responses.Reasoning == nil || responses.Reasoning.Effort != level {
+			t.Fatalf("expected Responses reasoning effort %s, got %#v", level, responses.Reasoning)
+		}
+	}
+
 	disabled := app.buildOpenAIChatRequest(proxyStreamRequest{
 		Context: proxyContext{Messages: []proxyMessage{{Role: "user", Content: json.RawMessage(`"Hello"`)}}},
 	}, model)

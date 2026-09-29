@@ -61,7 +61,12 @@ export function generateTitle(prompt: string): string {
 }
 
 export function parseStoredThinkingLevel(value: unknown): PiAppThinkingLevel | undefined {
-  return value === 'off' || value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh'
+  return value === 'off' ||
+    value === 'low' ||
+    value === 'medium' ||
+    value === 'high' ||
+    value === 'xhigh' ||
+    value === 'max'
     ? value
     : undefined;
 }

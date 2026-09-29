@@ -91,6 +91,7 @@ test('profile generation preserves Docker mapping, compatibility checks, and wor
     assert.throws(() => createProfile(selected, options));
   }
   assert.equal(createProfile(selected, { thinking: 'xhigh' }).model.thinkingLevel, 'xhigh');
+  assert.equal(createProfile(selected, { thinking: 'max' }).model.thinkingLevel, 'max');
   assert.throws(() =>
     createProfile({ ...selected, model: { ...selected.model, reasoning: false } }, { thinking: 'high' })
   );

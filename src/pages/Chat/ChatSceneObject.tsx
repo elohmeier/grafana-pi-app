@@ -132,7 +132,8 @@ const THINKING_LEVEL_OPTIONS: Array<{
   { label: 'Low', value: 'low', description: 'Faster responses with a smaller reasoning budget.' },
   { label: 'Medium', value: 'medium', description: 'A balanced reasoning budget.' },
   { label: 'High', value: 'high', description: 'More reasoning that can take longer.' },
-  { label: 'Extra high', value: 'xhigh', description: 'Maximum reasoning for models that support it.' },
+  { label: 'Extra high', value: 'xhigh', description: 'Extra high reasoning for models that support it.' },
+  { label: 'Max', value: 'max', description: 'Unconstrained reasoning for models that support it.' },
 ];
 
 type PluginSettingsResponse = {

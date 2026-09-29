@@ -108,8 +108,8 @@ export function modelConfiguration({ settings, model }, options = {}) {
   const reasoningEffortUnsupported =
     protocol === 'chat-completions' && thinkingFormat === 'openai' && compat.supportsReasoningEffort === false;
   const thinkingLevel = options.thinking ?? (model.reasoning && !reasoningEffortUnsupported ? 'medium' : 'off');
-  if (!['off', 'low', 'medium', 'high', 'xhigh'].includes(thinkingLevel)) {
-    throw new Error('--thinking must be off, low, medium, high, or xhigh.');
+  if (!['off', 'low', 'medium', 'high', 'xhigh', 'max'].includes(thinkingLevel)) {
+    throw new Error('--thinking must be off, low, medium, high, xhigh, or max.');
   }
   if (thinkingLevel !== 'off' && (model.reasoning === false || reasoningEffortUnsupported)) {
     throw new Error(
@@ -245,7 +245,7 @@ async function main() {
 
 Reads ~/.pi/agent/models.json (or PI_CODING_AGENT_DIR/models.json).
 Selects one default model, replacing Grafana's model list and shared endpoint/key.
-Options: --models-file PATH, --thinking off|low|medium|high|xhigh,
+Options: --models-file PATH, --thinking off|low|medium|high|xhigh|max,
          --thinking-format openai|qwen|qwen-chat-template|deepseek,
          --context-window N, --max-output-tokens N (default: Pi's contextWindow/maxTokens),
          --base-url URL (also disables Docker loopback rewriting), --api-key-env NAME.
