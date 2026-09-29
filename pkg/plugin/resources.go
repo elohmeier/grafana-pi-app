@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +41,53 @@ type proxyMessage struct {
 	ToolCallID string          `json:"toolCallId,omitempty"`
 	ToolName   string          `json:"toolName,omitempty"`
 	IsError    bool            `json:"isError,omitempty"`
+	// System messages of a Pi transcript: named prompt sections (null removes
+	// one) and changes to the tool set.
+	Sections     promptSections `json:"sections,omitempty"`
+	ToolsAdded   []proxyTool    `json:"toolsAdded,omitempty"`
+	ToolsRemoved []proxyToolRef `json:"toolsRemoved,omitempty"`
+}
+
+// promptSections keeps the order in which a system message declares its
+// sections; a nil value removes the section.
+type promptSections []promptSection
+
+type promptSection struct {
+	name  string
+	value *string
+}
+
+func (s *promptSections) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if token == nil {
+		*s = nil
+		return nil
+	}
+	if delim, ok := token.(json.Delim); !ok || delim != '{' {
+		return errors.New("sections must be an object")
+	}
+	var sections promptSections
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		var value *string
+		if err := decoder.Decode(&value); err != nil {
+			return err
+		}
+		sections = append(sections, promptSection{name: key.(string), value: value})
+	}
+	*s = sections
+	return nil
+}
+
+type proxyToolRef struct {
+	Name string `json:"name"`
 }
 
 type proxyTool struct {
@@ -188,6 +236,8 @@ func (a *App) handleLLMStream(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	body.Context = collapseSystemMessages(body.Context)
+
 	model, err := a.resolveRequestModel(body.Model.ID)
 	if err != nil {
 		reason = "bad_request"
@@ -259,6 +309,89 @@ func (a *App) handleLLMStream(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	status = "completed"
+}
+
+// collapseSystemMessages replays the system messages of a Pi transcript into
+// the system prompt and tool list, as Pi's getCurrentSystemMessage does: the
+// contents are joined in order, sections are patched by name and rendered
+// after the content, and tools follow toolsRemoved/toolsAdded. The upstream
+// APIs get one leading prompt; later system messages are dropped in place,
+// because local chat templates reject system messages after the first turn.
+// A legacy request with systemPrompt and tools counts as a leading message.
+func collapseSystemMessages(transcript proxyContext) proxyContext {
+	var contents []string
+	var sectionOrder []string
+	sections := map[string]string{}
+	var toolOrder []string
+	tools := map[string]proxyTool{}
+	addTools := func(added []proxyTool) {
+		for _, tool := range added {
+			if _, ok := tools[tool.Name]; !ok {
+				toolOrder = append(toolOrder, tool.Name)
+			}
+			tools[tool.Name] = tool
+		}
+	}
+	removeTool := func(name string) {
+		if _, ok := tools[name]; !ok {
+			return
+		}
+		delete(tools, name)
+		for i, existing := range toolOrder {
+			if existing == name {
+				toolOrder = append(toolOrder[:i], toolOrder[i+1:]...)
+				break
+			}
+		}
+	}
+
+	if transcript.SystemPrompt != "" {
+		contents = append(contents, transcript.SystemPrompt)
+	}
+	addTools(transcript.Tools)
+	messages := make([]proxyMessage, 0, len(transcript.Messages))
+	for _, message := range transcript.Messages {
+		if message.Role != "system" {
+			messages = append(messages, message)
+			continue
+		}
+		if text := contentText(message.Content); text != "" {
+			contents = append(contents, text)
+		}
+		for _, section := range message.Sections {
+			if section.value == nil {
+				delete(sections, section.name)
+				continue
+			}
+			if _, ok := sections[section.name]; !ok {
+				sectionOrder = append(sectionOrder, section.name)
+			}
+			sections[section.name] = *section.value
+		}
+		for _, tool := range message.ToolsRemoved {
+			removeTool(tool.Name)
+		}
+		addTools(message.ToolsAdded)
+	}
+
+	parts := make([]string, 0, 1+len(sectionOrder))
+	if joined := strings.Join(contents, "\n\n"); joined != "" {
+		parts = append(parts, joined)
+	}
+	for _, name := range sectionOrder {
+		if value, ok := sections[name]; ok && value != "" {
+			parts = append(parts, value)
+		}
+	}
+	resolvedTools := make([]proxyTool, 0, len(toolOrder))
+	for _, name := range toolOrder {
+		resolvedTools = append(resolvedTools, tools[name])
+	}
+	return proxyContext{
+		SystemPrompt: strings.Join(parts, "\n\n"),
+		Messages:     messages,
+		Tools:        resolvedTools,
+	}
 }
 
 func (a *App) buildOpenAIChatRequest(req proxyStreamRequest, model modelSettings) openAIChatRequest {
@@ -540,7 +673,7 @@ func (a *App) relayOpenAIChatStream(body io.Reader, stream proxyEventWriter) (pr
 		if !state.started {
 			return usage, "error", errors.New("upstream returned a tool call without a function name")
 		}
-		if err := stream.write(map[string]interface{}{"type": "toolcall_end", "contentIndex": state.contentIndex}); err != nil {
+		if err := stream.write(toolCallEndEvent(state.contentIndex, state.id, state.name, state.arguments.String())); err != nil {
 			return usage, "error", err
 		}
 	}
@@ -549,6 +682,21 @@ func (a *App) relayOpenAIChatStream(body io.Reader, stream proxyEventWriter) (pr
 		return usage, "error", err
 	}
 	return usage, doneReason, nil
+}
+
+// toolCallEndEvent ends a streamed tool call. It carries the complete call so
+// Pi does not have to rely on its partial-JSON parse; arguments that are not a
+// JSON object are left to the client, which reports them to the model.
+func toolCallEndEvent(contentIndex int, id string, name string, arguments string) map[string]interface{} {
+	event := map[string]interface{}{"type": "toolcall_end", "contentIndex": contentIndex}
+	if strings.TrimSpace(arguments) == "" {
+		arguments = "{}"
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(arguments), &parsed); err == nil && parsed != nil {
+		event["toolCall"] = map[string]any{"type": "toolCall", "id": id, "name": name, "arguments": parsed}
+	}
+	return event
 }
 
 // upstreamStreamError returns the message of an error object or string that

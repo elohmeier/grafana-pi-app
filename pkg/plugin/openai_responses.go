@@ -519,6 +519,9 @@ func (a *App) relayOpenAIResponsesStream(body io.Reader, stream proxyEventWriter
 			eventType = "toolcall_end"
 		}
 		event := map[string]interface{}{"type": eventType, "contentIndex": state.contentIndex}
+		if state.kind == "toolCall" {
+			event = toolCallEndEvent(state.contentIndex, responsesToolCallID(state.callID, state.id), state.name, state.data.String())
+		}
 		if signature != "" && state.kind != "toolCall" {
 			event["contentSignature"] = signature
 		}
