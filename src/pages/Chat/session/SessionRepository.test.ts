@@ -8,7 +8,7 @@ jest.mock('@grafana/runtime', () => ({
 }));
 
 const fetch = jest.fn();
-const legacy = { getItem: jest.fn(), setItem: jest.fn() };
+const legacy = { getItem: jest.fn(), setItem: jest.fn(), deleteItem: jest.fn(), allItems: jest.fn() };
 const document = {
   id: 'session-a',
   title: 'One',

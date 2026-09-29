@@ -565,15 +565,17 @@ function ensureStandardTransformers() {
     for (const transformer of Object.values(standardTransformers)) {
       for (const id of [transformer.id, ...((transformer as { aliasIds?: string[] }).aliasIds ?? [])]) {
         if (!items.has(id)) {
-          items.set(id, {
+          const item: TransformerRegistryItem = {
             id,
             name: transformer.name,
             description: transformer.description,
-            transformation: transformer,
+            transformation: () => Promise.resolve(transformer),
+            defaultOptions: transformer.defaultOptions,
             editor: (() => null) as unknown as TransformerRegistryItem['editor'],
             imageDark: '',
             imageLight: '',
-          } as TransformerRegistryItem);
+          };
+          items.set(id, item);
         }
       }
     }
