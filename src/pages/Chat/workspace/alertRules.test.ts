@@ -199,6 +199,16 @@ describe('alert rule working copies', () => {
     expect(rules.store.get('high-5xx')!.spec.expressions.C.model.conditions[0].evaluator.params).toEqual([0]);
   });
 
+  it('reverts in the same invocation that discards a newer local change', async () => {
+    const { run, rules } = setup();
+    const { applyId } = JSON.parse((await run(`${setThreshold(RULE, 5)} && workspace apply`)).stdout);
+    await run(setThreshold(RULE, 9));
+    const staged = await run(`workspace discard ${RULE} > /dev/null && workspace revert ${applyId}`);
+    expect(JSON.parse(staged.stdout)).toEqual(expect.objectContaining({ staged: [RULE], errors: [] }));
+    expect((await run('workspace apply')).exitCode).toBe(0);
+    expect(rules.store.get('high-5xx')!.spec.expressions.C.model.conditions[0].evaluator.params).toEqual([0]);
+  });
+
   it('reverts from the rule version history when the receipt lost its diff', async () => {
     const { run, rules, workspace } = setup();
     const { applyId } = JSON.parse((await run(`${setThreshold(RULE, 5)} && workspace apply`)).stdout);

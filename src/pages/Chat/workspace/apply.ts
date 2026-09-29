@@ -433,7 +433,9 @@ export async function stageRevert(
       // Revert against the resource as it is now, not a copy fetched before the apply.
       const current = await writer.get(result.uid, deps.signal);
       if (current) {
-        workspace.setResourceBase(current);
+        // The invocation's view has no local changes (checked above); a committed overlay it
+        // discarded earlier in the same invocation must not block the refresh.
+        workspace.setResourceBase(current, { discardOverlay: true });
       }
       if (result.operation === 'create') {
         if (!current) {
