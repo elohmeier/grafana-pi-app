@@ -805,51 +805,57 @@ async function createAlertRule({ name, title, dashboardUid, panelId, folderUid, 
  * group interval alone, and a rule with API provenance, which the assistant must treat as read-only.
  */
 async function seedAlertRuleEditingSamples() {
-  const response = await grafanaFetch(`/api/ruler/grafana/api/v1/rules/${encodeURIComponent(FOLDER_UID)}`, {
-    method: 'POST',
-    body: {
-      name: ALERT_EDITING_GROUP,
-      interval: '1m',
-      rules: ALERT_EDITING_RULES.map((rule) => ({
+  // The provisioning API places rules in a group directly; the App Platform API only creates ungrouped rules.
+  // X-Disable-Provenance keeps the group rules editable.
+  for (const rule of ALERT_EDITING_RULES) {
+    await upsertProvisioningAlertRule(
+      {
+        uid: rule.uid,
+        title: rule.title,
+        ruleGroup: ALERT_EDITING_GROUP,
         for: '2m',
         labels: { sample: 'alert-rule-editing', severity: 'warning' },
-        annotations: { summary: rule.title },
-        grafana_alert: {
-          uid: rule.uid,
-          title: rule.title,
-          condition: 'C',
-          no_data_state: 'NoData',
-          exec_err_state: 'Error',
-          data: rulerQueries(alertExpressions(rule.query, rule.threshold)),
-        },
-      })),
+        data: rulerQueries(alertExpressions(rule.query, rule.threshold)),
+      },
+      { editable: true }
+    );
+  }
+  await upsertProvisioningAlertRule(
+    {
+      uid: ALERT_PROVISIONED_RULE.uid,
+      title: ALERT_PROVISIONED_RULE.title,
+      ruleGroup: 'assistant-provisioned',
+      for: '5m',
+      labels: { sample: 'alert-rule-editing', severity: 'critical' },
+      data: rulerQueries(alertExpressions(ALERT_PROVISIONED_RULE.query, ALERT_PROVISIONED_RULE.threshold)),
     },
-  });
-  await expectOk(response, `upsert alert rule group ${ALERT_EDITING_GROUP}`);
+    { editable: false }
+  );
+  log(`Seeded alert rule editing samples in ${FOLDER_UID}.`);
+}
 
-  const provisioned = {
-    uid: ALERT_PROVISIONED_RULE.uid,
-    title: ALERT_PROVISIONED_RULE.title,
+async function upsertProvisioningAlertRule(rule, { editable }) {
+  const body = {
     folderUID: FOLDER_UID,
-    ruleGroup: 'assistant-provisioned',
     condition: 'C',
-    for: '5m',
     noDataState: 'NoData',
     execErrState: 'Error',
-    labels: { sample: 'alert-rule-editing', severity: 'critical' },
-    data: rulerQueries(alertExpressions(ALERT_PROVISIONED_RULE.query, ALERT_PROVISIONED_RULE.threshold)),
+    ...rule,
   };
-  const path = `/api/v1/provisioning/alert-rules/${encodeURIComponent(provisioned.uid)}`;
-  const update = await grafanaFetch(path, { method: 'PUT', body: provisioned });
+  const headers = editable ? { 'X-Disable-Provenance': 'true' } : {};
+  const update = await grafanaFetch(`/api/v1/provisioning/alert-rules/${encodeURIComponent(rule.uid)}`, {
+    method: 'PUT',
+    body,
+    headers,
+  });
   if (update.status === 404) {
     await expectOk(
-      await grafanaFetch('/api/v1/provisioning/alert-rules', { method: 'POST', body: provisioned }),
-      `create provisioned alert rule ${provisioned.uid}`
+      await grafanaFetch('/api/v1/provisioning/alert-rules', { method: 'POST', body, headers }),
+      `create alert rule ${rule.uid}`
     );
-  } else {
-    await expectOk(update, `update provisioned alert rule ${provisioned.uid}`);
+    return;
   }
-  log(`Seeded alert rule editing samples in ${FOLDER_UID}.`);
+  await expectOk(update, `update alert rule ${rule.uid}`);
 }
 
 /** App Platform expressions as ruler/provisioning API queries. */
