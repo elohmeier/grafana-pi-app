@@ -577,7 +577,7 @@ func convertMessage(message proxyMessage) openAIMessage {
 	case "toolResult":
 		return openAIMessage{
 			Role:       "tool",
-			ToolCallID: message.ToolCallID,
+			ToolCallID: chatToolCallID(message.ToolCallID),
 			Name:       message.ToolName,
 			Content:    toolResultContent(message),
 		}
@@ -654,7 +654,7 @@ func assistantContent(raw json.RawMessage) (string, []openAIToolCall) {
 			id, _ := block["id"].(string)
 			args, _ := json.Marshal(block["arguments"])
 			toolCalls = append(toolCalls, openAIToolCall{
-				ID:   id,
+				ID:   chatToolCallID(id),
 				Type: "function",
 				Function: openAIToolFunction{
 					Name:      name,
@@ -664,6 +664,14 @@ func assistantContent(raw json.RawMessage) (string, []openAIToolCall) {
 		}
 	}
 	return strings.Join(textParts, "\n"), toolCalls
+}
+
+// chatToolCallID drops the Responses item ID that "call|item" tool-call IDs
+// carry, so history written through the Responses API stays valid when a
+// later request uses Chat Completions.
+func chatToolCallID(id string) string {
+	callID, _ := splitResponsesToolCallID(id)
+	return callID
 }
 
 type proxyEventWriter struct {
