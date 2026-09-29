@@ -108,19 +108,19 @@ describe('workspace bash', () => {
     expect(result.stderr).toMatch(/managed by file:\/etc\/dashboards/);
   });
 
-  it('discards the whole invocation when a quota check fails at commit', async () => {
-    const { run, workspace } = setup({ maxFiles: 2 });
+  it('discards the whole invocation when the stored session budget is exceeded at commit', async () => {
+    const { run, workspace } = setup({ maxWorkspaceBytes: 4 });
     const result = await run('echo 1 > one; echo 2 > two; echo 3 > three');
     expect(result.exitCode).toBe(1);
-    expect(result.discardedChanges).toMatch(/file limit/);
+    expect(result.discardedChanges).toMatch(/stored session budget/);
     expect(workspace.scratchFiles().size).toBe(0);
   });
 
-  it('enforces per-file byte limits while executing', async () => {
-    const { run, workspace } = setup({ maxFileBytes: 16 });
-    const result = await run('printf "%040d" 0 > big.txt; echo done');
-    expect(result.stderr).toMatch(/EQUOTA/);
-    expect(workspace.getScratchFile('/workspace/big.txt')).toBeUndefined();
+  it('does not count /tmp against the stored session budget', async () => {
+    const { run, workspace } = setup({ maxWorkspaceBytes: 16 });
+    const result = await run('printf "%040d" 0 > /tmp/big.txt');
+    expect(result.exitCode).toBe(0);
+    expect(workspace.getScratchFile('/tmp/big.txt')?.content).toHaveLength(40);
   });
 
   it('terminates runaway loops', async () => {
@@ -196,7 +196,14 @@ describe('workspace commands', () => {
     expect((approvals.request.mock.calls[0] as unknown[])[0]).toEqual(
       expect.objectContaining({
         applyId: expect.any(String),
-        diff: expect.stringContaining('+    "title": "Checkout v2"'),
+        operations: [
+          expect.objectContaining({
+            uid: 'checkout',
+            additions: 1,
+            deletions: 1,
+            diff: expect.stringContaining('+    "title": "Checkout v2"'),
+          }),
+        ],
       })
     );
     expect(calls).toContain('update:checkout@101');
@@ -272,17 +279,21 @@ describe('workspace commands', () => {
 });
 
 describe('workspace persistence', () => {
-  it('round-trips scratch files, and overlays but drops /tmp and unmodified bases', async () => {
+  it('round-trips scratch files and working copies as patches, but drops /tmp and unmodified dashboards', async () => {
     const { run, workspace } = setup();
     await run('echo keep > /workspace/a.txt; echo drop > /tmp/b.txt; echo plan > /session/plan.md');
     await run('grafana fetch payments');
     await run(`sed -i 's/"Checkout"/"Checkout!"/' /grafana/dashboards/checkout/dashboard.json`);
 
     const persisted = JSON.parse(JSON.stringify(workspace.serialize()));
-    const payments = persisted.resources.find((resource: { uid: string }) => resource.uid === 'payments');
-    expect(payments.base.content).toBeUndefined();
+    expect(persisted.resources.map((resource: { uid: string }) => resource.uid)).toEqual(['checkout']);
+    expect(persisted.resources[0].overlay.patch).toContain('+    "title": "Checkout!"');
+    expect(persisted.resources[0].overlay.content).toBeUndefined();
 
     const restored = SessionWorkspace.restore(persisted);
+    expect(restored.getResource('checkout')?.overlay?.content).toBe(
+      workspace.getResource('checkout')?.overlay?.content
+    );
     expect(restored.getScratchFile('/workspace/a.txt')?.content).toBe('keep\n');
     expect(restored.getScratchFile('/session/plan.md')?.content).toBe('plan\n');
     expect(restored.getScratchFile('/tmp/b.txt')).toBeUndefined();

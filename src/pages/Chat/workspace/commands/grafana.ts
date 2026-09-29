@@ -1,5 +1,5 @@
 import { buildNavigationPath } from '../../domain/navigation';
-import { DASHBOARDS_ROOT, isBaseLoaded } from '../workspace';
+import { DASHBOARDS_ROOT, HYDRATION_CONCURRENCY, isBaseLoaded } from '../workspace';
 import {
   json,
   listOption,
@@ -10,26 +10,24 @@ import {
   type WorkspaceCommandSpec,
 } from './registry';
 
-const MAX_FETCH_PER_CALL = 20;
-
 export const grafanaCommand: WorkspaceCommandSpec = {
   name: 'grafana',
   summary: 'Discover Grafana resources and hydrate them into /grafana as local working copies.',
   subcommands: {
     search: {
-      summary: 'Bounded remote dashboard search. Reports coverage; hydrated results show their local path.',
+      summary: 'Remote dashboard search by title, tag, and folder (paginated). Loaded results are marked hydrated.',
       usage: 'grafana search [QUERY] [--tag TAG]... [--folder UID]... [--limit N] [--page N]',
       effect: 'remote-read',
       options: {
         tag: { type: 'string[]', description: 'Require this dashboard tag (repeatable).' },
         folder: { type: 'string[]', description: 'Restrict to a folder UID (repeatable).' },
-        limit: { type: 'number', description: 'Results per page, 1-200.', default: 50 },
+        limit: { type: 'number', description: 'Results per page, 1-5000.', default: 50 },
         page: { type: 'number', description: 'Result page, starting at 1.', default: 1 },
       },
       examples: ['grafana search checkout', "grafana search --tag genai | jq -r '.results[].uid'"],
       async run(parsed, ctx) {
         const dashboards = requireDashboards(ctx);
-        const limit = numberOption(parsed, 'limit', 50, 1, 200);
+        const limit = numberOption(parsed, 'limit', 50, 1, 5000);
         const page = numberOption(parsed, 'page', 1, 1, 1000);
         const query = parsed.positionals.join(' ').trim() || undefined;
         const result = await dashboards.search(
@@ -59,47 +57,72 @@ export const grafanaCommand: WorkspaceCommandSpec = {
       },
     },
     fetch: {
-      summary: `Hydrate dashboards by UID into ${DASHBOARDS_ROOT}/<uid>/ (max ${MAX_FETCH_PER_CALL} per call).`,
-      usage: 'grafana fetch UID...',
+      summary: `Load dashboards into ${DASHBOARDS_ROOT}/<uid>/ in parallel: by UID, every visible dashboard, a folder, or a title search.`,
+      usage: 'grafana fetch UID... | --all | --folder UID... | --query TEXT [--tag TAG]... | - (UIDs on stdin)',
       effect: 'remote-read',
-      examples: ['grafana fetch checkout-overview payments-api'],
+      options: {
+        all: { type: 'boolean', description: 'Every dashboard visible to the current user.' },
+        folder: { type: 'string[]', description: 'Every dashboard in this folder UID (repeatable).' },
+        query: { type: 'string', description: 'Every dashboard matching this title search.' },
+        tag: { type: 'string[]', description: 'Every dashboard with this tag (repeatable).' },
+      },
+      examples: [
+        'grafana fetch checkout-overview payments-api',
+        'grafana fetch --all',
+        'jq -r .uid /grafana/catalog/dashboards.ndjson | grep -i kafka | grafana fetch -',
+      ],
       async run(parsed, ctx) {
-        requireDashboards(ctx);
-        const uids = uniq(parsed.positionals);
-        if (uids.length === 0) {
-          throw new UsageError('at least one dashboard UID is required');
+        const dashboards = requireDashboards(ctx);
+        let uids = uniq(parsed.positionals.filter((uid) => uid !== '-'));
+        if (parsed.positionals.includes('-')) {
+          uids = uniq([...uids, ...ctx.stdin.split(/\s+/)]);
         }
-        if (uids.length > MAX_FETCH_PER_CALL) {
-          throw new UsageError(`at most ${MAX_FETCH_PER_CALL} UIDs per call`);
+        const folders = listOption(parsed, 'folder');
+        const tags = listOption(parsed, 'tag');
+        const query = stringOption(parsed, 'query');
+        if (parsed.options.all === true) {
+          uids = uniq([...uids, ...ctx.workspace.indexedUids()]);
         }
-        const fetched: unknown[] = [];
-        const errors: Array<{ uid: string; error: string }> = [];
-        for (const uid of uids) {
-          try {
-            const entry = await ctx.workspace.hydrate(uid, ctx.signal);
-            if (!entry?.base && !entry?.overlay) {
-              errors.push({ uid, error: 'not found or not readable by the current user' });
-              continue;
-            }
-            fetched.push({
-              uid,
-              path: entry.path,
-              title: entry.base?.meta.title,
-              folderUid: entry.base?.meta.folderUid,
-              apiVersion: entry.base?.meta.apiVersion,
-              resourceVersion: entry.base?.meta.resourceVersion,
-              managedBy: entry.base?.meta.managedBy,
-              localChanges: Boolean(entry.overlay),
-            });
-          } catch (error) {
-            errors.push({ uid, error: error instanceof Error ? error.message : String(error) });
-          }
+        if (folders.length || tags.length || query) {
+          uids = uniq([...uids, ...(await searchAll(dashboards, { query, tags, folderUids: folders }, ctx.signal))]);
         }
-        return json({ schemaVersion: 1, fetched, errors }, errors.length > 0 && fetched.length === 0 ? 1 : 0);
+        if (uids.length === 0 && parsed.options.all !== true && !folders.length && !tags.length && !query) {
+          throw new UsageError('pass UIDs, --all, --folder, --query, --tag, or - to read UIDs from stdin');
+        }
+        const { failed } = await ctx.workspace.prefetch(uids, ctx.signal);
+        const failedUids = new Set(failed.map((failure) => failure.uid));
+        const loaded = uids.filter((uid) => !failedUids.has(uid) && ctx.workspace.isResourceLoaded(uid));
+        const fetched = loaded.map((uid) => {
+          const entry = ctx.workspace.getResource(uid)!;
+          return {
+            uid,
+            path: entry.path,
+            title: entry.base?.meta.title,
+            folderUid: entry.base?.meta.folderUid,
+            apiVersion: entry.base?.meta.apiVersion,
+            resourceVersion: entry.base?.meta.resourceVersion,
+            managedBy: entry.base?.meta.managedBy,
+            localChanges: Boolean(entry.overlay),
+          };
+        });
+        // Many dashboards: print a summary; the paths are listed under /grafana/dashboards anyway.
+        const summaryOnly = fetched.length > 50;
+        return json(
+          {
+            schemaVersion: 1,
+            requested: uids.length,
+            loaded: fetched.length,
+            ...(summaryOnly
+              ? { note: `${fetched.length} dashboards loaded; search them with rg or grafana-dashboard queries` }
+              : { fetched }),
+            errors: failed,
+          },
+          failed.length > 0 && fetched.length === 0 ? 1 : 0
+        );
       },
     },
     refresh: {
-      summary: 'Re-fetch base snapshots for hydrated dashboards (all unmodified ones when no UID is given).',
+      summary: 'Re-fetch base snapshots of loaded dashboards (all unmodified ones when no UID is given).',
       usage: 'grafana refresh [UID...] [--discard]',
       effect: 'remote-read',
       options: {
@@ -112,16 +135,16 @@ export const grafanaCommand: WorkspaceCommandSpec = {
           ? uniq(parsed.positionals)
           : ctx.workspace
               .resourceEntries()
-              .filter((entry) => entry.base && !entry.overlay)
+              .filter((entry) => entry.base && !entry.overlay && isBaseLoaded(entry))
               .map((entry) => entry.uid);
-        const refreshed: unknown[] = [];
+        const refreshed: Array<{ uid: string; resourceVersion?: string; changedRemotely: boolean }> = [];
         const errors: Array<{ uid: string; error: string }> = [];
-        for (const uid of targets.slice(0, MAX_FETCH_PER_CALL)) {
+        await mapConcurrent(targets, async (uid) => {
           try {
             const snapshot = await dashboards.get(uid, ctx.signal);
             if (!snapshot) {
               errors.push({ uid, error: 'not found or not readable by the current user' });
-              continue;
+              return;
             }
             const before = ctx.workspace.getResource(uid)?.base?.meta.resourceVersion;
             ctx.workspace.setResourceBase(snapshot, { discardOverlay: discard });
@@ -133,9 +156,16 @@ export const grafanaCommand: WorkspaceCommandSpec = {
           } catch (error) {
             errors.push({ uid, error: error instanceof Error ? error.message : String(error) });
           }
-        }
+        });
+        const changed = refreshed.filter((entry) => entry.changedRemotely);
         return json(
-          { schemaVersion: 1, refreshed, errors, truncated: targets.length > MAX_FETCH_PER_CALL },
+          {
+            schemaVersion: 1,
+            refreshed: refreshed.length,
+            changedRemotely: changed.map((entry) => entry.uid),
+            ...(refreshed.length <= 50 ? { dashboards: refreshed } : {}),
+            errors,
+          },
           errors.length > 0 ? 1 : 0
         );
       },
@@ -199,6 +229,32 @@ function requireDashboards(ctx: WorkspaceCommandContext) {
     throw new Error('dashboard access is not available in this session');
   }
   return ctx.broker.dashboards;
+}
+
+/** Every page of a dashboard search. */
+async function searchAll(
+  dashboards: NonNullable<WorkspaceCommandContext['broker']['dashboards']>,
+  query: { query?: string; tags?: string[]; folderUids?: string[] },
+  signal?: AbortSignal
+) {
+  const uids: string[] = [];
+  for (let page = 1; ; page++) {
+    const result = await dashboards.search({ ...query, limit: 1000, page }, signal);
+    uids.push(...result.hits.map((hit) => hit.uid));
+    if (!result.hasMore || result.hits.length === 0) {
+      return uids;
+    }
+  }
+}
+
+async function mapConcurrent<T>(items: readonly T[], worker: (item: T) => Promise<void>) {
+  let next = 0;
+  const run = async () => {
+    while (next < items.length) {
+      await worker(items[next++]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(HYDRATION_CONCURRENCY, items.length) }, run));
 }
 
 function uniq(values: string[]) {

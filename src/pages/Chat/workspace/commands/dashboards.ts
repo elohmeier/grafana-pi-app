@@ -10,6 +10,8 @@ import { applyDashboardLabelFilter } from '../dashboardLabelFilter';
 import { addPanel, setPanel, type PanelEditReport, type PanelQueryInput } from '../dashboardPanelEdit';
 import { LIVE_DASHBOARD_PATH } from '../liveDashboard';
 import { DashboardWalkError } from '../dashboardPanels';
+import { listDashboardQueries } from '../dashboardQueries';
+import { DASHBOARDS_ROOT, HYDRATION_CONCURRENCY } from '../workspace';
 import { dashboardUid } from './alerts';
 import { normalizeWorkspacePath } from '../paths';
 import {
@@ -245,9 +247,91 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
         return json({ schemaVersion: 1, path, ...report });
       },
     },
+    queries: {
+      summary:
+        'List panel and variable queries as NDJSON with the jq path of each query text; every visible dashboard when no PATH is given. The way to find all panels that use a metric, datasource, or pattern before a mass edit.',
+      usage: 'grafana-dashboard queries [PATH...] [--metric NAME]... [--match REGEX] [--ds UID] [--variables]',
+      effect: 'remote-read',
+      options: {
+        metric: { type: 'string[]', description: 'Only queries that use this metric name (repeatable).' },
+        match: {
+          type: 'string',
+          description: 'Only queries whose text matches this regular expression (JavaScript syntax).',
+        },
+        ds: { type: 'string', description: 'Only queries of this datasource UID.' },
+        variables: {
+          type: 'boolean',
+          description: 'Include template variable queries (included when --metric or --match is given).',
+        },
+      },
+      examples: [
+        'grafana-dashboard queries --metric http_server_requests_seconds_count > /tmp/q.ndjson; wc -l < /tmp/q.ndjson',
+        "grafana-dashboard queries --match '\\[5m\\]' | jq -r '[.path, .jqPath] | @tsv'",
+        'grafana-dashboard queries --ds prometheus | jq -r .uid | sort -u | wc -l',
+      ],
+      async run(parsed, ctx) {
+        const metrics = listOption(parsed, 'metric');
+        const pattern = stringOption(parsed, 'match');
+        const datasource = stringOption(parsed, 'ds');
+        let match: RegExp | undefined;
+        try {
+          match = pattern ? new RegExp(pattern) : undefined;
+        } catch (error) {
+          throw new UsageError(`--match: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        const metricPatterns = metrics.map(
+          (metric) => new RegExp(`(^|[^A-Za-z0-9_:])${metric.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^A-Za-z0-9_:])`)
+        );
+        const includeVariables = parsed.options.variables === true || metrics.length > 0 || Boolean(match);
+        const paths = parsed.positionals.length
+          ? parsed.positionals.map((raw) => normalizeWorkspacePath(raw, ctx.cwd))
+          : ctx.workspace.indexedUids().map((uid) => `${DASHBOARDS_ROOT}/${uid}/dashboard.json`);
+        const uids = paths
+          .map((path) => ctx.workspace.classify(path))
+          .flatMap((target) => (target.type === 'resource' ? [target.uid] : []));
+        await ctx.workspace.prefetch(uids, ctx.signal);
+        const lines: string[] = [];
+        const errors: string[] = [];
+        for (const path of paths) {
+          let resource: unknown;
+          try {
+            resource = JSON.parse(await ctx.tx.readFile(path));
+          } catch (error) {
+            errors.push(`${path}: ${error instanceof Error ? error.message : String(error)}`);
+            continue;
+          }
+          const target = ctx.workspace.classify(path);
+          const uid = target.type === 'resource' ? target.uid : undefined;
+          const title = (resource as { spec?: { title?: unknown } })?.spec?.title;
+          for (const query of listDashboardQueries(resource)) {
+            if (
+              (query.kind === 'variable' && !includeVariables) ||
+              (datasource && query.datasource?.uid !== datasource) ||
+              (match && !match.test(query.expr)) ||
+              (metricPatterns.length && !metricPatterns.some((metric) => metric.test(query.expr)))
+            ) {
+              continue;
+            }
+            lines.push(
+              JSON.stringify({
+                path,
+                ...(uid ? { uid } : {}),
+                dashboard: typeof title === 'string' ? title : undefined,
+                ...query,
+              })
+            );
+          }
+        }
+        return {
+          stdout: lines.length ? `${lines.join('\n')}\n` : '',
+          stderr: errors.length ? `${errors.map((error) => `grafana-dashboard queries: ${error}`).join('\n')}\n` : '',
+          exitCode: errors.length && !lines.length ? 1 : 0,
+        };
+      },
+    },
     validate: {
       summary:
-        'Validate JSON, resource envelope, structure, PromQL syntax (upstream Prometheus parser, saved variable values), and datasource policy. --server also dry-runs the write in Grafana. Exit 1 on errors.',
+        'Validate JSON, resource envelope, structure, PromQL syntax (upstream Prometheus parser, saved variable values), and datasource policy. --server also dry-runs the write in Grafana. Exit 1 on errors; for a changed dashboard, errors its fetched version already had are listed as preexistingErrors and do not fail it.',
       usage: 'grafana-dashboard validate PATH... [--server]',
       effect: 'local-read',
       options: {
@@ -261,27 +345,48 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
         if (parsed.positionals.length === 0) {
           throw new UsageError('at least one PATH is required');
         }
-        const reports = [];
-        for (const raw of parsed.positionals) {
+        const validateOne = async (raw: string) => {
           const path = normalizeWorkspacePath(raw, ctx.cwd);
           const target = ctx.workspace.classify(path);
           const uid = target.type === 'resource' ? target.uid : undefined;
           // Reading first hydrates the resource, so its base revision is known afterwards.
           const content = await ctx.tx.readFile(path);
           const base = uid ? ctx.workspace.getResource(uid)?.base : undefined;
-          const report = await validateDashboardDocument(content, {
+          const options = {
             expectedUid: uid,
             allowedDatasourceUids: ctx.broker.dashboards?.allowedDatasourceUids?.(),
             managedBy: base?.meta.managedBy,
             promql: ctx.broker.promql,
             signal: ctx.signal,
-          });
+          };
+          const report = await validateDashboardDocument(content, options);
           await checkFolder(content, report, ctx);
           if (parsed.options.server === true) {
             await serverDryRun(content, base?.meta.resourceVersion, report, ctx);
           }
-          reports.push({ path, ...report });
-        }
+          // Like workspace apply, errors the fetched dashboard already had do not fail a changed working copy.
+          if (base?.content && base.content !== content && report.errors.length > 0) {
+            const key = (error: { level: string; path?: string; message: string }) =>
+              `${error.level}|${error.path ?? ''}|${error.message}`;
+            const existing = new Set((await validateDashboardDocument(base.content, options)).errors.map(key));
+            const preexistingErrors = report.errors.filter((error) => existing.has(key(error)));
+            if (preexistingErrors.length > 0) {
+              const errors = report.errors.filter((error) => !existing.has(key(error)));
+              return { path, ...report, ok: errors.length === 0, errors, preexistingErrors };
+            }
+          }
+          return { path, ...report };
+        };
+        // Many files validate in parallel; the reports keep the argument order.
+        const reports: Array<Awaited<ReturnType<typeof validateOne>>> = new Array(parsed.positionals.length);
+        let next = 0;
+        const worker = async () => {
+          while (next < parsed.positionals.length) {
+            const index = next++;
+            reports[index] = await validateOne(parsed.positionals[index]);
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(HYDRATION_CONCURRENCY, parsed.positionals.length) }, worker));
         const okAll = reports.every((report) => report.ok);
         return json(reports.length === 1 ? reports[0] : { schemaVersion: 1, ok: okAll, reports }, okAll ? 0 : 1);
       },

@@ -9,6 +9,15 @@ export function createFakeDashboardBroker(
   initial: Array<{ uid: string; title: string; panels?: unknown[]; managedBy?: string }>
 ) {
   const store = new Map<string, StoredDashboard>();
+  /** Every stored version per UID, like Grafana's dashboard history. */
+  const history = new Map<string, StoredDashboard[]>();
+  const remember = (uid: string) => {
+    const stored = store.get(uid)!;
+    history.set(uid, [
+      ...(history.get(uid) ?? []),
+      { ...stored, resource: JSON.parse(JSON.stringify(stored.resource)) },
+    ]);
+  };
   let version = 100;
   const calls: string[] = [];
   for (const dashboard of initial) {
@@ -22,10 +31,10 @@ export function createFakeDashboardBroker(
         spec: { title: dashboard.title, panels: dashboard.panels ?? [], schemaVersion: 41 },
       },
     });
+    remember(dashboard.uid);
   }
 
-  const snapshot = (uid: string): WorkspaceResourceSnapshot | undefined => {
-    const stored = store.get(uid);
+  const snapshot = (uid: string, stored = store.get(uid)): WorkspaceResourceSnapshot | undefined => {
     if (!stored) {
       return undefined;
     }
@@ -71,6 +80,7 @@ export function createFakeDashboardBroker(
         return { outcome: 'conflicted', error: 'already exists' };
       }
       store.set(uid, { resource: { ...document, metadata: { ...document.metadata } }, resourceVersion: ++version });
+      remember(uid);
       return { outcome: 'applied', snapshot: snapshot(uid) };
     },
     async update(document: any, resourceVersion) {
@@ -87,6 +97,7 @@ export function createFakeDashboardBroker(
         };
       }
       store.set(uid, { resource: document, resourceVersion: ++version });
+      remember(uid);
       return { outcome: 'applied', snapshot: snapshot(uid) };
     },
     async delete(uid, resourceVersion) {
@@ -109,6 +120,11 @@ export function createFakeDashboardBroker(
         return { ok: false, status: 409, message: 'the object has been modified' };
       }
       return { ok: true, status: 200 };
+    },
+    async version(uid, resourceVersion) {
+      calls.push(`version:${uid}@${resourceVersion}`);
+      const stored = history.get(uid)?.find((entry) => String(entry.resourceVersion) === resourceVersion);
+      return stored ? snapshot(uid, stored) : undefined;
     },
     folderExists: async (uid) => uid === 'ops',
     allowedDatasourceUids: () => ['prometheus'],

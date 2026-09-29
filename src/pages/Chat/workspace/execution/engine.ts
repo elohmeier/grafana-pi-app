@@ -75,7 +75,12 @@ export type ShellCommandCall = {
   env: Record<string, string>;
 };
 export type ShellInput = { command: string; cwd: string; stdin?: string; commandNames: string[] };
-export type ShellHost = { fs: IFileSystem; command: (call: ShellCommandCall) => Promise<ExecResult> };
+export type ShellHost = {
+  fs: IFileSystem;
+  command: (call: ShellCommandCall) => Promise<ExecResult>;
+  /** Changes whenever fs.getAllPaths() may return a different list. */
+  pathsKey?: () => string;
+};
 
 /** Interpreter-only module: safe to load in a Worker, with no Grafana or React dependencies. */
 export async function executeShell(input: ShellInput, host: ShellHost, signal?: AbortSignal): Promise<ExecResult> {

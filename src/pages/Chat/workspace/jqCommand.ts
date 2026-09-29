@@ -8,7 +8,6 @@ type JqModule = typeof import('jq-wasm');
 const ONE_VALUE_OPTIONS = new Set(['--indent']);
 /** Options that take a name and a value and pass through unchanged. */
 const TWO_VALUE_OPTIONS = new Set(['--arg', '--argjson']);
-const MAX_INPUT_BYTES = 16 * 1024 * 1024;
 
 let jqModule: Promise<JqModule> | undefined;
 
@@ -63,9 +62,6 @@ export const jqCommand: WorkspaceShellCommand = {
           contents.push(await readFile(path));
         }
         input = contents.map((content) => (content.endsWith('\n') ? content : `${content}\n`)).join('');
-      }
-      if (input.length > MAX_INPUT_BYTES) {
-        return result('', `jq: input exceeds ${MAX_INPUT_BYTES} bytes\n`, 2);
       }
       const jq = await loadJq();
       const output = await jq.raw(input, filter, flags);

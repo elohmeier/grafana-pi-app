@@ -1,3 +1,4 @@
+import { applyPatch, createPatch } from 'diff';
 import { contentRevision } from './hash';
 import { ancestorDirs, isWithin, joinPath, normalizeWorkspacePath, parentPath, utf8ByteLength } from './paths';
 import {
@@ -5,6 +6,7 @@ import {
   type GeneratedFile,
   type GeneratedMount,
   type PersistedWorkspace,
+  type ResourceIndex,
   type WorkspaceApplyRecord,
   type WorkspaceChangeStatus,
   type WorkspaceFileChange,
@@ -20,8 +22,11 @@ export const DASHBOARD_DOCUMENT = 'dashboard.json';
 export const DASHBOARD_META = 'meta.json';
 const PERSISTED_SCRATCH_MOUNTS = ['/workspace', '/session'];
 const RESOURCE_UID_PATTERN = /^[A-Za-z0-9_-]{1,40}$/;
-const MAX_JOURNAL = 50;
 const MAX_JOURNAL_BYTES = 16 * 1024 * 1024;
+/** Parallel dashboard fetches while loading many dashboards. */
+export const HYDRATION_CONCURRENCY = 8;
+/** Hydration misses in one transaction after which the rest of the index is prefetched. */
+const SCAN_DETECTION_MISSES = 3;
 
 export type WorkspacePathClass =
   | { type: 'scratch'; mount: string }
@@ -36,6 +41,9 @@ export type ResourceHydrator = (
   uid: string,
   signal?: AbortSignal
 ) => Promise<WorkspaceResourceSnapshot | undefined>;
+
+/** Wraps waits on remote fetches, for example to pause an execution timeout while dashboards load. */
+export type RemoteWait = <T>(pending: Promise<T>) => Promise<T>;
 
 export class WorkspaceError extends Error {
   constructor(
@@ -70,8 +78,12 @@ export class SessionWorkspace {
   private generated: GeneratedMount[] = [];
   private journal: WorkspaceApplyRecord[] = [];
   private hydrator?: ResourceHydrator;
+  private index?: ResourceIndex;
+  private inflight = new Map<string, Promise<WorkspaceResourceEntry | undefined>>();
+  private backgroundPrefetch?: Promise<unknown>;
   private listeners = new Set<() => void>();
   private revisionCounter = 0;
+  private pathRevisionCounter = 0;
 
   constructor(limits: Partial<WorkspaceLimits> = {}) {
     this.limits = { ...DEFAULT_WORKSPACE_LIMITS, ...limits };
@@ -81,8 +93,40 @@ export class SessionWorkspace {
     return this.revisionCounter;
   }
 
+  /** Changes whenever the set of listed paths may have changed (not on content-only changes). */
+  get pathRevision() {
+    return this.pathRevisionCounter;
+  }
+
   setHydrator(hydrator: ResourceHydrator | undefined) {
     this.hydrator = hydrator;
+  }
+
+  setResourceIndex(index: ResourceIndex | undefined) {
+    this.index = index;
+    this.pathRevisionCounter++;
+  }
+
+  /** UIDs of every visible dashboard, listed before their content is fetched. */
+  indexedUids(): readonly string[] {
+    return this.index?.uids() ?? [];
+  }
+
+  describeIndexed(uid: string) {
+    return this.index?.describe?.(uid);
+  }
+
+  isIndexed(uid: string) {
+    return this.indexedUidSet().has(uid);
+  }
+
+  private indexedSet?: { source: readonly string[]; set: Set<string> };
+  private indexedUidSet() {
+    const source = this.indexedUids();
+    if (this.indexedSet?.source !== source) {
+      this.indexedSet = { source, set: new Set(source) };
+    }
+    return this.indexedSet.set;
   }
 
   setGeneratedMounts(mounts: GeneratedMount[]) {
@@ -95,7 +139,14 @@ export class SessionWorkspace {
 
   /** Runs mount preparation; a mount that fails to prepare stays empty for this call. */
   async prepareMounts(signal?: AbortSignal) {
-    await Promise.all(this.generated.map((mount) => mount.prepare?.(signal).catch(() => undefined)));
+    const before = this.index?.uids();
+    await Promise.all([
+      ...this.generated.map((mount) => mount.prepare?.(signal).catch(() => undefined)),
+      this.index?.prepare(signal).catch(() => undefined),
+    ]);
+    if (this.index && this.index.uids() !== before) {
+      this.pathRevisionCounter++;
+    }
   }
 
   subscribe(listener: () => void) {
@@ -194,17 +245,17 @@ export class SessionWorkspace {
     }
     for (const entry of this.resources.values()) {
       if (entry.base && entry.overlay?.content !== null) {
-        const meta = entry.base.meta;
-        files.set(`${DASHBOARDS_ROOT}/${entry.uid}/${DASHBOARD_META}`, {
-          content: `${JSON.stringify(
-            {
-              ...meta,
-              writable: !meta.managedBy,
-              localChange: entry.overlay ? 'modified' : 'none',
-            },
-            null,
-            2
-          )}\n`,
+        files.set(`${DASHBOARDS_ROOT}/${entry.uid}/${DASHBOARD_META}`, { content: metaFileContent(entry) });
+      }
+    }
+    for (const uid of this.indexedUids()) {
+      const path = `${DASHBOARDS_ROOT}/${uid}/${DASHBOARD_META}`;
+      if (!this.resources.has(uid) && !files.has(path)) {
+        files.set(path, {
+          load: async (signal) => {
+            const entry = await this.hydrate(uid, signal);
+            return entry?.base ? metaFileContent(entry) : '';
+          },
         });
       }
     }
@@ -227,8 +278,8 @@ export class SessionWorkspace {
         `${this.resourcePath(uid)} has local changes; run \`workspace discard ${this.resourcePath(uid)}\` before refreshing`
       );
     }
-    if (!existing && this.resources.size >= this.limits.maxResources) {
-      throw new WorkspaceError('EQUOTA', `workspace already holds ${this.limits.maxResources} resources`);
+    if (!existing && !this.isIndexed(uid)) {
+      this.pathRevisionCounter++;
     }
     this.resources.set(uid, {
       kind: 'dashboard',
@@ -242,6 +293,7 @@ export class SessionWorkspace {
 
   /** Replaces a resource's base after a successful remote write and clears its overlay. */
   reconcileResource(uid: string, snapshot: WorkspaceResourceSnapshot | undefined) {
+    this.pathRevisionCounter++;
     if (!snapshot) {
       this.resources.delete(uid);
     } else {
@@ -263,6 +315,7 @@ export class SessionWorkspace {
       } else {
         this.resources.delete(target.uid);
       }
+      this.pathRevisionCounter++;
       this.changed();
       return true;
     }
@@ -273,8 +326,9 @@ export class SessionWorkspace {
    * Loads a resource snapshot through the hydrator when it is absent, or when
    * it was restored from storage without content. Working copies with local
    * changes always keep their base content, so they are never rehydrated.
+   * Concurrent requests for the same UID share one fetch.
    */
-  async hydrate(uid: string, signal?: AbortSignal) {
+  async hydrate(uid: string, signal?: AbortSignal): Promise<WorkspaceResourceEntry | undefined> {
     const existing = this.resources.get(uid);
     if (existing && (existing.overlay || isBaseLoaded(existing))) {
       return existing;
@@ -282,12 +336,70 @@ export class SessionWorkspace {
     if (!this.hydrator) {
       return existing;
     }
-    const snapshot = await this.hydrator('dashboard', uid, signal);
-    if (!snapshot) {
-      return existing;
+    let pending = this.inflight.get(uid);
+    if (!pending) {
+      const hydrator = this.hydrator;
+      pending = (async () => {
+        const snapshot = await hydrator('dashboard', uid, signal);
+        const current = this.resources.get(uid);
+        if (!snapshot || (current && (current.overlay || isBaseLoaded(current)))) {
+          // Missing remotely, or a local change landed while the fetch was in flight.
+          return current;
+        }
+        this.setResourceBase(snapshot);
+        return this.resources.get(uid);
+      })().finally(() => this.inflight.delete(uid));
+      this.inflight.set(uid, pending);
     }
-    this.setResourceBase(snapshot);
-    return this.resources.get(uid);
+    return pending;
+  }
+
+  /** Whether the content of a dashboard is in memory (no fetch needed to read it). */
+  isResourceLoaded(uid: string) {
+    const entry = this.resources.get(uid);
+    return Boolean(entry && (entry.overlay || isBaseLoaded(entry)));
+  }
+
+  /**
+   * Fetches many dashboards in parallel (every indexed dashboard when `uids` is
+   * omitted). Unreadable dashboards are reported, not thrown.
+   */
+  async prefetch(uids?: readonly string[], signal?: AbortSignal) {
+    const targets = [...new Set(uids ?? this.indexedUids())].filter((uid) => !this.isResourceLoaded(uid));
+    const failed: Array<{ uid: string; error: string }> = [];
+    let next = 0;
+    const worker = async () => {
+      while (next < targets.length && !signal?.aborted) {
+        const uid = targets[next++];
+        try {
+          const entry = await this.hydrate(uid, signal);
+          if (!entry) {
+            failed.push({ uid, error: 'not found or not readable by the current user' });
+          }
+        } catch (error) {
+          failed.push({ uid, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(HYDRATION_CONCURRENCY, targets.length) }, worker));
+    return { requested: targets.length, failed };
+  }
+
+  /**
+   * Starts loading every indexed dashboard without waiting, so a scan such as
+   * `rg PATTERN /grafana/dashboards` reads dashboards that are already in flight.
+   * The fetch outlives the invocation that started it; its results stay cached.
+   */
+  prefetchInBackground() {
+    if (this.backgroundPrefetch || !this.hydrator) {
+      return;
+    }
+    if (this.indexedUids().every((uid) => this.isResourceLoaded(uid))) {
+      return;
+    }
+    this.backgroundPrefetch = this.prefetch().finally(() => {
+      this.backgroundPrefetch = undefined;
+    });
   }
 
   status(): WorkspaceChangeStatus[] {
@@ -310,28 +422,27 @@ export class SessionWorkspace {
   }
 
   usage() {
-    let scratchBytes = 0;
+    let persistedBytes = 0;
     let tmpBytes = 0;
     for (const [path, file] of this.files) {
       const bytes = utf8ByteLength(file.content);
-      scratchBytes += bytes;
-      if (isWithin(path, '/tmp')) {
+      if (isPersistedScratch(path)) {
+        persistedBytes += bytes;
+      } else {
         tmpBytes += bytes;
       }
     }
-    let overlayBytes = 0;
+    let loaded = 0;
+    let modified = 0;
     for (const entry of this.resources.values()) {
-      if (entry.overlay?.content) {
-        overlayBytes += utf8ByteLength(entry.overlay.content);
-      }
+      loaded += this.isResourceLoaded(entry.uid) ? 1 : 0;
+      modified += entry.overlay ? 1 : 0;
     }
     return {
       files: this.files.size,
-      resources: this.resources.size,
-      scratchBytes,
+      persistedBytes,
       tmpBytes,
-      overlayBytes,
-      totalBytes: scratchBytes + overlayBytes,
+      dashboards: { visible: this.indexedUids().length, loaded, modified },
     };
   }
 
@@ -343,12 +454,13 @@ export class SessionWorkspace {
     copy.resources = new Map(this.resources);
     copy.generated = this.generated;
     copy.hydrator = this.hydrator;
+    copy.index = this.index;
     copy.journal = [...this.journal];
     return copy;
   }
 
-  begin(options: { cwd?: string; signal?: AbortSignal } = {}) {
-    return new WorkspaceTransaction(this, options.signal);
+  begin(options: { cwd?: string; signal?: AbortSignal; remoteWait?: RemoteWait } = {}) {
+    return new WorkspaceTransaction(this, options.signal, options.remoteWait);
   }
 
   /** Applies a validated transaction. Only {@link WorkspaceTransaction.commit} calls this. */
@@ -359,6 +471,9 @@ export class SessionWorkspace {
     resources: Map<string, string | null>
   ) {
     const now = Date.now();
+    if (files.size > 0 || dirsAdded.size > 0 || dirsRemoved.size > 0 || resources.size > 0) {
+      this.pathRevisionCounter++;
+    }
     for (const [path, content] of files) {
       if (content === null) {
         this.files.delete(path);
@@ -400,7 +515,14 @@ export class SessionWorkspace {
   // Apply journal ----------------------------------------------------------
 
   recordApply(record: WorkspaceApplyRecord) {
-    this.journal = [...this.journal.filter((existing) => existing !== record), record].slice(-MAX_JOURNAL);
+    this.journal = [...this.journal.filter((existing) => existing !== record), record];
+    // The journal is stored with the session: over budget, the oldest diffs go first, then the oldest records.
+    for (const older of this.journal.slice(0, -1)) {
+      if (utf8ByteLength(JSON.stringify(this.journal)) <= MAX_JOURNAL_BYTES) {
+        break;
+      }
+      delete older.diff;
+    }
     while (this.journal.length > 1 && utf8ByteLength(JSON.stringify(this.journal)) > MAX_JOURNAL_BYTES) {
       this.journal.shift();
     }
@@ -424,16 +546,16 @@ export class SessionWorkspace {
       schemaVersion: 1,
       files,
       dirs: [...this.dirs].filter((dir) => PERSISTED_SCRATCH_MOUNTS.some((mount) => isWithin(dir, mount))),
-      resources: this.resourceEntries().map((entry) => ({
-        kind: entry.kind,
-        uid: entry.uid,
-        // Unmodified snapshots are cheap to refetch; keep bases only where an
-        // overlay needs them for diffs and revision preconditions.
-        base: entry.base
-          ? { meta: entry.base.meta, content: entry.overlay ? entry.base.content : undefined }
-          : undefined,
-        overlay: entry.overlay,
-      })),
+      // Unmodified dashboards are listed by the index and fetched again on demand; working copies
+      // keep their base (for diffs and revision preconditions) plus a patch against it.
+      resources: this.resourceEntries()
+        .filter((entry) => entry.overlay)
+        .map((entry) => ({
+          kind: entry.kind,
+          uid: entry.uid,
+          base: entry.base ? { meta: entry.base.meta, content: entry.base.content } : undefined,
+          overlay: serializeOverlay(entry),
+        })),
       journal: this.journal,
     };
   }
@@ -479,16 +601,22 @@ export class SessionWorkspace {
       if (!resource || resource.kind !== 'dashboard' || !RESOURCE_UID_PATTERN.test(resource.uid)) {
         continue;
       }
+      const base = resource.base ? { meta: resource.base.meta, content: resource.base.content ?? '' } : undefined;
+      const overlay = restoreOverlay(resource.overlay, base?.content);
+      if (!overlay) {
+        // Unmodified dashboards from older sessions are listed by the index instead.
+        continue;
+      }
       workspace.resources.set(resource.uid, {
         kind: 'dashboard',
         uid: resource.uid,
         path: workspace.resourcePath(resource.uid),
-        base: resource.base ? { meta: resource.base.meta, content: resource.base.content ?? '' } : undefined,
-        overlay: resource.overlay,
+        base,
+        overlay,
       });
     }
     if (options.trusted !== false) {
-      workspace.journal = Array.isArray(data.journal) ? data.journal.slice(-MAX_JOURNAL) : [];
+      workspace.journal = Array.isArray(data.journal) ? data.journal : [];
     }
     return workspace;
   }
@@ -517,14 +645,22 @@ export class WorkspaceTransaction {
   private generatedCache = new Map<string, string>();
   private generatedFiles?: Map<string, GeneratedFile>;
   private hydrationAttempts = new Set<string>();
-  private writtenBytes = 0;
+  private hydrationMisses = 0;
   private closed = false;
   private checkpointed: WorkspaceFileChange[] = [];
+  private pathsCache?: { key: string; paths: string[] };
+  private mutations = 0;
 
   constructor(
     readonly workspace: SessionWorkspace,
-    private readonly signal?: AbortSignal
+    private readonly signal?: AbortSignal,
+    private readonly remoteWait: RemoteWait = (pending) => pending
   ) {}
+
+  /** Changes whenever {@link allPaths} may return a different list. */
+  pathsKey() {
+    return `${this.workspace.pathRevision}:${this.mutations}`;
+  }
 
   // Reads -------------------------------------------------------------------
 
@@ -576,6 +712,13 @@ export class WorkspaceTransaction {
         }
         return this.scratchDirExists(path) ? 'dir' : undefined;
       case 'resource':
+        if (
+          !this.resources.has(target.uid) &&
+          this.workspace.isIndexed(target.uid) &&
+          this.resourceDirExists(target.uid)
+        ) {
+          return 'file';
+        }
         return (await this.resourceContent(target.uid, true)) !== undefined ? 'file' : undefined;
       case 'resource-dir':
         return this.resourceDirExists(target.uid) ? 'dir' : undefined;
@@ -628,6 +771,11 @@ export class WorkspaceTransaction {
     if (type === 'file') {
       throw new WorkspaceError('ENOTDIR', `not a directory, scandir '${path}'`);
     }
+    const target = this.workspace.classify(path);
+    if (target.type === 'resource-dir' && !this.workspace.isResourceLoaded(target.uid)) {
+      // Descending into dashboard directories is how rg, grep -r, and find scan.
+      this.noteDashboardMiss();
+    }
     const listing: DirListing = new Map();
     const addPath = (candidate: string, kind: 'file' | 'dir') => {
       if (!isWithin(candidate, path) || candidate === path) {
@@ -646,11 +794,13 @@ export class WorkspaceTransaction {
     for (const dir of this.allScratchDirs()) {
       addPath(dir, 'dir');
     }
-    for (const uid of this.allResourceUids()) {
-      if (this.resourceDirExists(uid)) {
-        addPath(`${DASHBOARDS_ROOT}/${uid}`, 'dir');
-        if ((await this.resourceContent(uid, false)) !== undefined) {
-          addPath(this.workspace.resourcePath(uid), 'file');
+    if (isWithin(DASHBOARDS_ROOT, path) || isWithin(path, DASHBOARDS_ROOT)) {
+      for (const uid of this.allResourceUids()) {
+        if (this.resourceDirExists(uid)) {
+          addPath(`${DASHBOARDS_ROOT}/${uid}`, 'dir');
+          if (this.resourceFileListed(uid)) {
+            addPath(this.workspace.resourcePath(uid), 'file');
+          }
         }
       }
     }
@@ -664,6 +814,14 @@ export class WorkspaceTransaction {
 
   /** Every existing file path, used for glob expansion and search commands. */
   allPaths(): string[] {
+    const key = this.pathsKey();
+    if (this.pathsCache?.key !== key) {
+      this.pathsCache = { key, paths: this.computeAllPaths() };
+    }
+    return this.pathsCache.paths;
+  }
+
+  private computeAllPaths(): string[] {
     const paths = new Set<string>(['/']);
     for (const root of this.workspace.mountRoots()) {
       for (const dir of [...ancestorDirs(root), root]) {
@@ -678,8 +836,7 @@ export class WorkspaceTransaction {
       paths.add(dir);
     }
     for (const uid of this.allResourceUids()) {
-      const content = this.syncResourceContent(uid);
-      if (content !== undefined) {
+      if (this.resourceDirExists(uid) && this.resourceFileListed(uid)) {
         paths.add(`${DASHBOARDS_ROOT}/${uid}`);
         paths.add(this.workspace.resourcePath(uid));
       }
@@ -697,20 +854,7 @@ export class WorkspaceTransaction {
     this.assertOpen();
     const path = normalizeWorkspacePath(rawPath);
     const target = this.workspace.classify(path);
-    const bytes = utf8ByteLength(content);
-    if (bytes > this.workspace.limits.maxFileBytes) {
-      throw new WorkspaceError(
-        'EQUOTA',
-        `file exceeds ${this.workspace.limits.maxFileBytes} bytes, write '${path}' (${bytes} bytes)`
-      );
-    }
-    this.writtenBytes += bytes;
-    if (this.writtenBytes > this.workspace.limits.maxInvocationWriteBytes) {
-      throw new WorkspaceError(
-        'EQUOTA',
-        `invocation wrote more than ${this.workspace.limits.maxInvocationWriteBytes} bytes, write '${path}'`
-      );
-    }
+    this.mutations++;
 
     if (target.type === 'scratch') {
       if (path === target.mount) {
@@ -728,6 +872,8 @@ export class WorkspaceTransaction {
       return;
     }
     if (target.type === 'resource') {
+      // Dashboard documents end with a newline like fetched ones; scripts that drop it would change every file's last line.
+      content = content.endsWith('\n') ? content : `${content}\n`;
       const entry = this.workspace.getResource(target.uid);
       if (entry?.base?.meta.managedBy) {
         throw new WorkspaceError(
@@ -735,8 +881,9 @@ export class WorkspaceTransaction {
           `read-only file system, write '${path}' (managed by ${entry.base.meta.managedBy}; change it in its source)`
         );
       }
-      if (entry && !entry.overlay && !isBaseLoaded(entry)) {
-        await this.workspace.hydrate(target.uid, this.signal);
+      if ((entry && !entry.overlay && !isBaseLoaded(entry)) || (!entry && this.workspace.isIndexed(target.uid))) {
+        // Writing over an unfetched dashboard still needs its base for the diff and revision precondition.
+        await this.remoteWait(this.workspace.hydrate(target.uid, this.signal));
       }
       this.resources.set(target.uid, content);
       return;
@@ -764,6 +911,7 @@ export class WorkspaceTransaction {
   async mkdir(rawPath: string, options: { recursive?: boolean } = {}) {
     this.assertOpen();
     const path = normalizeWorkspacePath(rawPath);
+    this.mutations++;
     const existing = await this.entryType(path);
     if (existing) {
       if (options.recursive && existing === 'dir') {
@@ -797,6 +945,7 @@ export class WorkspaceTransaction {
   async rm(rawPath: string, options: { recursive?: boolean; force?: boolean } = {}) {
     this.assertOpen();
     const path = normalizeWorkspacePath(rawPath);
+    this.mutations++;
     const type = await this.entryType(path);
     if (!type) {
       if (options.force) {
@@ -812,6 +961,10 @@ export class WorkspaceTransaction {
       const entry = this.workspace.getResource(target.uid);
       if (entry?.base?.meta.managedBy) {
         throw this.readOnly(path, 'rm');
+      }
+      if (!entry?.base && this.workspace.isIndexed(target.uid)) {
+        // A deletion needs the base revision as its precondition.
+        await this.remoteWait(this.workspace.hydrate(target.uid, this.signal));
       }
       // Deleting a mounted resource stages a reviewable tombstone.
       this.resources.set(target.uid, null);
@@ -895,6 +1048,11 @@ export class WorkspaceTransaction {
     return view;
   }
 
+  /** Whether this transaction staged a write or deletion of the dashboard. */
+  stagedResource(uid: string) {
+    return this.resources.has(uid);
+  }
+
   stagedFile(path: string) {
     this.assertOpen();
     return this.scratchContent(normalizeWorkspacePath(path));
@@ -939,6 +1097,7 @@ export class WorkspaceTransaction {
    */
   checkpoint(): WorkspaceFileChange[] {
     this.assertOpen();
+    this.mutations++;
     const changes = this.applyStaged();
     this.checkpointed.push(...changes);
     return changes;
@@ -982,44 +1141,20 @@ export class WorkspaceTransaction {
       });
     }
 
-    const usage = this.workspace.usage();
-    let fileCount = usage.files;
-    let scratchBytes = usage.scratchBytes;
-    let tmpBytes = usage.tmpBytes;
+    let persistedBytes = this.workspace.usage().persistedBytes;
     for (const [path, content] of effectiveFiles) {
+      if (!isPersistedScratch(path)) {
+        continue;
+      }
       const before = this.workspace.getScratchFile(path);
-      const beforeBytes = before ? utf8ByteLength(before.content) : 0;
-      const afterBytes = content === null ? 0 : utf8ByteLength(content);
-      fileCount += (content === null ? 0 : 1) - (before ? 1 : 0);
-      scratchBytes += afterBytes - beforeBytes;
-      if (isWithin(path, '/tmp')) {
-        tmpBytes += afterBytes - beforeBytes;
-      }
+      persistedBytes +=
+        (content === null ? 0 : utf8ByteLength(content)) - (before ? utf8ByteLength(before.content) : 0);
     }
-    let overlayBytes = usage.overlayBytes;
-    let resourceCount = usage.resources;
-    for (const [uid, content] of effectiveResources) {
-      const entry = this.workspace.getResource(uid);
-      overlayBytes +=
-        (content ? utf8ByteLength(content) : 0) - (entry?.overlay?.content ? utf8ByteLength(entry.overlay.content) : 0);
-      if (!entry) {
-        resourceCount++;
-      }
-    }
-    if (fileCount > limits.maxFiles) {
-      throw new WorkspaceError('EQUOTA', `workspace file limit exceeded (${fileCount}/${limits.maxFiles} files)`);
-    }
-    if (tmpBytes > limits.maxTmpBytes) {
-      throw new WorkspaceError('EQUOTA', `/tmp quota exceeded (${tmpBytes}/${limits.maxTmpBytes} bytes)`);
-    }
-    if (scratchBytes + overlayBytes > limits.maxWorkspaceBytes) {
+    if (persistedBytes > limits.maxWorkspaceBytes) {
       throw new WorkspaceError(
         'EQUOTA',
-        `workspace quota exceeded (${scratchBytes + overlayBytes}/${limits.maxWorkspaceBytes} bytes)`
+        `files under /workspace and /session exceed the stored session budget (${persistedBytes}/${limits.maxWorkspaceBytes} bytes); keep large intermediate files in /tmp`
       );
-    }
-    if (resourceCount > limits.maxResources) {
-      throw new WorkspaceError('EQUOTA', `workspace resource limit exceeded (${resourceCount}/${limits.maxResources})`);
     }
 
     const dirsAdded = new Set([...this.dirsAdded].filter((dir) => !this.workspace.scratchDirs().has(dir)));
@@ -1089,7 +1224,8 @@ export class WorkspaceTransaction {
   }
 
   private allResourceUids() {
-    const uids = new Set(this.workspace.resourceEntries().map((entry) => entry.uid));
+    const uids = new Set(this.workspace.indexedUids());
+    this.workspace.resourceEntries().forEach((entry) => uids.add(entry.uid));
     this.resources.forEach((_content, uid) => uids.add(uid));
     return [...uids].sort();
   }
@@ -1100,15 +1236,22 @@ export class WorkspaceTransaction {
       return staged !== null;
     }
     const entry = this.workspace.getResource(uid);
-    return Boolean(entry && entry.overlay?.content !== null);
+    if (entry) {
+      return entry.overlay?.content !== null;
+    }
+    return this.workspace.isIndexed(uid);
   }
 
-  private syncResourceContent(uid: string): string | undefined {
+  /** Whether dashboard.json is listed: indexed dashboards are listed before their content is fetched. */
+  private resourceFileListed(uid: string) {
     if (this.resources.has(uid)) {
-      return this.resources.get(uid) ?? undefined;
+      return this.resources.get(uid) !== null;
     }
     const entry = this.workspace.getResource(uid);
-    return entry ? this.workspace.resourceContent(entry) : undefined;
+    if (entry) {
+      return this.workspace.resourceContent(entry) !== undefined || this.workspace.isIndexed(uid);
+    }
+    return this.workspace.isIndexed(uid);
   }
 
   private async resourceContent(uid: string, hydrate: boolean): Promise<string | undefined> {
@@ -1119,8 +1262,11 @@ export class WorkspaceTransaction {
     const needsHydration = !entry || (!entry.overlay && !isBaseLoaded(entry));
     if (hydrate && needsHydration && !this.hydrationAttempts.has(uid)) {
       this.hydrationAttempts.add(uid);
+      if (this.workspace.isIndexed(uid)) {
+        this.noteDashboardMiss();
+      }
       try {
-        entry = await this.workspace.hydrate(uid, this.signal);
+        entry = await this.remoteWait(this.workspace.hydrate(uid, this.signal));
       } catch (error) {
         if (error instanceof WorkspaceError) {
           throw error;
@@ -1129,6 +1275,16 @@ export class WorkspaceTransaction {
       }
     }
     return entry ? this.workspace.resourceContent(entry) : undefined;
+  }
+
+  /**
+   * Several unloaded dashboards touched in one invocation (a recursive search, a
+   * glob, xargs, a loop) mean a scan: load the rest of the index in parallel.
+   */
+  private noteDashboardMiss() {
+    if (++this.hydrationMisses === SCAN_DETECTION_MISSES) {
+      this.workspace.prefetchInBackground();
+    }
   }
 
   private hydrationHint(uid: string) {
@@ -1145,6 +1301,7 @@ export class WorkspaceTransaction {
   }
 
   refreshGeneratedFiles() {
+    this.mutations++;
     this.generatedFiles = undefined;
     this.generatedCache.delete('/artifacts/index.ndjson');
   }
@@ -1211,4 +1368,44 @@ function mergeChanges(changes: WorkspaceFileChange[]) {
     byPath.set(change.path, previous?.change === 'created' ? { ...change, change: 'created' } : change);
   }
   return [...byPath.values()].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function isPersistedScratch(path: string) {
+  return PERSISTED_SCRATCH_MOUNTS.some((mount) => isWithin(path, mount));
+}
+
+function serializeOverlay(entry: WorkspaceResourceEntry): PersistedWorkspace['resources'][number]['overlay'] {
+  const overlay = entry.overlay!;
+  const base = entry.base?.content;
+  if (overlay.content === null || base === undefined || base === '') {
+    return { content: overlay.content, updatedAt: overlay.updatedAt };
+  }
+  const patch = createPatch(entry.path, base, overlay.content, undefined, undefined, { context: 0 });
+  // Keep the full copy when a patch would not be smaller (for example a complete rewrite).
+  return patch.length < overlay.content.length
+    ? { patch, updatedAt: overlay.updatedAt }
+    : { content: overlay.content, updatedAt: overlay.updatedAt };
+}
+
+function restoreOverlay(
+  overlay: PersistedWorkspace['resources'][number]['overlay'],
+  base: string | undefined
+): WorkspaceResourceEntry['overlay'] {
+  if (!overlay || typeof overlay !== 'object') {
+    return undefined;
+  }
+  const updatedAt = typeof overlay.updatedAt === 'string' ? overlay.updatedAt : new Date().toISOString();
+  if (typeof overlay.patch === 'string' && base !== undefined) {
+    const content = applyPatch(base, overlay.patch);
+    return typeof content === 'string' ? { content, updatedAt } : undefined;
+  }
+  if (overlay.content === null || typeof overlay.content === 'string') {
+    return { content: overlay.content, updatedAt };
+  }
+  return undefined;
+}
+
+function metaFileContent(entry: WorkspaceResourceEntry) {
+  const meta = entry.base!.meta;
+  return `${JSON.stringify({ ...meta, writable: !meta.managedBy, localChange: entry.overlay ? 'modified' : 'none' }, null, 2)}\n`;
 }

@@ -9,15 +9,14 @@ export type PythonRunner = {
 };
 
 const PYTHON_TIMEOUT_MS = 60_000;
-const MAX_INPUT_BYTES = 16 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 /** Generated mounts copied into the interpreter. Network-backed mounts (catalog, live) are excluded. */
 const READ_ONLY_ROOTS = ['/.agents/skills', '/artifacts'];
 
 /**
  * `python3`/`python` backed by CPython compiled to WebAssembly. The program
- * sees a copy of the session filesystem (scratch mounts, hydrated dashboards,
- * skills, artifacts); files it creates, changes, or deletes under writable
+ * sees a copy of the session filesystem (scratch mounts, loaded dashboards,
+ * skills, artifacts; `grafana fetch --all` loads every dashboard); files it creates, changes, or deletes under writable
  * locations are staged through the same transaction and policy as bash.
  * There is no network access and no JavaScript bridge.
  */
@@ -25,9 +24,6 @@ export function createPythonCommands(runner: PythonRunner): WorkspaceShellComman
   const run: WorkspaceShellCommand['run'] = async (args, ctx) => {
     const tx = ctx.tx;
     const snapshot = await snapshotFiles(tx);
-    if (snapshot.bytes > MAX_INPUT_BYTES) {
-      return result('', `python: workspace too large to copy into the interpreter (${snapshot.bytes} bytes)\n`, 1);
-    }
     let output: PythonRunOutput;
     try {
       output = await runner.run(
@@ -39,7 +35,7 @@ export function createPythonCommands(runner: PythonRunner): WorkspaceShellComman
           files: snapshot.files,
           collectRoots: [...SCRATCH_MOUNTS, DASHBOARDS_ROOT],
           maxOutputBytes: MAX_OUTPUT_BYTES,
-          maxFileBytes: tx.workspace.limits.maxFileBytes,
+          maxFileBytes: Number.POSITIVE_INFINITY,
         },
         { timeoutMs: PYTHON_TIMEOUT_MS, signal: ctx.signal }
       );
@@ -97,8 +93,12 @@ export function createPythonCommands(runner: PythonRunner): WorkspaceShellComman
 async function snapshotFiles(tx: WorkspaceTransaction) {
   const files: Record<string, string> = {};
   const writable: string[] = [];
-  let bytes = 0;
   for (const path of tx.allPaths()) {
+    const dashboard = /^\/grafana\/dashboards\/([A-Za-z0-9_-]{1,40})\//.exec(path);
+    if (dashboard && !tx.workspace.isResourceLoaded(dashboard[1]) && !tx.stagedResource(dashboard[1])) {
+      // Copying means fetching: dashboards that were never read or fetched stay out of the snapshot.
+      continue;
+    }
     const stageable = isStageable(path);
     const readOnly = READ_ONLY_ROOTS.some((root) => isWithin(path, root)) || /\/meta\.json$/.test(path);
     if (!stageable && !readOnly) {
@@ -110,7 +110,6 @@ async function snapshotFiles(tx: WorkspaceTransaction) {
     try {
       const content = await tx.readFile(path);
       files[path] = content;
-      bytes += content.length;
       if (stageable) {
         writable.push(path);
       }
@@ -120,7 +119,7 @@ async function snapshotFiles(tx: WorkspaceTransaction) {
       }
     }
   }
-  return { files, writable, bytes };
+  return { files, writable };
 }
 
 function isStageable(path: string) {

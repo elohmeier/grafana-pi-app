@@ -139,6 +139,13 @@ export type DashboardBroker = {
     resourceVersion: string | undefined,
     signal?: AbortSignal
   ) => Promise<DashboardDryRunResult>;
+  /** A dashboard as it was at an earlier resourceVersion, from Grafana's version history. */
+  version?: (
+    uid: string,
+    resourceVersion: string,
+    apiVersion: string | undefined,
+    signal?: AbortSignal
+  ) => Promise<WorkspaceResourceSnapshot | undefined>;
   /** Whether a folder UID exists and is visible to the current user. */
   folderExists?: (uid: string, signal?: AbortSignal) => Promise<boolean>;
   /** Datasource UIDs dashboards may reference, when a central allow-list is configured. */
@@ -193,16 +200,56 @@ export type PrometheusBroker = {
   ) => Promise<Record<string, unknown>>;
 };
 
+/** One dashboard of a change set, as shown in the review. */
+export type WorkspaceApprovalOperation = {
+  operation: 'create' | 'update' | 'delete';
+  uid: string;
+  path: string;
+  title?: string;
+  folderUid?: string;
+  folderTitle?: string;
+  additions: number;
+  deletions: number;
+  /** Unified diff of this dashboard. */
+  diff: string;
+  warnings: string[];
+  /** Validation errors that the fetched dashboard already had; they do not block the change. */
+  preexistingErrors: string[];
+};
+
+/**
+ * The same textual replacement repeated across the change set, for example
+ * `[5m]` → `[$__rate_interval]` in 71 queries of 16 dashboards. Reviewers check
+ * one example per group instead of every hunk.
+ */
+export type WorkspaceChangeGroup = {
+  before: string;
+  after: string;
+  /** Changed lines with this replacement. */
+  count: number;
+  paths: string[];
+  example: { path: string; before: string; after: string };
+};
+
 /** Approval requests go to the authenticated UI, outside model-controlled tools. */
 export type WorkspaceApprovalRequest = {
   applyId: string;
   digest: string;
   title: string;
   summary: string;
-  operations: Array<{ operation: string; uid: string; title?: string; path: string; warnings: number }>;
-  diff: string;
+  operations: WorkspaceApprovalOperation[];
+  groups: WorkspaceChangeGroup[];
+  /** Changed lines that belong to no group of two or more (reviewed per dashboard). */
+  ungroupedChanges: number;
+};
+
+export type WorkspaceApprovalDecision = {
+  approved: boolean;
+  reason?: string;
+  /** Operation paths the reviewer kept; undefined applies every operation. */
+  paths?: string[];
 };
 
 export type WorkspaceApprovalService = {
-  request: (request: WorkspaceApprovalRequest, signal?: AbortSignal) => Promise<{ approved: boolean; reason?: string }>;
+  request: (request: WorkspaceApprovalRequest, signal?: AbortSignal) => Promise<WorkspaceApprovalDecision>;
 };

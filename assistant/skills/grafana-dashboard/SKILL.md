@@ -39,8 +39,8 @@ Use this skill when the user asks for a dashboard, panel, row, variable, live da
    Fix Jsonnet errors with `edit` and re-run; `jsonnet fix FILE` repairs common invalid constructors as a visible edit.
 4. Run `grafana-dashboard fix PATH` (panel ids and grid layout) and `grafana-dashboard validate PATH`; fix every reported error. Add `--server` to dry-run the save in Grafana (permissions, strict decoding, and whether the dashboard changed since it was fetched).
 5. Run `grafana-dashboard data PATH --panel ID` for panels whose queries, variables, or transformations changed. It runs the queries as the user and applies the panel's transformations, units, and reducers; treat `empty`, `error`, or `skipped` as findings to fix or report, not as success. For empty panels, read `executedQueries`: it shows the query as Grafana ran it, for example `$__rate_interval` resolved to a window shorter than the data's sample spacing.
-6. Run `workspace apply`. The user approves the exact diff; report applied, conflicted, failed, or denied per dashboard.
-7. For several dashboards at once, fetch them with `grafana fetch UID...`, search with `rg`, change them in one script, validate all, and apply them together.
+6. Run `workspace apply`. The user reviews the change set, may uncheck dashboards, and approves; report applied, declined, conflicted, failed, or denied per dashboard.
+7. For changes across many dashboards (every panel that uses a metric, datasource, or pattern), follow `/.agents/skills/grafana-dashboard/references/mass-edits.md`: find matches with `grafana-dashboard queries --metric NAME` or `rg` over `/grafana/dashboards` (every visible dashboard is listed and loads on demand), change them with one script, check `workspace diff --stat`, validate, and apply them together in one review.
 
 ## Jsonnet Rules
 
@@ -77,4 +77,4 @@ Use this skill when the user asks for a dashboard, panel, row, variable, live da
 - If apply reports `conflicted`, the dashboard changed in Grafana since it was fetched: run `grafana refresh <uid> --discard`, reapply the change, and run `workspace apply` again.
 - If metrics are missing, state the gap instead of fabricating panels.
 
-Use `workspace apply --path PATH` to select files when other unrelated changes are staged. No plan IDs or planning mode are used. Inspect receipts under `/session/receipts/`.
+Use `workspace apply --path PATH` to select files when other unrelated changes are staged. No plan IDs or planning mode are used. Inspect receipts under `/session/receipts/`. `workspace revert APPLY_ID` stages the dashboards of an earlier apply as they were before it; review and save the revert with `workspace apply`.

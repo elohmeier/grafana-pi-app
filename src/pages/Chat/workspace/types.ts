@@ -48,23 +48,27 @@ export type WorkspaceScratchFile = {
 };
 
 export type WorkspaceLimits = {
-  maxFileBytes: number;
-  /** Aggregate bytes across scratch files and resource overlays. */
+  /**
+   * Aggregate bytes of the scratch files persisted with the session (/workspace, /session). This
+   * protects the stored session size; dashboards, their working copies, and /tmp are not counted.
+   */
   maxWorkspaceBytes: number;
-  maxTmpBytes: number;
-  maxFiles: number;
-  maxResources: number;
-  /** Bytes written by one invocation before it is aborted. */
-  maxInvocationWriteBytes: number;
 };
 
 export const DEFAULT_WORKSPACE_LIMITS: WorkspaceLimits = {
-  maxFileBytes: 512 * 1024,
   maxWorkspaceBytes: 8 * 1024 * 1024,
-  maxTmpBytes: 2 * 1024 * 1024,
-  maxFiles: 500,
-  maxResources: 100,
-  maxInvocationWriteBytes: 4 * 1024 * 1024,
+};
+
+/**
+ * Every dashboard visible to the current user, listed under /grafana/dashboards before its
+ * content is fetched. `prepare` loads the listing before a tool call or bash invocation reads
+ * the filesystem; `uids` returns the loaded listing synchronously.
+ */
+export type ResourceIndex = {
+  prepare: (signal?: AbortSignal) => Promise<void>;
+  uids: () => readonly string[];
+  /** Listing metadata of an indexed dashboard. */
+  describe?: (uid: string) => { title?: string; folderUid?: string; folderTitle?: string } | undefined;
 };
 
 export type GeneratedFile = {
@@ -108,12 +112,13 @@ export type PersistedWorkspace = {
   schemaVersion: 1;
   files: Record<string, WorkspaceScratchFile>;
   dirs: string[];
+  /** Resources with local changes only; unmodified dashboards are fetched again on demand. */
   resources: Array<{
     kind: WorkspaceResourceKind;
     uid: string;
-    /** Base content is dropped for unmodified resources and rehydrated lazily. */
     base?: { content?: string; meta: WorkspaceResourceMeta };
-    overlay?: WorkspaceResourceEntry['overlay'];
+    /** Working copy. `patch` is a unified diff against the base content (smaller than a full copy). */
+    overlay?: { content?: string | null; patch?: string; updatedAt: string };
   }>;
   journal: WorkspaceApplyRecord[];
 };
@@ -146,7 +151,8 @@ export type WorkspaceChanges = {
   documents: Record<string, string | null>;
 };
 
-export type WorkspaceApplyOutcome = 'applied' | 'failed' | 'conflicted' | 'unknown' | 'not attempted';
+/** `declined`: the reviewer unchecked the dashboard; its working copy keeps the change. */
+export type WorkspaceApplyOutcome = 'applied' | 'failed' | 'conflicted' | 'unknown' | 'not attempted' | 'declined';
 
 export type WorkspaceApplyRecord = {
   applyId: string;
@@ -158,8 +164,11 @@ export type WorkspaceApplyRecord = {
   results: Array<{
     path: string;
     uid: string;
+    title?: string;
     operation: WorkspaceWriteOperation['operation'];
     outcome: WorkspaceApplyOutcome;
+    /** Revision the change was made against; `workspace revert` restores it from Grafana's history. */
+    baseResourceVersion?: string;
     resourceVersion?: string;
     url?: string;
     error?: string;

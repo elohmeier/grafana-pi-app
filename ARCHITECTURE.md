@@ -274,18 +274,18 @@ other tool image. Commands with bulky output (`grafana-prom query`,
 virtual filesystem per chat. It keeps canonical resource snapshots separate
 from local overlays and scratch files.
 
-| Path                                          | Kind                                 | Behavior                                                                                                                                                                                           |
-| --------------------------------------------- | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/grafana/dashboards/<uid>/dashboard.json`    | resource                             | Working copy of the dashboard resource (`{apiVersion, kind, metadata, spec}`). Fetched lazily on first access through the dashboard App Platform API as the current user. Writes stage an overlay. |
-| `/grafana/dashboards/<uid>/meta.json`         | generated, read-only                 | Provider-owned metadata: revision (`resourceVersion`), folder, API version, and managed-by.                                                                                                        |
-| `/grafana/catalog/dashboards.ndjson`          | generated, read-only                 | Paginated, metadata-only catalog of dashboards visible to the user (up to 5000, cached for 5 minutes). Loaded on first read.                                                                       |
-| `/grafana/catalog/coverage.json`              | generated, read-only                 | Whether the catalog is complete, and its limit.                                                                                                                                                    |
-| `/live/dashboard/dashboard.json`, `info.json` | generated; `dashboard.json` writable | Unsaved state of the dashboard open in the browser as a v2 resource (variant only). Edits stage a non-persisted overlay that `live apply` applies to the browser.                                  |
-| `/workspace`                                  | scratch, persisted                   | Default working directory.                                                                                                                                                                         |
-| `/session`                                    | scratch, persisted                   | Durable notes, such as `findings.md`.                                                                                                                                                              |
-| `/tmp`                                        | scratch                              | Not persisted; separate quota.                                                                                                                                                                     |
-| `/artifacts`                                  | generated, read-only                 | `index.ndjson` and one JSON file per artifact.                                                                                                                                                     |
-| `/.agents/skills`                             | generated, read-only                 | `SKILL.md` and resources of bundled and custom skills.                                                                                                                                             |
+| Path                                          | Kind                                 | Behavior                                                                                                                                                                                                                                |
+| --------------------------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/grafana/dashboards/<uid>/dashboard.json`    | resource                             | Working copy of the dashboard resource (`{apiVersion, kind, metadata, spec}`). Every visible dashboard is listed; content is fetched on first read through the dashboard App Platform API as the current user. Writes stage an overlay. |
+| `/grafana/dashboards/<uid>/meta.json`         | generated, read-only                 | Provider-owned metadata: revision (`resourceVersion`), folder, API version, and managed-by.                                                                                                                                             |
+| `/grafana/catalog/dashboards.ndjson`          | generated, read-only                 | Metadata of every dashboard visible to the user (uid, title, folder, tags), cached for 5 minutes. The same listing is the index behind `/grafana/dashboards`.                                                                           |
+| `/grafana/catalog/coverage.json`              | generated, read-only                 | Dashboard count and when the listing was loaded.                                                                                                                                                                                        |
+| `/live/dashboard/dashboard.json`, `info.json` | generated; `dashboard.json` writable | Unsaved state of the dashboard open in the browser as a v2 resource (variant only). Edits stage a non-persisted overlay that `live apply` applies to the browser.                                                                       |
+| `/workspace`                                  | scratch, persisted                   | Default working directory.                                                                                                                                                                                                              |
+| `/session`                                    | scratch, persisted                   | Durable notes, such as `findings.md`.                                                                                                                                                                                                   |
+| `/tmp`                                        | scratch                              | Not persisted and not counted against the stored session budget.                                                                                                                                                                        |
+| `/artifacts`                                  | generated, read-only                 | `index.ndjson` and one JSON file per artifact.                                                                                                                                                                                          |
+| `/.agents/skills`                             | generated, read-only                 | `SKILL.md` and resources of bundled and custom skills.                                                                                                                                                                                  |
 
 Invariants:
 
@@ -297,13 +297,24 @@ Invariants:
   explicit `workspace apply` and `live apply` cross a checkpoint boundary. A later
   abort discards uncommitted writes and reports any earlier committed changes.
 - Paths are normalized and length-limited. Symlinks and hard links are rejected.
-- Default quotas (`DEFAULT_WORKSPACE_LIMITS` in `workspace/types.ts`): 512 KiB
-  per file, 8 MiB for persisted scratch files plus overlays, 2 MiB for `/tmp`,
-  500 files, 100 resources, 4 MiB written per invocation.
+- There are no count limits on dashboards, files, or apply batches. The one
+  quota (`DEFAULT_WORKSPACE_LIMITS` in `workspace/types.ts`) is 8 MiB for the
+  scratch files stored with the session (`/workspace`, `/session`). Unmodified
+  dashboards are not stored; working copies are stored as their base plus a
+  patch.
 - `read` returns a content revision; `write` and `edit` accept it to reject
   concurrent changes. `edit` applies exact-match replacements atomically.
-- `rg`, `find`, and `grep` see only hydrated dashboards. Remote discovery goes
-  through `grafana search` or the catalog, which reports coverage.
+- Every visible dashboard is listed under `/grafana/dashboards` from the catalog
+  index, before its content is fetched, so `rg`, `grep -r`, `find`, and globs
+  cover all of them. A scan (three unloaded dashboards touched in one
+  invocation) fetches the rest in parallel (8 at a time); waiting on fetches does
+  not count against the bash timeout. Fetched content stays in memory for the
+  chat. The worker receives the path list only when it changes and answers
+  lookups of unlisted paths (such as the ignore files `rg` probes) without a
+  round trip.
+- `grafana-dashboard queries [PATH...] [--metric NAME] [--match REGEX] [--ds UID]`
+  lists panel and variable queries of classic and v2 dashboards as NDJSON with
+  the jq path of each query text; without PATH it covers every dashboard.
 
 ## Bash And Workspace Commands
 
@@ -419,8 +430,8 @@ WebAssembly. Webpack copies the interpreter from just-bash's
 loaded on first use. Each invocation runs in a fresh dedicated Web Worker that
 is terminated on timeout (60 seconds) or cancellation, which is a hard limit.
 
-The program receives a copy of the scratch mounts, hydrated dashboard working
-copies, skills, and artifacts (the network-backed catalog and live mounts are
+The program receives a copy of the scratch mounts, loaded dashboard working
+copies (`grafana fetch --all` loads every dashboard), skills, and artifacts (the network-backed catalog and live mounts are
 excluded). There is no network access and no JavaScript bridge. After the run,
 changed or deleted files under writable locations are staged through the same
 transaction and policy as bash; read-only paths are reported as not staged.
@@ -520,19 +531,31 @@ read-only troubleshooting.
 The assistant edits `/grafana/dashboards/<uid>/dashboard.json` and runs
 `workspace apply [--path PATH]`. No planning mode or separate plan command exists.
 
-`workspace/apply.ts` validates at most 50 selected overlays, captures their exact
-contents and base revisions, computes a digest, and requests approval with the
-complete unified diff. The timeout pauses during approval. After approval it
-checks that the working copies and base revisions still match the captured changes.
-It then writes as the current Grafana user with resourceVersion preconditions.
+`workspace/apply.ts` validates every selected overlay in parallel, captures the
+exact contents and base revisions, computes a digest, and requests approval of
+the change set. Validation errors that the fetched dashboard already had do not
+block; errors the change introduces do. The timeout pauses during approval. After
+approval it checks that the working copies and base revisions still match the
+captured changes, then writes the dashboards the reviewer kept as the current
+Grafana user with resourceVersion preconditions, 8 at a time.
 
-Each operation produces `applied`, `conflicted`, `failed`, `unknown`, or
+Each operation produces `applied`, `declined` (unchecked in the review; the
+working copy keeps the change), `conflicted`, `failed`, `unknown`, or
 `not attempted`. Successful writes reconcile the working copy. A repeated apply
 with no remaining changes is a no-op; partial retries consider only remaining
 staged changes. Apply receipts and full diffs are available under
-`/session/receipts/`; the journal retains up to 50 records with a 16 MiB budget
-(always retaining the newest receipt). Shell stdout contains compact outcomes and
-a diff path, not the full approval diff.
+`/session/receipts/`; the journal has a 16 MiB budget and drops the diffs of the
+oldest receipts first. Shell stdout contains outcome counts and a diff path; long
+receipts list only the dashboards that were not applied.
+
+`workspace diff --stat` summarizes a change set before apply: changed lines per
+dashboard and the replacements repeated across dashboards (`changeGroups.ts`
+token-diffs each changed line pair, so `[5m]` → `[$__rate_interval]` in 71
+queries is one group). `workspace revert APPLY_ID [--path PATH]` stages the
+reverse of an applied change: the receipt's patch is reversed onto the current
+dashboard, keeping later edits by others; without a stored diff, the previous
+version comes from Grafana's version history. The revert is reviewed and saved
+with `workspace apply` like any change.
 
 `workspace status`, `diff`, and `discard` operate on the transaction's staged view.
 Only explicit apply crosses a commit boundary. Remote effects cannot be rolled
@@ -693,10 +716,12 @@ and commands can do, not from per-turn tool selection:
 ### Explicit Write Approval
 
 `workspace apply` requests approval through the `WorkspaceApprovalService`
-wired up in `ChatSceneObject.tsx`. It routes the request to the confirmation
-modal (`PERSISTENT_WRITE_TOOLS` contains only this apply approval) and shows the
-captured changes' operations and diff. Denying the modal records an unapproved journal
-entry, and the command fails without writing anything.
+(`session/ApprovalChannel.ts`). `ChangeSetReview.tsx` shows the change set: a
+summary, the repeated replacements with an example each, and a folder-grouped
+dashboard list with line counts, validation badges, per-dashboard diffs, a
+filter, and checkboxes per dashboard, folder, and replacement group. The decision
+returns the kept paths. Denying records an unapproved journal entry, and the
+command fails without writing anything.
 
 The approval is bound to the change digest, and the captured changes are re-checked for
 staleness after approval. It is still a UI callback in the browser, not a

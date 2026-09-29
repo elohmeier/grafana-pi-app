@@ -16,9 +16,9 @@ import {
   type CompactionEvent,
 } from '../compaction';
 import { createSessionWorkspaceToolkit, type SessionWorkspaceToolkitOptions, SessionWorkspace } from '../workspace';
-import { createCatalogMount } from '../workspace/mounts';
+import { createDashboardCatalog, type DashboardCatalog } from '../workspace/mounts';
 import type { DashboardBroker } from '../workspace/broker';
-import type { GeneratedMount, PersistedWorkspace } from '../workspace/types';
+import type { PersistedWorkspace } from '../workspace/types';
 import type { Artifact } from '../domain/artifacts';
 import { ArtifactStore } from './artifactStore';
 import type { SessionRepository } from './SessionRepository';
@@ -45,7 +45,7 @@ export class AssistantSession {
   private saves: Promise<void> = Promise.resolve();
   private listeners = new Set<(event: AgentEvent, agent: Agent) => void>();
   private unsubscribeAgent?: () => void;
-  private catalog?: { broker: DashboardBroker; mount: GeneratedMount };
+  private catalog?: { broker: DashboardBroker; catalog: DashboardCatalog };
 
   constructor(readonly workspace = new SessionWorkspace()) {}
 
@@ -91,9 +91,9 @@ export class AssistantSession {
   toolkit(options: SessionWorkspaceToolkitOptions) {
     const dashboards = options.broker.dashboards;
     if (dashboards && this.catalog?.broker !== dashboards) {
-      this.catalog = { broker: dashboards, mount: createCatalogMount(dashboards) };
+      this.catalog = { broker: dashboards, catalog: createDashboardCatalog(dashboards) };
     }
-    return createSessionWorkspaceToolkit({ ...options, catalogMount: this.catalog?.mount });
+    return createSessionWorkspaceToolkit({ ...options, catalog: this.catalog?.catalog });
   }
 
   createAgent(options: {

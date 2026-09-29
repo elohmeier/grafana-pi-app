@@ -53,8 +53,9 @@ describe('direct apply and composable shell', () => {
     const result = await run('workspace apply --path /grafana/dashboards/one/dashboard.json');
     expect(result.exitCode).toBe(0);
     const approval = approvals.request.mock.calls[0][0];
-    expect(approval.diff).toContain('FINAL-CHANGE');
-    expect(approval.diff.length).toBeGreaterThan(60000);
+    expect(approval.operations).toHaveLength(1);
+    expect(approval.operations[0].diff).toContain('FINAL-CHANGE');
+    expect(approval.operations[0].diff.length).toBeGreaterThan(60000);
     expect(approval).not.toHaveProperty('planId');
     expect(calls.filter((call) => call.startsWith('update:'))).toEqual(['update:one@101']);
     expect(workspace.status().map((entry) => entry.uid)).toEqual(['two']);

@@ -24,6 +24,8 @@ export type DashboardMetricContextParams = {
 };
 
 export type DashboardMetricSearchParams = {
+  /** Dashboards to analyse (local working copies); without them, dashboards are searched and fetched. */
+  dashboards?: Array<{ uid: string; resource: Record<string, any>; meta?: Record<string, any> }>;
   query?: string;
   tag?: string;
   datasourceUid?: string;
@@ -244,7 +246,7 @@ export function extractDashboardMetricUsage(
       })
     )
     .filter((usage) => matchesDatasourceFilters(usage, options.datasourceUid, allowedDatasourceUids));
-  const maxUsages = clampInt(options.maxUsages ?? MAX_INSPECT_USAGES, 1, MAX_SEARCH_USAGES);
+  const maxUsages = clampInt(options.maxUsages ?? MAX_INSPECT_USAGES, 1, Number.MAX_SAFE_INTEGER);
   const limitedUsages = usages.slice(0, maxUsages);
   const metrics = summarizeMetricUsages(limitedUsages);
   const relations = summarizeMetricRelations(limitedUsages);
@@ -311,7 +313,7 @@ export async function getMetricNeighborhood(
     ? await metricUsageCorpusForDashboard({ uid: args.dashboardUid, params: args, toolConfig, signal })
     : await buildDashboardMetricUsageSearch({ params: { ...args, seedMetrics }, toolConfig, signal });
   const seedSet = new Set(seedMetrics);
-  const maxResults = clampInt(args.maxResults ?? MAX_RESULT_METRICS, 1, MAX_RESULT_METRICS);
+  const maxResults = clampInt(args.maxResults ?? MAX_RESULT_METRICS, 1, Number.MAX_SAFE_INTEGER);
   const neighbors = rankMetricSummaries({
     summaries: corpus.metrics.filter((metric) => !seedSet.has(metric.metric)),
     relations: corpus.relations,
@@ -327,7 +329,7 @@ export async function getMetricNeighborhood(
       .slice(0, MAX_RESULT_RELATIONS),
     usages: corpus.usages
       .filter((usage) => seedSet.has(usage.metric) || neighbors.some((metric) => metric.metric === usage.metric))
-      .slice(0, args.maxUsages ? clampInt(args.maxUsages, 1, MAX_SEARCH_USAGES) : MAX_SEARCH_USAGES),
+      .slice(0, args.maxUsages ? clampInt(args.maxUsages, 1, Number.MAX_SAFE_INTEGER) : MAX_SEARCH_USAGES),
     omitted: corpus.omitted,
   };
 }
@@ -341,11 +343,28 @@ async function buildDashboardMetricUsageSearch({
   toolConfig: GrafanaToolConfig;
   signal?: AbortSignal;
 }) {
+  const dashboards: ExtractedDashboardMetricUsage[] = [];
+  if (params.dashboards) {
+    for (const item of params.dashboards) {
+      throwIfAborted(signal);
+      dashboards.push(
+        withErrorContext(`extract dashboard metric usage for ${item.uid}`, () =>
+          extractDashboardMetricUsage(dashboardSpecFromResponse(item.resource), {
+            meta: item.meta,
+            uid: item.uid,
+            datasourceUid: params.datasourceUid,
+            allowedPrometheusDatasourceUids: toolConfig.allowedPrometheusDatasourceUids,
+            maxUsages: Number.MAX_SAFE_INTEGER,
+          })
+        )
+      );
+    }
+    return withErrorContext('build dashboard metric corpus', () => metricUsageCorpus({ dashboards, params }));
+  }
   const maxDashboards = clampInt(params.maxDashboards ?? MAX_SEARCH_DASHBOARDS, 1, MAX_SEARCH_DASHBOARDS);
   const searchResults = await withAsyncErrorContext('search dashboards', () =>
     searchDashboardsForMetricContext(params, maxDashboards)
   );
-  const dashboards: ExtractedDashboardMetricUsage[] = [];
 
   for (const item of searchResults.slice(0, maxDashboards)) {
     throwIfAborted(signal);
@@ -365,7 +384,7 @@ async function buildDashboardMetricUsageSearch({
             uid: item.uid,
             datasourceUid: params.datasourceUid,
             allowedPrometheusDatasourceUids: toolConfig.allowedPrometheusDatasourceUids,
-            maxUsages: MAX_SEARCH_USAGES,
+            maxUsages: Number.MAX_SAFE_INTEGER,
           })
         )
       );
@@ -451,13 +470,14 @@ function metricUsageCorpus({
   dashboards: ExtractedDashboardMetricUsage[];
   params: DashboardMetricSearchParams;
 }) {
-  const maxUsages = clampInt(params.maxUsages ?? MAX_SEARCH_USAGES, 1, MAX_SEARCH_USAGES);
+  const maxUsages = clampInt(params.maxUsages ?? MAX_SEARCH_USAGES, 1, Number.MAX_SAFE_INTEGER);
   const usages = dashboards.flatMap((dashboard) => dashboard.usages);
   const limitedUsages = usages.slice(0, maxUsages);
   const seedMetrics = normalizeSeedMetrics([params.seedMetric, ...(params.seedMetrics ?? [])]);
-  const relations = summarizeMetricRelations(limitedUsages);
+  // Rankings cover every usage; only the printed usage list is limited.
+  const relations = summarizeMetricRelations(usages);
   const metrics = rankMetricSummaries({
-    summaries: summarizeMetricUsages(limitedUsages),
+    summaries: summarizeMetricUsages(usages),
     relations,
     seedMetrics,
     query: params.query,
@@ -937,9 +957,9 @@ function summarizeMetricRelations(usages: DashboardMetricUsage[]): MetricRelatio
     }
   }
 
-  return [...relations.values()]
-    .sort((left, right) => right.score - left.score || left.source.localeCompare(right.source))
-    .slice(0, MAX_RESULT_RELATIONS);
+  return [...relations.values()].sort(
+    (left, right) => right.score - left.score || left.source.localeCompare(right.source)
+  );
 }
 
 function rankMetricSummaries({

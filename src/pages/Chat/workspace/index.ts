@@ -3,7 +3,13 @@ import type { DashboardMutationAPI } from '@grafana/data';
 import type { GrafanaSkill } from '../skills/types';
 import type { ArtifactRuntime } from '../domain/artifacts';
 import type { WorkspaceApprovalService, WorkspaceBroker } from './broker';
-import { createArtifactsMount, createCatalogMount, createJsonnetLibraryMount, createSkillsMount } from './mounts';
+import {
+  createArtifactsMount,
+  createDashboardCatalog,
+  createJsonnetLibraryMount,
+  createSkillsMount,
+  type DashboardCatalog,
+} from './mounts';
 import { createPythonCommands, type PythonRunner } from './python/pythonCommand';
 import { renderWorkspacePromptSection } from './prompt';
 import { runWorkspaceBash, type WorkspaceBashResult, type WorkspaceShellDeps } from './shell';
@@ -20,7 +26,8 @@ export type { WorkspaceApprovalRequest, WorkspaceApprovalService, WorkspaceBroke
 
 export type SessionWorkspaceToolkitOptions = {
   workspace: SessionWorkspace;
-  catalogMount?: GeneratedMount;
+  /** Shared across toolkits of one session so the dashboard listing stays cached. */
+  catalog?: DashboardCatalog;
   context?: Record<string, unknown>;
   broker: WorkspaceBroker;
   approvals?: WorkspaceApprovalService;
@@ -80,9 +87,11 @@ export function createSessionWorkspaceToolkit(options: SessionWorkspaceToolkitOp
     mounts.push(createArtifactsMount(options.artifacts));
   }
   if (broker.dashboards) {
-    mounts.push(options.catalogMount ?? createCatalogMount(broker.dashboards));
+    const catalog = options.catalog ?? createDashboardCatalog(broker.dashboards);
+    mounts.push(catalog.mount);
     const dashboards = broker.dashboards;
     workspace.setHydrator((_kind, uid, signal) => dashboards.get(uid, signal));
+    workspace.setResourceIndex(catalog.index);
   }
   if (broker.jsonnet) {
     mounts.push(createJsonnetLibraryMount(broker.jsonnet));

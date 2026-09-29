@@ -29,7 +29,8 @@ it('keeps catalog caches, artifacts, and pending approvals across view/toolkit c
     title: 'Save',
     summary: 'One',
     operations: [],
-    diff: 'complete',
+    groups: [],
+    ungroupedChanges: 0,
   };
   const pending = session.approvals.request(request);
   const listener = jest.fn();
@@ -41,11 +42,31 @@ it('keeps catalog caches, artifacts, and pending approvals across view/toolkit c
   expect(session.approvals.getSnapshot()).toBeUndefined();
 });
 
+it('passes the dashboards the reviewer kept', async () => {
+  const session = new AssistantSession();
+  const pending = session.approvals.request({
+    applyId: 'apply-1',
+    digest: '',
+    title: '',
+    summary: '',
+    operations: [],
+    groups: [],
+    ungroupedChanges: 0,
+  });
+  session.approvals.settle(true, ['/grafana/dashboards/a/dashboard.json']);
+  await expect(pending).resolves.toEqual({
+    approved: true,
+    reason: undefined,
+    paths: ['/grafana/dashboards/a/dashboard.json'],
+  });
+  expect(session.approvals.getSnapshot()).toBeUndefined();
+});
+
 it('does not retain an approval after cancellation', async () => {
   const session = new AssistantSession();
   const controller = new AbortController();
   const pending = session.approvals.request(
-    { applyId: 'apply-1', digest: '', title: '', summary: '', operations: [], diff: '' },
+    { applyId: 'apply-1', digest: '', title: '', summary: '', operations: [], groups: [], ungroupedChanges: 0 },
     controller.signal
   );
   controller.abort();

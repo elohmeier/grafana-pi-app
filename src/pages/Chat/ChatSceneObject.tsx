@@ -33,6 +33,7 @@ import { getBackendSrv, locationService, usePluginUserStorage } from '@grafana/r
 import { useRestrictedGrafanaApis, type DashboardMutationAPI, type GrafanaTheme2 } from '@grafana/data';
 import { PLUGIN_BASE_URL, PLUGIN_ID } from '../../constants';
 import { testIds } from '../../components/testIds';
+import { ChangeSetReviewModal } from './ChangeSetReview';
 import { usePluginMeta } from '../../utils/utils.plugin';
 import type { Artifact } from './domain';
 import { formatAssistantError, type AssistantErrorView } from './llmErrors';
@@ -122,18 +123,6 @@ type StoredSession = SessionIndexItem & {
 
 type ToolRunState = Record<string, ToolRunView>;
 
-type ToolConfirmationView = {
-  id: string;
-  toolCallId: string;
-  toolName: string;
-  title: string;
-  description: string;
-  fields: Array<{ label: string; value: string }>;
-  args: unknown;
-  /** Unified diff of the exact change being approved. */
-  diff?: string;
-};
-
 type ChatLeaveGuardAction = {
   title: string;
   description: string;
@@ -146,8 +135,6 @@ type ChatAppVariant = 'page' | 'sidebar';
 const CHAT_SESSION_EXPORT_KIND = 'g42-pi-app.chat-session';
 const LEGACY_CHAT_SESSION_EXPORT_KINDS = ['grafana-pi-app.chat-session'];
 const CHAT_SESSION_EXPORT_SCHEMA_VERSION = 1;
-const WORKSPACE_APPLY_APPROVAL = 'workspace_apply';
-const PERSISTENT_WRITE_TOOLS = new Set([WORKSPACE_APPLY_APPROVAL]);
 const ACTIVE_CHAT_LEAVE_MESSAGE =
   'The assistant is still working. Leaving now will stop the run and discard any partial response.';
 const DRAFT_CHAT_LEAVE_MESSAGE = 'The current draft message will be discarded.';
@@ -340,9 +327,7 @@ export function ChatApp({
   const { revision, flushRevision, scheduleRevision } = useFrameRevision();
   const [input, setInput] = useState('');
   const pendingApproval = useSyncExternalStore(session.approvals.subscribe, session.approvals.getSnapshot);
-  const pendingToolConfirmation = pendingApproval
-    ? buildToolConfirmation(pendingApproval.applyId, WORKSPACE_APPLY_APPROVAL, pendingApproval)
-    : undefined;
+  const pendingToolConfirmation = pendingApproval ? { toolName: 'workspace apply' } : undefined;
   const [sessions, setSessions] = useState<SessionIndexItem[]>([]);
   const [nextSessionCursor, setNextSessionCursor] = useState<string>();
   const [sessionsLoading, setSessionsLoading] = useState(true);
@@ -384,7 +369,10 @@ export function ChatApp({
     });
   }, []);
 
-  const settleToolConfirmation = useCallback((approved: boolean) => sessionRef.current.approvals.settle(approved), []);
+  const settleToolConfirmation = useCallback(
+    (approved: boolean, paths?: string[]) => sessionRef.current.approvals.settle(approved, paths),
+    []
+  );
 
   const workspaceBroker = useMemo(() => createGrafanaWorkspaceBroker(jsonData), [jsonData]);
   const pythonRunner = useMemo(() => createBrowserPythonRunner(), []);
@@ -1640,9 +1628,9 @@ export function ChatApp({
       className={cx(styles.container, isSidebarVariant && styles.containerSidebar)}
       data-testid={testIds.chat.container}
     >
-      <ToolConfirmationModal
-        confirmation={pendingToolConfirmation}
-        onApprove={() => settleToolConfirmation(true)}
+      <ChangeSetReviewModal
+        request={pendingApproval}
+        onApprove={(paths) => settleToolConfirmation(true, paths)}
         onDeny={() => settleToolConfirmation(false)}
       />
       <ChatLeaveGuardModal action={leaveGuardAction} onCancel={cancelLeaveGuard} onConfirm={confirmLeaveGuard} />
@@ -2022,80 +2010,6 @@ export function ChatApp({
   );
 }
 
-function ToolConfirmationModal({
-  confirmation,
-  onApprove,
-  onDeny,
-}: {
-  confirmation?: ToolConfirmationView;
-  onApprove: () => void;
-  onDeny: () => void;
-}) {
-  const styles = useStyles2(getStyles);
-  const args = useMemo(() => formatConfirmationArgs(confirmation?.args), [confirmation?.args]);
-
-  return (
-    <Modal
-      title={confirmation?.title ?? 'Approve Grafana write'}
-      isOpen={Boolean(confirmation)}
-      closeOnEscape
-      onDismiss={onDeny}
-      className={styles.toolConfirmationModal}
-      contentClassName={styles.toolConfirmationModalContent}
-    >
-      {confirmation && (
-        <div className={styles.toolConfirmation} data-testid={testIds.chat.toolConfirmation}>
-          <Alert severity="warning" title="Persistent Grafana write">
-            {confirmation.description}
-          </Alert>
-          <dl className={styles.toolConfirmationFields}>
-            <div className={styles.toolConfirmationField}>
-              <dt>Tool</dt>
-              <dd>{confirmation.toolName}</dd>
-            </div>
-            {confirmation.fields.map((field) => (
-              <div className={styles.toolConfirmationField} key={`${field.label}:${field.value}`}>
-                <dt>{field.label}</dt>
-                <dd>{field.value}</dd>
-              </div>
-            ))}
-          </dl>
-          {confirmation.diff && (
-            <details className={styles.toolConfirmationDetails} open data-testid="workspace-apply-diff">
-              <summary>Changes</summary>
-              <pre>{confirmation.diff}</pre>
-            </details>
-          )}
-          <details className={styles.toolConfirmationDetails}>
-            <summary>Tool arguments</summary>
-            <pre>{args}</pre>
-          </details>
-          <div className={styles.toolConfirmationActions}>
-            <Button
-              data-testid={testIds.chat.toolConfirmationDeny}
-              icon="times"
-              type="button"
-              variant="secondary"
-              onClick={onDeny}
-            >
-              Deny
-            </Button>
-            <Button
-              data-testid={testIds.chat.toolConfirmationApprove}
-              icon="check"
-              type="button"
-              variant="primary"
-              onClick={onApprove}
-            >
-              Approve
-            </Button>
-          </div>
-        </div>
-      )}
-    </Modal>
-  );
-}
-
 function ChatLeaveGuardModal({
   action,
   onCancel,
@@ -2392,46 +2306,6 @@ function AssistantErrorNotice({ error }: { error: AssistantErrorView }) {
   );
 }
 
-function buildToolConfirmation(toolCallId: string, toolName: string, args: unknown): ToolConfirmationView | undefined {
-  if (!PERSISTENT_WRITE_TOOLS.has(toolName)) {
-    return undefined;
-  }
-
-  const record = isRecord(args) ? args : {};
-  const id = `confirm-${toolCallId || toolName}-${Date.now()}`;
-
-  if (toolName === WORKSPACE_APPLY_APPROVAL) {
-    const operations = Array.isArray(record.operations) ? record.operations.filter(isRecord) : [];
-    return {
-      id,
-      toolCallId,
-      toolName: 'workspace apply',
-      title: stringValue(record.title) ?? 'Approve dashboard changes',
-      description:
-        'The assistant wants to write these staged workspace changes to Grafana as you. Each change is applied only if the dashboard has not changed since it was fetched. Approve only if the diff matches what you asked for.',
-      fields: compactConfirmationFields([
-        confirmationField('Apply', stringValue(record.applyId)),
-        confirmationField(
-          'Changes',
-          operations
-            .map(
-              (operation) =>
-                `${stringValue(operation.operation) ?? '?'} ${stringValue(operation.uid) ?? '?'}${
-                  stringValue(operation.title) ? ` (${stringValue(operation.title)})` : ''
-                }`
-            )
-            .join('; ')
-        ),
-        confirmationField('Digest', stringValue(record.digest)?.slice(0, 16)),
-      ]),
-      args: { applyId: record.applyId, digest: record.digest, operations },
-      diff: stringValue(record.diff),
-    };
-  }
-
-  return undefined;
-}
-
 function hasActiveDashboardMutationCommands(dashboardMutationAPI: DashboardMutationAPI | undefined) {
   if (!dashboardMutationAPI) {
     return false;
@@ -2453,29 +2327,6 @@ function isAssistantPluginRoute(route: string) {
   } catch {
     const pathname = route.split(/[?#]/, 1)[0] || route;
     return pathname === PLUGIN_BASE_URL || pathname.startsWith(`${PLUGIN_BASE_URL}/`);
-  }
-}
-
-function confirmationField(label: string, value: unknown) {
-  if (value === undefined || value === null || value === '') {
-    return undefined;
-  }
-  return { label, value: String(value) };
-}
-
-function compactConfirmationFields(fields: Array<{ label: string; value: string } | undefined>) {
-  return fields.filter((field): field is { label: string; value: string } => Boolean(field));
-}
-
-function stringValue(value: unknown) {
-  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
-}
-
-function formatConfirmationArgs(value: unknown) {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
   }
 }
 
@@ -3731,73 +3582,6 @@ const getStyles = (theme: GrafanaTheme2) => ({
   }),
   composerActionsSidebar: css({
     flexWrap: 'nowrap',
-  }),
-  toolConfirmationModal: css({
-    width: 'min(620px, calc(100vw - 32px))',
-  }),
-  toolConfirmationModalContent: css({
-    minHeight: 260,
-  }),
-  toolConfirmation: css({
-    display: 'grid',
-    gap: theme.spacing(2),
-  }),
-  toolConfirmationFields: css({
-    display: 'grid',
-    gap: theme.spacing(1),
-    margin: 0,
-  }),
-  toolConfirmationField: css({
-    display: 'grid',
-    gridTemplateColumns: '140px minmax(0, 1fr)',
-    gap: theme.spacing(1),
-    alignItems: 'start',
-    '& dt': {
-      color: theme.colors.text.secondary,
-      fontSize: theme.typography.bodySmall.fontSize,
-    },
-    '& dd': {
-      margin: 0,
-      overflowWrap: 'anywhere',
-    },
-    '@media (max-width: 520px)': {
-      gridTemplateColumns: '1fr',
-      gap: theme.spacing(0.25),
-    },
-  }),
-  toolConfirmationFolder: css({
-    display: 'grid',
-    gap: theme.spacing(0.75),
-    '& label': {
-      color: theme.colors.text.secondary,
-      fontSize: theme.typography.bodySmall.fontSize,
-      fontWeight: theme.typography.fontWeightMedium,
-    },
-  }),
-  toolConfirmationDetails: css({
-    '& summary': {
-      cursor: 'pointer',
-      fontWeight: theme.typography.fontWeightMedium,
-    },
-    '& pre': {
-      maxHeight: 220,
-      overflow: 'auto',
-      margin: `${theme.spacing(1)} 0 0`,
-      padding: theme.spacing(1),
-      border: `1px solid ${theme.colors.border.weak}`,
-      borderRadius: theme.shape.radius.default,
-      background: theme.colors.background.secondary,
-      color: theme.colors.text.secondary,
-      fontSize: theme.typography.bodySmall.fontSize,
-      whiteSpace: 'pre-wrap',
-      overflowWrap: 'anywhere',
-    },
-  }),
-  toolConfirmationActions: css({
-    display: 'flex',
-    justifyContent: 'flex-end',
-    gap: theme.spacing(1),
-    flexWrap: 'wrap',
   }),
   leaveGuardModal: css({
     width: 'min(500px, calc(100vw - 32px))',

@@ -116,7 +116,16 @@ export async function runWorkspaceBash(
   signal?.addEventListener('abort', forwardAbort, { once: true });
 
   await deps.workspace.prepareMounts(controller.signal);
-  const tx = deps.workspace.begin({ signal: controller.signal });
+  // Fetching dashboards is not execution time: scanning every dashboard must not time out a command.
+  const remoteWait = async <T>(pending: Promise<T>) => {
+    deadline.pause();
+    try {
+      return await pending;
+    } finally {
+      deadline.resume();
+    }
+  };
+  const tx = deps.workspace.begin({ signal: controller.signal, remoteWait });
   try {
     const fs = new WorkspaceBashFs(tx);
     if (!(await fs.exists(cwd))) {
@@ -128,6 +137,7 @@ export async function runWorkspaceBash(
     const extras = deps.extraCommands ?? [];
     const host: ShellHost = {
       fs,
+      pathsKey: () => tx.pathsKey(),
       async command(call) {
         if (controller.signal.aborted) {
           throw new Error('Shell cancelled');

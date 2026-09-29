@@ -306,6 +306,35 @@ function createDashboardBroker(toolConfig: GrafanaToolConfig): DashboardBroker {
       );
       return response.ok ? { outcome: 'applied' } : writeFailure(response);
     },
+    async version(uid, resourceVersion, apiVersion, signal) {
+      const version = apiVersionPath(apiVersion) ?? (await preferredVersion());
+      let continueToken: string | undefined;
+      do {
+        const params = new URLSearchParams({
+          labelSelector: 'grafana.app/get-history=true',
+          fieldSelector: `metadata.name=${uid}`,
+          limit: '100',
+        });
+        if (continueToken) {
+          params.set('continue', continueToken);
+        }
+        const response = await request<{ items?: K8sResource[]; metadata?: { continue?: string } }>(
+          'GET',
+          `${collection(version)}?${params}`,
+          undefined,
+          signal
+        );
+        if (!response.ok) {
+          throw new Error(response.message);
+        }
+        const match = response.data.items?.find((item) => item.metadata?.resourceVersion === resourceVersion);
+        if (match) {
+          return toSnapshot(match);
+        }
+        continueToken = response.data.metadata?.continue || undefined;
+      } while (continueToken);
+      return undefined;
+    },
     async folderExists(uid, signal) {
       const response = await request<unknown>('GET', `/api/folders/${encodeURIComponent(uid)}`, undefined, signal);
       return response.ok;

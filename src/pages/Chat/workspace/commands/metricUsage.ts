@@ -51,29 +51,34 @@ export const grafanaUsageCommand: WorkspaceCommandSpec = {
     },
     search: {
       summary:
-        'Search visible dashboards (Grafana search, bounded) and rank the metrics their panels use, optionally around seed metrics.',
-      usage: 'grafana-usage search [QUERY] [--tag TAG] [--seed METRIC]... [--ds UID] [--max-dashboards N] [--limit N]',
+        'Rank the metrics the panels of visible dashboards use (every dashboard, or those matching a title search or tag), optionally around seed metrics.',
+      usage: 'grafana-usage search [QUERY] [--tag TAG] [--seed METRIC]... [--ds UID] [--limit N]',
       effect: 'remote-read',
       options: {
         tag: { type: 'string', description: 'Dashboard tag filter.' },
         seed: { type: 'string[]', description: 'Rank related usage around this metric (repeatable).' },
         ds: { type: 'string', description: 'Only queries of this Prometheus datasource UID.' },
-        'max-dashboards': { type: 'number', description: 'Dashboards to inspect, 1-30.', default: 30 },
-        limit: { type: 'number', description: 'Maximum usage records, 1-160.', default: 160 },
+        limit: {
+          type: 'number',
+          description: 'Usage records to print (the full result is an artifact).',
+          default: 160,
+        },
       },
       examples: [
         "grafana-usage search checkout | jq -r '.metrics[].metric'",
         "grafana-usage search --seed http_requests_total | jq '.metrics[:10][] | {metric, score, reasons}'",
       ],
       async run(parsed, ctx) {
+        const query = parsed.positionals.join(' ').trim() || undefined;
+        const tag = stringOption(parsed, 'tag');
         const result = await requireUsage(ctx).search(
           {
-            query: parsed.positionals.join(' ').trim() || undefined,
-            tag: stringOption(parsed, 'tag'),
+            dashboards: await loadDashboards(ctx, { query, tag }),
+            query,
+            tag,
             seedMetrics: listOption(parsed, 'seed'),
             datasourceUid: stringOption(parsed, 'ds'),
-            maxDashboards: numberOption(parsed, 'max-dashboards', 30, 1, 30),
-            maxUsages: numberOption(parsed, 'limit', 160, 1, 160),
+            maxUsages: numberOption(parsed, 'limit', 160, 1, Number.MAX_SAFE_INTEGER),
           },
           ctx.signal
         );
@@ -90,8 +95,7 @@ export const grafanaUsageCommand: WorkspaceCommandSpec = {
         query: { type: 'string', description: 'Dashboard title search text.' },
         tag: { type: 'string', description: 'Dashboard tag filter.' },
         ds: { type: 'string', description: 'Only queries of this Prometheus datasource UID.' },
-        'max-dashboards': { type: 'number', description: 'Dashboards to inspect, 1-30.', default: 30 },
-        limit: { type: 'number', description: 'Maximum related metrics, 1-60.', default: 60 },
+        limit: { type: 'number', description: 'Related metrics to print.', default: 60 },
       },
       examples: [
         'grafana-usage related http_requests_total | jq -r \'.neighbors[] | "\\(.metric)\\t\\(.reasons | join("; "))"\'',
@@ -101,15 +105,16 @@ export const grafanaUsageCommand: WorkspaceCommandSpec = {
           throw new UsageError('at least one METRIC is required');
         }
         const dashboard = stringOption(parsed, 'dashboard');
+        const query = stringOption(parsed, 'query');
+        const tag = stringOption(parsed, 'tag');
         const result = await requireUsage(ctx).neighborhood(
           {
             metrics: parsed.positionals,
-            dashboardUid: dashboard ? dashboardUid(dashboard) : undefined,
-            query: stringOption(parsed, 'query'),
-            tag: stringOption(parsed, 'tag'),
+            dashboards: await loadDashboards(ctx, { query, tag, uid: dashboard ? dashboardUid(dashboard) : undefined }),
+            query,
+            tag,
             datasourceUid: stringOption(parsed, 'ds'),
-            maxDashboards: numberOption(parsed, 'max-dashboards', 30, 1, 30),
-            maxResults: numberOption(parsed, 'limit', 60, 1, 60),
+            maxResults: numberOption(parsed, 'limit', 60, 1, Number.MAX_SAFE_INTEGER),
           },
           ctx.signal
         );
@@ -118,6 +123,49 @@ export const grafanaUsageCommand: WorkspaceCommandSpec = {
     },
   },
 };
+
+/**
+ * Working copies (unsaved edits included) of every visible dashboard, of those
+ * matching a title search or tag, or of one dashboard. Loaded in parallel.
+ */
+async function loadDashboards(ctx: WorkspaceCommandContext, filter: { query?: string; tag?: string; uid?: string }) {
+  let uids: readonly string[];
+  if (filter.uid) {
+    uids = [filter.uid];
+  } else if (filter.query || filter.tag) {
+    const dashboards = ctx.broker.dashboards;
+    if (!dashboards) {
+      throw new Error('dashboard access is not available in this session');
+    }
+    const found: string[] = [];
+    for (let page = 1; ; page++) {
+      const result = await dashboards.search(
+        { query: filter.query, tags: filter.tag ? [filter.tag] : undefined, limit: 1000, page },
+        ctx.signal
+      );
+      found.push(...result.hits.map((hit) => hit.uid));
+      if (!result.hasMore || result.hits.length === 0) {
+        break;
+      }
+    }
+    uids = found;
+  } else {
+    uids = ctx.workspace.indexedUids();
+  }
+  await ctx.workspace.prefetch(uids, ctx.signal);
+  const loaded: Array<{ uid: string; resource: Record<string, any>; meta?: Record<string, any> }> = [];
+  for (const uid of uids) {
+    try {
+      const resource = JSON.parse(await ctx.tx.readFile(`${DASHBOARDS_ROOT}/${uid}/dashboard.json`));
+      const meta = ctx.workspace.getResource(uid)?.base?.meta;
+      const listing = ctx.workspace.describeIndexed(uid);
+      loaded.push({ uid, resource, meta: { title: meta?.title, url: meta?.url, folderTitle: listing?.folderTitle } });
+    } catch {
+      // Unreadable or invalid dashboards are left out of the usage corpus.
+    }
+  }
+  return loaded;
+}
 
 /** Prints the result and keeps it as an artifact, so a truncated stdout can be re-read with jq. */
 function withArtifact(ctx: WorkspaceCommandContext, title: string, toolName: string, result: unknown): CommandResult {

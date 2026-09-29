@@ -1,11 +1,10 @@
 import type { ArtifactRuntime } from '../domain/artifacts';
 import { SKILLS_ROOT } from '../skills/prompt';
 import type { GrafanaSkill } from '../skills/types';
-import type { DashboardBroker, JsonnetBroker } from './broker';
-import type { GeneratedFile, GeneratedMount } from './types';
+import type { DashboardBroker, DashboardSearchHit, JsonnetBroker } from './broker';
+import type { GeneratedFile, GeneratedMount, ResourceIndex } from './types';
 
 const CATALOG_PAGE_SIZE = 1000;
-const CATALOG_MAX_DASHBOARDS = 5000;
 const CATALOG_TTL_MS = 5 * 60 * 1000;
 
 export function createSkillsMount(skills: readonly GrafanaSkill[]): GeneratedMount {
@@ -62,37 +61,44 @@ export function createArtifactsMount(artifacts: ArtifactRuntime): GeneratedMount
   };
 }
 
+export type DashboardCatalog = { mount: GeneratedMount; index: ResourceIndex };
+
 /**
- * Paginated metadata-only discovery snapshot of dashboards visible to the
- * current user. Loaded lazily on first read and cached briefly.
+ * Metadata-only listing of every dashboard visible to the current user, cached
+ * briefly. It backs /grafana/catalog and the index that lists
+ * /grafana/dashboards/<uid>/ before any dashboard content is fetched.
  */
-export function createCatalogMount(dashboards: DashboardBroker): GeneratedMount {
-  let cache: { at: number; promise: Promise<{ ndjson: string; coverage: string }> } | undefined;
+export function createDashboardCatalog(dashboards: DashboardBroker): DashboardCatalog {
+  type Loaded = { uids: string[]; hits: Map<string, DashboardSearchHit>; ndjson: string; coverage: string };
+  let cache: { at: number; promise: Promise<Loaded> } | undefined;
+  let loaded: Loaded | undefined;
   const load = (signal?: AbortSignal) => {
     if (!cache || Date.now() - cache.at > CATALOG_TTL_MS) {
-      const promise = (async () => {
-        const lines: string[] = [];
+      const promise = (async (): Promise<Loaded> => {
+        const hits: DashboardSearchHit[] = [];
         let page = 1;
         let hasMore = true;
-        while (hasMore && lines.length < CATALOG_MAX_DASHBOARDS) {
+        while (hasMore) {
           const result = await dashboards.search({ limit: CATALOG_PAGE_SIZE, page }, signal);
-          for (const hit of result.hits) {
-            lines.push(JSON.stringify({ ...hit, path: `/grafana/dashboards/${hit.uid}/dashboard.json` }));
-          }
-          hasMore = result.hasMore;
+          hits.push(...result.hits);
+          hasMore = result.hasMore && result.hits.length > 0;
           page++;
         }
-        const complete = !hasMore;
+        const lines = hits.map((hit) =>
+          JSON.stringify({ ...hit, path: `/grafana/dashboards/${hit.uid}/dashboard.json` })
+        );
         return {
-          ndjson: lines.length ? `${lines.slice(0, CATALOG_MAX_DASHBOARDS).join('\n')}\n` : '',
+          uids: [...new Set(hits.map((hit) => hit.uid))],
+          hits: new Map(hits.map((hit) => [hit.uid, hit])),
+          ndjson: lines.length ? `${lines.join('\n')}\n` : '',
           coverage: `${JSON.stringify(
             {
               schemaVersion: 1,
-              dashboards: Math.min(lines.length, CATALOG_MAX_DASHBOARDS),
-              complete,
-              limit: CATALOG_MAX_DASHBOARDS,
+              dashboards: hits.length,
+              complete: true,
               generatedAt: new Date().toISOString(),
-              scope: 'dashboard metadata visible to the current user; content is fetched on first read',
+              scope:
+                'dashboard metadata visible to the current user; every dashboard is listed under /grafana/dashboards and its content is fetched on first read',
             },
             null,
             2
@@ -100,21 +106,37 @@ export function createCatalogMount(dashboards: DashboardBroker): GeneratedMount 
         };
       })();
       cache = { at: Date.now(), promise };
-      promise.catch(() => {
-        cache = undefined;
-      });
+      promise.then(
+        (result) => {
+          loaded = result;
+        },
+        () => {
+          cache = undefined;
+        }
+      );
     }
     return cache.promise;
   };
   return {
-    root: '/grafana/catalog',
-    description: 'Paginated dashboard discovery snapshot (metadata only).',
-    files: () => ({
-      '/grafana/catalog/dashboards.ndjson': { load: async (signal) => (await load(signal)).ndjson },
-      '/grafana/catalog/coverage.json': { load: async (signal) => (await load(signal)).coverage },
-    }),
+    mount: {
+      root: '/grafana/catalog',
+      description: 'Dashboard discovery snapshot (metadata only).',
+      files: () => ({
+        '/grafana/catalog/dashboards.ndjson': { load: async (signal) => (await load(signal)).ndjson },
+        '/grafana/catalog/coverage.json': { load: async (signal) => (await load(signal)).coverage },
+      }),
+    },
+    index: {
+      prepare: async (signal) => {
+        await load(signal);
+      },
+      uids: () => loaded?.uids ?? EMPTY_UIDS,
+      describe: (uid) => loaded?.hits.get(uid),
+    },
   };
 }
+
+const EMPTY_UIDS: readonly string[] = [];
 
 function ensureTrailingNewline(value: string) {
   return value.endsWith('\n') ? value : `${value}\n`;

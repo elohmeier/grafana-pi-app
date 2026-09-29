@@ -13,6 +13,16 @@ export function executeInWorker(input: ShellInput, host: ShellHost, signal: Abor
     const worker = new Worker(new URL('./shell.worker.ts', import.meta.url));
     let settled = false;
     const active = new Set<Promise<unknown>>();
+    // The worker keeps the last path list it received; send it again only when it may have changed.
+    let sentPathsKey: string | undefined;
+    const changedPaths = () => {
+      const key = host.pathsKey?.();
+      if (key !== undefined && key === sentPathsKey) {
+        return undefined;
+      }
+      sentPathsKey = key;
+      return host.fs.getAllPaths();
+    };
     const finish = (action: () => void) => {
       if (settled) {
         return;
@@ -61,7 +71,7 @@ export function executeInWorker(input: ShellInput, host: ShellHost, signal: Abor
           value = await method.apply(host.fs, data.args);
         }
         if (!settled) {
-          worker.postMessage({ type: 'reply', id: data.id, value, paths: host.fs.getAllPaths() });
+          worker.postMessage({ type: 'reply', id: data.id, value, paths: changedPaths() });
         }
       } catch (error) {
         if (!settled) {
@@ -72,11 +82,11 @@ export function executeInWorker(input: ShellInput, host: ShellHost, signal: Abor
               message: error instanceof Error ? error.message : String(error),
               code: error instanceof WorkspaceError ? error.code : undefined,
             },
-            paths: host.fs.getAllPaths(),
+            paths: changedPaths(),
           });
         }
       }
     };
-    worker.postMessage({ type: 'run', input, paths: host.fs.getAllPaths() });
+    worker.postMessage({ type: 'run', input, paths: changedPaths() });
   });
 }
