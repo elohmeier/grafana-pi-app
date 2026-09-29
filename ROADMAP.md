@@ -132,6 +132,13 @@ label-filter` replaces the dashboard-wide label filter tool for working
   write schema-correct panels, queries, units, and positions into classic or
   v2 files (working copies and the live file), so typed domain operations stay
   behind commands as planned.
+- **Conversion fallback is visible:** a dashboard Grafana cannot convert to
+  the preferred API version is edited in its stored version, and `meta.json`,
+  `grafana fetch`, and `grafana-dashboard inspect` report `conversion`
+  (preferred version and Grafana's error). Grafana reports only failed
+  conversions, not lossy successful ones.
+- **Service-account permissions trimmed:** `plugin.json` grants only
+  `users.permissions:read` for the backend's app-access check.
 - **User shell mode:** composer input starting with `!` runs in the chat's
   session shell without a model call. The result is stored as a `userShell`
   message, and the model receives it as user context on the next prompt.
@@ -146,20 +153,16 @@ Not yet implemented:
   extraction, M4).
 - Alert resources and commands (M5). Alerting remains typed and read-only.
 - Restricted MSSQL/log sources and the output policy (M6).
-- Reporting of v2 conversion loss. Dashboards that fail conversion are
-  edited in their stored version, but the loss is not reported.
 - Server-side approval binding. Approval is still a UI callback in the
   browser, bound to the plan digest but not to the actor or an expiry. The
   datasource allow-list and dashboard validation also run only in the
   frontend.
-- Owner decision: `plugin.json` still declares the service-account
-  dashboard/folder permissions, which are now unused.
 - Compaction visibility and quality: there is no UI notice when history is
   summarized, and no benchmark for summary fidelity over long sessions.
 
 Suggested next steps, in order: server-side enforcement of the datasource
 allow-list and plan approval (bind approval to actor, digest, and expiry);
-drop the unused service-account permissions; a compaction fidelity
+a compaction fidelity
 benchmark and UI notice; bash worker isolation; `show_evidence`; then the
 session controller extraction and server host (M1/M4).
 

@@ -6,8 +6,11 @@ export type WorkspaceResourceMeta = {
   uid: string;
   /** API version of the editable document, for example dashboard.grafana.app/v1. */
   apiVersion: string;
-  /** Version Grafana stored the resource in, when it differs from apiVersion. */
-  storedVersion?: string;
+  /**
+   * Set when Grafana could not convert the resource to the preferred API version. The document
+   * is then the stored version (apiVersion), which round-trips without loss.
+   */
+  conversion?: { preferredVersion: string; error?: string };
   namespace?: string;
   resourceVersion?: string;
   generation?: number;

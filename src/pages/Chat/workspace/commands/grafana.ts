@@ -102,6 +102,7 @@ export const grafanaCommand: WorkspaceCommandSpec = {
             apiVersion: entry.base?.meta.apiVersion,
             resourceVersion: entry.base?.meta.resourceVersion,
             managedBy: entry.base?.meta.managedBy,
+            conversion: entry.base?.meta.conversion,
             localChanges: Boolean(entry.overlay),
           };
         });

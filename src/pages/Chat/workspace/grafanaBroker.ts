@@ -26,7 +26,7 @@ import type {
 import { DASHBOARD_API_GROUP } from './dashboardModel';
 import { sha256Hex } from './hash';
 import type { PromqlParser } from './promqlCheck';
-import type { WorkspaceResourceSnapshot } from './types';
+import type { WorkspaceResourceMeta, WorkspaceResourceSnapshot } from './types';
 
 const FOLDER_ANNOTATION = 'grafana.app/folder';
 const MANAGED_BY_ANNOTATION = 'grafana.app/managedBy';
@@ -157,7 +157,7 @@ function createDashboardBroker(toolConfig: GrafanaToolConfig): DashboardBroker {
 
   const get = async (uid: string, signal?: AbortSignal): Promise<WorkspaceResourceSnapshot | undefined> => {
     const version = await preferredVersion();
-    let response = await request<K8sResource>(
+    const response = await request<K8sResource>(
       'GET',
       `${collection(version)}/${encodeURIComponent(uid)}`,
       undefined,
@@ -173,15 +173,16 @@ function createDashboardBroker(toolConfig: GrafanaToolConfig): DashboardBroker {
     if (conversion?.failed && conversion.storedVersion && conversion.storedVersion !== version) {
       // The dashboard cannot be represented losslessly in the preferred version;
       // edit it in the version Grafana stored it in instead of flattening it.
-      response = await request<K8sResource>(
+      const fallback = await request<K8sResource>(
         'GET',
         `${collection(conversion.storedVersion)}/${encodeURIComponent(uid)}`,
         undefined,
         signal
       );
-      if (!response.ok) {
-        throw new Error(response.message);
+      if (!fallback.ok) {
+        throw new Error(fallback.message);
       }
+      return toSnapshot(fallback.data, { preferredVersion: version, error: conversion.error || undefined });
     }
     return toSnapshot(response.data);
   };
@@ -359,7 +360,10 @@ async function discoverDashboardVersion() {
   return version;
 }
 
-function toSnapshot(resource: K8sResource): WorkspaceResourceSnapshot {
+function toSnapshot(
+  resource: K8sResource,
+  conversion?: WorkspaceResourceMeta['conversion']
+): WorkspaceResourceSnapshot {
   const metadata = resource.metadata ?? {};
   const annotations = metadata.annotations ?? {};
   const uid = String(metadata.name ?? '');
@@ -395,6 +399,7 @@ function toSnapshot(resource: K8sResource): WorkspaceResourceSnapshot {
       annotations,
       labels: metadata.labels,
       contentHash: sha256Hex(content),
+      ...(conversion ? { conversion } : {}),
     },
   };
 }

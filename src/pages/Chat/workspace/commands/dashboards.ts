@@ -89,6 +89,7 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
                   url: meta.url,
                   resourceVersion: meta.resourceVersion,
                   ...(meta.managedBy ? { managedBy: meta.managedBy } : {}),
+                  ...(meta.conversion ? { conversion: meta.conversion } : {}),
                   fetchedAt: meta.fetchedAt,
                 },
               }
