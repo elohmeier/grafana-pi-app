@@ -6,8 +6,12 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
  * request:
  *
  * 1. Under budget: send the transcript unchanged (after any earlier summary).
- * 2. Over the trigger: elide large tool outputs outside the recent window.
- * 3. Still over: summarize older turns into a rolling summary, cut only at
+ * 2. Over the trigger: elide large tool outputs outside the recent window, then,
+ *    if needed, every tool output except the latest step's. Elided output can be
+ *    read or run again; a summary loses detail for good, so it comes last.
+ * 3. Output of the latest step that alone does not fit is clipped, with a note
+ *    to read it in parts; summarizing older turns cannot make room for it.
+ * 4. Still over: summarize older turns into a rolling summary, cut only at
  *    message boundaries that do not separate tool calls from their results.
  *
  * The summary is cached with the session and extended incrementally.
@@ -32,16 +36,21 @@ export type CompactionBudget = {
 };
 
 export type CompactionEvent = {
-  kind: 'elided' | 'summarized' | 'truncated';
+  /** `summarizing` is emitted before the summarizer model call, the others once the request context is shaped. */
+  kind: 'elided' | 'clipped' | 'summarizing' | 'summarized' | 'truncated';
   estimatedTokens: number;
   budgetTokens: number;
   coveredMessages?: number;
 };
 
-export type Summarizer = (
-  input: { previousSummary?: string; transcript: string },
-  signal?: AbortSignal
-) => Promise<string>;
+export type SummarizerInput = {
+  previousSummary?: string;
+  transcript: string;
+  /** Soft length limit, so the summary leaves room for the turns that follow it. */
+  targetTokens?: number;
+};
+
+export type Summarizer = (input: SummarizerInput, signal?: AbortSignal) => Promise<string>;
 
 export type ContextCompactorOptions = {
   getBudget: () => CompactionBudget;
@@ -58,6 +67,8 @@ export type ContextCompactorOptions = {
 const SAFETY_MARGIN_TOKENS = 2048;
 const ELIDE_TOOL_RESULT_CHARS = 1500;
 const SUMMARY_CHUNK_CHARS = 60_000;
+/** Output budget of one summarizer request. */
+export const SUMMARY_MAX_OUTPUT_TOKENS = 4096;
 const TRANSCRIPT_TOOL_ARGS_CHARS = 1500;
 const TRANSCRIPT_TOOL_RESULT_CHARS = 3000;
 const IMAGE_TOKENS = 1200;
@@ -94,24 +105,46 @@ export class ContextCompactor {
       return current;
     }
 
-    // Stage 1: elide bulky tool output outside the recent window.
+    // Stage 1: elide bulky tool output outside the recent window, then before the latest step.
     const recentStart = recentWindowStart(messages, covered, keepRecent);
-    const elided = this.view(
-      messages.map((message, index) => (index < recentStart ? elideToolResult(message) : message)),
-      covered,
-      this.state?.summary
-    );
-    const elidedTokens = estimateMessagesTokens(elided);
+    const elideBefore = (limit: number) =>
+      messages.map((message, index) => (index < limit ? elideToolResult(message) : message));
+    let elidedMessages = elideBefore(recentStart);
+    let elided = this.view(elidedMessages, covered, this.state?.summary);
+    let elidedTokens = estimateMessagesTokens(elided);
+    const stepStart = latestStepStart(messages);
+    if (elidedTokens > trigger && stepStart > recentStart) {
+      elidedMessages = elideBefore(stepStart);
+      elided = this.view(elidedMessages, covered, this.state?.summary);
+      elidedTokens = estimateMessagesTokens(elided);
+    }
     if (elidedTokens <= trigger) {
       this.options.onEvent?.({ kind: 'elided', estimatedTokens: elidedTokens, budgetTokens: budget });
       return elided;
     }
 
-    // Stage 2: summarize everything before a safe cut into the rolling summary.
+    // Stage 2: clip output of the latest step that is too large on its own.
+    const clipped = clipLatestResults(elided, trigger);
+    if (clipped && estimateMessagesTokens(clipped) <= trigger) {
+      this.options.onEvent?.({
+        kind: 'clipped',
+        estimatedTokens: estimateMessagesTokens(clipped),
+        budgetTokens: budget,
+      });
+      return clipped;
+    }
+
+    // Stage 3: summarize everything before a safe cut into the rolling summary.
     const cut = safeCutIndex(messages, Math.max(recentStart, covered + 1));
     if (cut > covered) {
+      this.options.onEvent?.({ kind: 'summarizing', estimatedTokens: elidedTokens, budgetTokens: budget });
       try {
-        const summary = await this.summarizeRange(messages.slice(covered, cut), this.state?.summary, budget, signal);
+        const summary = await this.summarizeRange(
+          messages.slice(covered, cut),
+          this.state?.summary,
+          summaryTargetTokens(budget),
+          signal
+        );
         this.setState({
           version: 1,
           summary,
@@ -120,11 +153,11 @@ export class ContextCompactor {
           compactedAt: new Date().toISOString(),
           compactions: (this.state?.compactions ?? 0) + 1,
         });
-        const view = this.view(
-          messages.map((message, index) => (index < recentStart ? elideToolResult(message) : message)),
-          cut,
-          summary
-        );
+        const summarized = this.view(elidedMessages, cut, summary);
+        const view =
+          estimateMessagesTokens(summarized) > budget
+            ? (clipLatestResults(summarized, budget) ?? summarized)
+            : summarized;
         const tokens = estimateMessagesTokens(view);
         this.options.onEvent?.({
           kind: 'summarized',
@@ -144,7 +177,7 @@ export class ContextCompactor {
       }
     }
 
-    const truncated = truncateToBudget(elided, budget);
+    const truncated = truncateToBudget(clipped ?? elided, budget);
     this.options.onEvent?.({
       kind: 'truncated',
       estimatedTokens: estimateMessagesTokens(truncated),
@@ -170,13 +203,15 @@ export class ContextCompactor {
   private async summarizeRange(
     range: AgentMessage[],
     previousSummary: string | undefined,
-    budget: number,
+    targetTokens: number,
     signal?: AbortSignal
   ) {
-    const chunkChars = Math.max(8000, Math.min(SUMMARY_CHUNK_CHARS, Math.floor(budget * 4 * 0.5)));
+    const chunkChars = summaryChunkChars(this.options.getBudget(), previousSummary);
     let summary = previousSummary;
     for (const chunk of transcriptChunks(range, chunkChars)) {
-      summary = (await this.options.summarize({ previousSummary: summary, transcript: chunk }, signal)).trim();
+      summary = (
+        await this.options.summarize({ previousSummary: summary, transcript: chunk, targetTokens }, signal)
+      ).trim();
       if (!summary) {
         throw new Error('summarizer returned an empty summary');
       }
@@ -188,6 +223,27 @@ export class ContextCompactor {
     this.state = state;
     this.options.onStateChange?.(state);
   }
+}
+
+/**
+ * Transcript characters per summarizer request. The summarizer sends its own short
+ * prompt, not the agent's system prompt and tools, so it can use most of the window.
+ */
+export function summaryChunkChars(budget: CompactionBudget, previousSummary = '') {
+  const inputTokens =
+    budget.contextWindow -
+    Math.min(SUMMARY_MAX_OUTPUT_TOKENS, budget.maxOutputTokens) -
+    estimateTextTokens(SUMMARIZER_SYSTEM_PROMPT + previousSummary) -
+    SAFETY_MARGIN_TOKENS;
+  return Math.max(8000, Math.min(SUMMARY_CHUNK_CHARS, Math.floor(inputTokens * 4 * 0.8)));
+}
+
+/**
+ * A quarter of the history budget: with the verbatim recent window, a summary
+ * of this size leaves room for several steps before the next compaction.
+ */
+export function summaryTargetTokens(historyBudgetTokens: number) {
+  return Math.min(SUMMARY_MAX_OUTPUT_TOKENS - 512, Math.max(400, Math.floor(historyBudgetTokens * 0.25)));
 }
 
 export function historyBudget(budget: CompactionBudget) {
@@ -248,29 +304,58 @@ function withSummary(summary: string, rest: AgentMessage[]): AgentMessage[] {
   ];
 }
 
-function elideToolResult(message: AgentMessage): AgentMessage {
+const OLDER_OUTPUT_NOTE = 'characters of older tool output omitted; rerun the command or read the file if needed';
+const CLIPPED_OUTPUT_NOTE =
+  'characters omitted to fit the context window; read the file in parts or filter the output (head, tail, jq, rg)';
+
+function elideToolResult(
+  message: AgentMessage,
+  maxChars = ELIDE_TOOL_RESULT_CHARS,
+  note = OLDER_OUTPUT_NOTE,
+  keepImages = false
+): AgentMessage {
   const record = message as unknown as { role?: string; content?: unknown };
   if (record.role !== 'toolResult' || !Array.isArray(record.content)) {
     return message;
   }
   let changed = false;
   const content = (record.content as Array<Record<string, unknown>>).map((block) => {
-    if (block.type === 'text' && typeof block.text === 'string' && block.text.length > ELIDE_TOOL_RESULT_CHARS) {
+    if (block.type === 'text' && typeof block.text === 'string' && block.text.length > maxChars) {
       changed = true;
-      const head = block.text.slice(0, Math.floor(ELIDE_TOOL_RESULT_CHARS * 0.7));
-      const tail = block.text.slice(-Math.floor(ELIDE_TOOL_RESULT_CHARS * 0.2));
+      const head = block.text.slice(0, Math.floor(maxChars * 0.7));
+      const tail = block.text.slice(-Math.floor(maxChars * 0.2));
       return {
         ...block,
-        text: `${head}\n[... ${block.text.length - head.length - tail.length} characters of older tool output omitted; rerun the command or read the file if needed ...]\n${tail}`,
+        text: `${head}\n[... ${block.text.length - head.length - tail.length} ${note} ...]\n${tail}`,
       };
     }
-    if (block.type === 'image') {
+    if (block.type === 'image' && !keepImages) {
       changed = true;
       return { type: 'text', text: '[older image omitted]' };
     }
     return block;
   });
   return changed ? ({ ...record, content } as unknown as AgentMessage) : message;
+}
+
+/**
+ * Clips the text output of the latest step so the view fits `targetTokens`,
+ * or returns undefined when the latest step has no output to clip.
+ */
+function clipLatestResults(view: AgentMessage[], targetTokens: number): AgentMessage[] | undefined {
+  const start = latestStepStart(view);
+  const isLatestResult = (message: AgentMessage, index: number) =>
+    index > start && (message as { role?: string }).role === 'toolResult';
+  const latest = view.filter(isLatestResult);
+  if (!latest.length) {
+    return undefined;
+  }
+  const others = estimateMessagesTokens(view) - estimateMessagesTokens(latest);
+  const perResultChars = Math.max(ELIDE_TOOL_RESULT_CHARS, Math.floor(((targetTokens - others) / latest.length) * 4));
+  const clipped = view.map((message, index) =>
+    isLatestResult(message, index) ? elideToolResult(message, perResultChars, CLIPPED_OUTPUT_NOTE, true) : message
+  );
+  return clipped.some((message, index) => message !== view[index]) ? clipped : undefined;
 }
 
 /** Index of the first message in the verbatim recent window. */
@@ -286,6 +371,16 @@ function recentWindowStart(messages: AgentMessage[], covered: number, keepRecent
     index--;
   }
   return index;
+}
+
+/** Index of the latest assistant message; the tool results after it are the step the model acts on next. */
+function latestStepStart(messages: AgentMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if ((messages[index] as { role?: string }).role === 'assistant') {
+      return index;
+    }
+  }
+  return 0;
 }
 
 /**
@@ -378,10 +473,13 @@ Write a dense, factual summary in markdown with these sections (omit empty ones)
 
 Rules: keep identifiers, paths, queries, and receipt IDs verbatim. Do not invent facts. Prefer bullet points. If a previous summary is given, merge it with the new transcript into one updated summary; do not drop still-relevant facts.`;
 
-export function buildSummarizerPrompt(input: { previousSummary?: string; transcript: string }) {
+export function buildSummarizerPrompt(input: SummarizerInput) {
   return [
     input.previousSummary ? `Previous summary:\n${input.previousSummary}` : '',
     `Transcript to fold into the summary:\n${input.transcript}`,
+    input.targetTokens
+      ? `Keep the updated summary under about ${Math.round(input.targetTokens * 0.75)} words. When it would be longer, shorten descriptions and drop details that no longer matter; keep user requirements, identifiers, and the lists the user asked for.`
+      : '',
     'Return only the updated summary.',
   ]
     .filter(Boolean)

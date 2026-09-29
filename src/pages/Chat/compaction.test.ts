@@ -1,5 +1,12 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { ContextCompactor, estimateMessagesTokens, SUMMARY_TAG, type CompactionState } from './compaction';
+import {
+  buildSummarizerPrompt,
+  ContextCompactor,
+  estimateMessagesTokens,
+  SUMMARY_TAG,
+  type CompactionState,
+  type SummarizerInput,
+} from './compaction';
 
 let clock = 1;
 const user = (text: string) => ({ role: 'user', content: text, timestamp: clock++ }) as AgentMessage;
@@ -33,12 +40,10 @@ function conversation(turns: number, outputChars: number) {
 }
 
 function compactor(contextWindow: number, overrides: Partial<ConstructorParameters<typeof ContextCompactor>[0]> = {}) {
-  const summarize = jest.fn(
-    async ({ previousSummary, transcript }: { previousSummary?: string; transcript: string }) => {
-      const turns = [...transcript.matchAll(/question (\d+)/g)].map((match) => match[1]);
-      return `${previousSummary ? `${previousSummary}; ` : ''}covered questions ${turns.join(',')}`;
-    }
-  );
+  const summarize = jest.fn(async ({ previousSummary, transcript }: SummarizerInput) => {
+    const turns = [...transcript.matchAll(/question (\d+)/g)].map((match) => match[1]);
+    return `${previousSummary ? `${previousSummary}; ` : ''}covered questions ${turns.join(',')}`;
+  });
   const states: Array<CompactionState | undefined> = [];
   const instance = new ContextCompactor({
     getBudget: () => ({ contextWindow, maxOutputTokens: 1000, fixedTokens: 1000 }),
@@ -68,6 +73,66 @@ describe('ContextCompactor', () => {
     expect(lastResult.content[0].text).not.toContain('omitted');
     const firstResult = view[2] as unknown as { content: Array<{ text: string }> };
     expect(firstResult.content[0].text).toContain('characters of older tool output omitted');
+  });
+
+  it('elides earlier output of the running turn before summarizing, keeping the latest step verbatim', async () => {
+    // One long turn whose recent steps alone exceed the history budget.
+    const messages: AgentMessage[] = [user('print every dashboard')];
+    for (let step = 0; step < 10; step++) {
+      messages.push(assistantCall(`cat-${step}`, `cat ${step}.json`));
+      messages.push(toolResult(`cat-${step}`, `${step}: `.padEnd(4000, 'x')));
+    }
+    const events: string[] = [];
+    const { instance, summarize } = compactor(10_000, { onEvent: (event) => events.push(event.kind) });
+    const view = await instance.transform(messages);
+    expect(summarize).not.toHaveBeenCalled();
+    expect(events).toEqual(['elided']);
+    const texts = view
+      .filter((message) => message.role === 'toolResult')
+      .map((message) => (message as unknown as { content: Array<{ text: string }> }).content[0].text);
+    expect(texts.slice(0, -1).every((text) => text.includes('older tool output omitted'))).toBe(true);
+    expect(texts.at(-1)).toBe('9: '.padEnd(4000, 'x'));
+  });
+
+  it('clips latest output that alone exceeds the budget instead of summarizing on every step', async () => {
+    const messages = [
+      ...conversation(2, 200),
+      user('print the dashboards'),
+      assistantCall('cat', 'cat *.json'),
+      toolResult('cat', 'head '.padEnd(60_000, 'x') + ' tail'),
+    ];
+    const events: string[] = [];
+    const { instance, summarize } = compactor(12_000, { onEvent: (event) => events.push(event.kind) });
+    const view = await instance.transform(messages);
+    expect(summarize).not.toHaveBeenCalled();
+    expect(events).toEqual(['clipped']);
+    // The call that produced the output stays, so the model knows it already ran it.
+    expect(view.at(-2)).toBe(messages.at(-2));
+    const text = (view.at(-1) as unknown as { content: Array<{ text: string }> }).content[0].text;
+    expect(text.startsWith('head ')).toBe(true);
+    expect(text.endsWith(' tail')).toBe(true);
+    expect(text).toContain('omitted to fit the context window');
+    expect(estimateMessagesTokens(view)).toBeLessThan(12_000 - 1000 - 1000 - 2048);
+  });
+
+  it('asks for a summary sized to leave room in the history budget', async () => {
+    const messages = conversation(40, 1200);
+    const { instance, summarize } = compactor(12_000);
+    await instance.transform(messages);
+    // Budget: 12000 - 1000 output - 1000 fixed - 2048 margin = 7952 tokens.
+    expect(summarize.mock.calls[0][0].targetTokens).toBe(Math.floor(7952 * 0.25));
+    expect(buildSummarizerPrompt({ transcript: 't', targetTokens: 1000 })).toContain('under about 750 words');
+    expect(buildSummarizerPrompt({ transcript: 't' })).not.toContain('words');
+  });
+
+  it('sizes summarizer requests by the window, not by the agent prompt it does not send', async () => {
+    // A large system prompt leaves little history budget, but the summarizer can read far more per request.
+    const messages = conversation(12, 3000);
+    const { instance, summarize } = compactor(24_000, {
+      getBudget: () => ({ contextWindow: 24_000, maxOutputTokens: 4096, fixedTokens: 14_000 }),
+    });
+    await instance.transform(messages);
+    expect(summarize).toHaveBeenCalledTimes(1);
   });
 
   it('summarizes older turns without splitting tool calls from results and keeps the latest request verbatim', async () => {
