@@ -48,6 +48,7 @@ import { usePluginMeta } from '../../utils/utils.plugin';
 import { formatAssistantError, type AssistantErrorView } from './llmErrors';
 import { getConfiguredModels, resolveChatModelSettings, type PiAppJsonData, type PiAppThinkingLevel } from './model';
 import {
+  conversationMessages,
   finishedTurnSteps,
   hasPersistableMessages,
   pairToolResults,
@@ -1193,24 +1194,25 @@ export function ChatApp({
 
   const agentMessages = agent?.state.messages;
   const agentMessageCount = agentMessages?.length ?? 0;
-  // The agent appends to its message array in place, so the length keys the memo too.
-  const toolResults = useMemo(
-    () => pairToolResults(agentMessages ?? []),
+  // The agent appends to its message array in place, so the length keys the memos too.
+  const conversation = useMemo(
+    () => conversationMessages(agentMessages ?? []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [agentMessages, agentMessageCount]
   );
+  const toolResults = useMemo(() => pairToolResults(conversation), [conversation]);
   const toolTranscript = useMemo<ToolTranscript>(
     () => ({ results: toolResults, runs: toolRuns }),
     [toolResults, toolRuns]
   );
   const visibleMessages = agent
     ? [
-        ...agent.state.messages
+        ...conversation
           .map((message, index) => ({ message, index, isStreaming: false }))
           // Results render with their tool call in the assistant message.
           .filter(({ message }) => message.role !== 'toolResult' || toolResults.get(message.toolCallId) !== message),
         ...(agent.state.streamingMessage
-          ? [{ message: agent.state.streamingMessage, index: agent.state.messages.length, isStreaming: true }]
+          ? [{ message: agent.state.streamingMessage, index: conversation.length, isStreaming: true }]
           : []),
       ]
     : [];
@@ -1300,7 +1302,7 @@ export function ChatApp({
       // Also keeps Linux and Windows browsers from reloading the page.
       event.preventDefault();
       historySearchOpenRef.current = true;
-      setHistorySearch({ entries: promptHistory(sessionRef.current.agent?.state.messages ?? []) });
+      setHistorySearch({ entries: promptHistory(sessionRef.current.messages) });
       return true;
     }
     if (event.key === 'Escape' && !event.nativeEvent.isComposing) {
@@ -1350,7 +1352,7 @@ export function ChatApp({
       }
     });
   };
-  const hasCurrentMessages = hasPersistableMessages(agent?.state.messages ?? []);
+  const hasCurrentMessages = hasPersistableMessages(conversation);
   const visibleSidebarSessions = sessions.slice(0, SIDEBAR_SESSION_MENU_LIMIT);
   const sidebarSessionMenu = (
     <div className={styles.sidebarSessionMenu}>

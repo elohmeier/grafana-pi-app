@@ -19,6 +19,7 @@ module.exports = {
     nodeModulesToTransform([
       ...grafanaESModules,
       '@earendil-works/pi-agent-core',
+      '@earendil-works/pi-ai',
       '@react-hookz/web',
       '@ver0/deep-equal',
       'just-bash',

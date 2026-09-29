@@ -28,12 +28,16 @@ three more pieces:
   the tool, appends the result to the conversation, and asks the model to
   continue.
 
-In this app the loop is provided by `@earendil-works/pi-agent-core`. The central
-class is `Agent`, created by `AssistantSession.attach` in
+In this app the loop is provided by `@earendil-works/pi-agent-core` (0.87). The
+central class is `Agent`, created by `AssistantSession.attach` in
 `src/pages/Chat/session/AssistantSession.ts`. The important inputs are:
 
 - `systemPrompt`: built from `src/pages/Chat/systemPrompt.ts`, the skill
-  catalog, active skills, and the session filesystem section.
+  catalog, active skills, and the session filesystem section. Pi keeps the
+  prompt and tool declarations as a system message at the start of the agent
+  transcript; the session replaces that message with the prompt and tools of
+  each turn, and the chat shows, stores, and compacts only the conversation
+  after it (`conversationMessages`).
 - `model`: an OpenAI-compatible model object from `src/pages/Chat/model.ts`,
   carrying the configured `contextWindow` and `maxTokens`.
 - `tools`: the fixed tool list (see [Tool System](#tool-system)).
@@ -241,17 +245,27 @@ The backend:
   `/v1/responses`, then remembers that protocol per model for the plugin
   instance,
 - clamps the request's output budget to the model's `maxOutputTokens`,
+- replays the system messages of the Pi transcript (prompt `content`, named
+  `sections`, `toolsAdded`/`toolsRemoved`) into one leading system prompt and
+  the current tool list, and still accepts the older `systemPrompt`/`tools`
+  request fields,
 - translates Pi proxy messages and tool schemas into the selected protocol,
 - preserves Responses `call_id`/item IDs and encrypted reasoning items across
-  tool turns while keeping `store: false`,
+  tool turns while keeping `store: false`, and sends only the call ID part of
+  those IDs to Chat Completions,
 - applies the configured thinking level using Responses `reasoning.effort`, or
   the configured Chat Completions format:
   - OpenAI: `reasoning_effort`,
   - Qwen: `enable_thinking`,
   - Qwen chat template: `chat_template_kwargs.enable_thinking`,
 - relays Chat Completions chunks or typed Responses server-sent events back to
-  Pi proxy events and records
-  Prometheus metrics for requests, tokens, and proposed tool calls.
+  Pi proxy events, with the parsed tool call on `toolcall_end`; upstream error
+  chunks and streams that end without a finish reason become `error` events,
+  and a canceled request ends as `aborted`,
+- records Prometheus metrics for requests, tokens, and proposed tool calls.
+
+`pkg/plugin/llm_protocol_parity_test.go` checks that the same model output
+reaches Pi as the same events through either protocol.
 
 This is the main secret boundary. The OpenAI-compatible API key lives in
 Grafana `secureJsonData`, is decrypted only for the backend plugin, and is never

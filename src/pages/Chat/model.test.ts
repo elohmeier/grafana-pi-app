@@ -116,7 +116,7 @@ describe('createOpenAICompatibleModel', () => {
     if (model.api !== 'openai-responses') {
       throw new Error('expected Responses model');
     }
-    expect(model.compat?.sendSessionIdHeader).toBe(false);
+    expect(model.compat?.sessionAffinityFormat).toBe('openai-nosession');
   });
 
   it('uses the configured display name and base URL', () => {

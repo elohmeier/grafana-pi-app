@@ -44,6 +44,11 @@ const config = async (env: Env): Promise<Configuration> => {
         'node:zlib': zlibShimPath,
       },
     },
+    ignoreWarnings: [
+      ...(baseConfig.ignoreWarnings ?? []),
+      // pi-ai imports node:fs through a variable specifier only outside browsers.
+      { module: /@earendil-works[\\/]pi-ai[\\/]dist[\\/]auth[\\/]context\.js$/, message: /Critical dependency/ },
+    ],
     plugins: [
       ...(baseConfig.plugins ?? []),
       new webpack.NormalModuleReplacementPlugin(/^node:zlib$/, zlibShimPath),

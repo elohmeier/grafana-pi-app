@@ -38,12 +38,23 @@ export function createUserShellMessage(result: WorkspaceBashResult): UserShellMe
   };
 }
 
+/**
+ * The conversation without Pi's system messages. The agent transcript starts
+ * with a system message holding the prompt and tools of the current turn;
+ * the chat shows, stores, and compacts only the conversation.
+ */
+export function conversationMessages(messages: AgentMessage[]): AgentMessage[] {
+  return messages.some((message) => message.role === 'system')
+    ? messages.filter((message) => message.role !== 'system')
+    : messages;
+}
+
 export function convertChatMessagesToLlm(messages: AgentMessage[]): Message[] {
   const pendingToolCallIds = new Set<string>();
   const converted: Message[] = [];
 
   for (const message of messages) {
-    if (message.role === 'user') {
+    if (message.role === 'system' || message.role === 'user') {
       converted.push(message);
       continue;
     }

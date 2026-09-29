@@ -8,7 +8,11 @@ jest.mock('typebox', () => ({
 }));
 
 import type { StreamFn } from '@earendil-works/pi-agent-core';
-import { createAssistantMessageEventStream, type Context } from '@earendil-works/pi-ai';
+import {
+  createAssistantMessageEventStream,
+  getCurrentSystemPrompt,
+  type TranscriptContext,
+} from '@earendil-works/pi-ai';
 import { SUMMARIZER_SYSTEM_PROMPT, type CompactionEvent } from '../compaction';
 import { AssistantSession, type SessionHost } from './AssistantSession';
 import type { StoredSession } from './sessionRecord';
@@ -102,14 +106,14 @@ function assistantMessage(text: string, timestamp = Date.now()) {
 /** A host whose model answers prompts with the next reply and summarizer calls with `summary`. */
 function createHost(replies: string[] = [], contextWindow = 100000, summary = '- summary') {
   const records: StoredSession[] = [];
-  const requests: Context[] = [];
+  const requests: TranscriptContext[] = [];
   const compactions: CompactionEvent[] = [];
   const { broker } = createFakeDashboardBroker([{ uid: 'one', title: 'One' }]);
   const streamFn: StreamFn = (_model, context) => {
     requests.push(context);
     const stream = createAssistantMessageEventStream();
     const message = assistantMessage(
-      context.systemPrompt === SUMMARIZER_SYSTEM_PROMPT ? summary : (replies.shift() ?? 'ok')
+      getCurrentSystemPrompt(context.messages) === SUMMARIZER_SYSTEM_PROMPT ? summary : (replies.shift() ?? 'ok')
     );
     queueMicrotask(() => {
       stream.push({ type: 'done', reason: 'stop', message });
@@ -186,12 +190,12 @@ it('titles a new chat from its first prompt and passes launch context only to th
 
   await session.prompt('Why is   the error rate high?');
   expect(session.title).toBe('Why is the error rate high?');
-  expect(requests[0].systemPrompt).toContain('Launch item');
+  expect(getCurrentSystemPrompt(requests[0].messages)).toContain('Launch item');
   expect(states).toContain('waiting_model');
   expect(session.getState().runStatus).toBeUndefined();
 
   await session.prompt('And now?');
-  expect(requests[1].systemPrompt).not.toContain('Launch item');
+  expect(getCurrentSystemPrompt(requests[1].messages)).not.toContain('Launch item');
   expect(session.title).toBe('Why is the error rate high?');
   expect(records.at(-1)).toMatchObject({ id: session.id, title: 'Why is the error rate high?', modelId: 'test' });
 });

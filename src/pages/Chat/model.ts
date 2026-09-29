@@ -155,7 +155,7 @@ export function createOpenAICompatibleModel(
       ...base,
       api: 'openai-responses',
       compat: {
-        sendSessionIdHeader: false,
+        sessionAffinityFormat: 'openai-nosession',
         supportsLongCacheRetention: false,
       },
     };

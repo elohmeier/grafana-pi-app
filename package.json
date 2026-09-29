@@ -101,8 +101,8 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.75.5",
-    "@earendil-works/pi-ai": "0.75.5",
+    "@earendil-works/pi-agent-core": "0.87.1",
+    "@earendil-works/pi-ai": "0.87.1",
     "@emotion/css": "11.13.5",
     "@grafana/data": "13.2.1",
     "@grafana/i18n": "13.2.1",

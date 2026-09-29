@@ -6,9 +6,15 @@ import {
   type AgentTool,
   type StreamFn,
 } from '@earendil-works/pi-agent-core';
+import { createInitialSystemMessage, normalizeContext, toToolDeclaration } from '@earendil-works/pi-ai';
 import type { DashboardMutationAPI } from '@grafana/data';
 import type { PiAppThinkingLevel } from '../../../types';
-import { convertChatMessagesToLlm, createUserShellMessage, hasPersistableMessages } from '../chatMessages';
+import {
+  conversationMessages,
+  convertChatMessagesToLlm,
+  createUserShellMessage,
+  hasPersistableMessages,
+} from '../chatMessages';
 import {
   ContextCompactor,
   estimateTextTokens,
@@ -190,8 +196,9 @@ export class AssistantSession {
     return this.state.title;
   }
 
+  /** The conversation, without the system message that leads the agent transcript. */
   get messages(): AgentMessage[] {
-    return this.agent?.state.messages ?? this.initialMessages;
+    return this.agent ? conversationMessages(this.agent.state.messages) : this.initialMessages;
   }
 
   get isStreaming() {
@@ -259,17 +266,16 @@ export class AssistantSession {
       host.onPromptStart?.({
         prompt: text,
         systemPrompt: turn.systemPrompt,
-        messages: agent.state.messages,
+        messages: this.messages,
         toolCount: turn.tools.length,
         activeSkills: turn.skillSelection.activeSkills,
         explicitSkillNames: turn.skillSelection.explicitSkillNames,
       });
-      agent.state.systemPrompt = turn.systemPrompt;
-      agent.state.tools = turn.tools;
+      setTurnSystemMessage(agent, turn.systemPrompt, turn.tools);
       agent.state.model = environment.model;
       agent.state.thinkingLevel = environment.thinkingLevel;
       await agent.prompt(text);
-      host.onPromptEnd?.(agent.state.messages);
+      host.onPromptEnd?.(this.messages);
       await this.flushSaves();
     } finally {
       this.launch = {};
@@ -438,11 +444,15 @@ export class AssistantSession {
         systemPrompt: options.systemPrompt,
         model: options.model,
         thinkingLevel: options.thinkingLevel,
-        messages: options.messages,
+        messages: conversationMessages(options.messages),
         tools: options.tools,
       },
       convertToLlm: convertChatMessagesToLlm,
-      transformContext: compactor.transform,
+      // Compaction and its persisted message indexes see only the conversation.
+      transformContext: async (messages, signal) => [
+        ...messages.filter((message) => message.role === 'system'),
+        ...(await compactor.transform(conversationMessages(messages), signal)),
+      ],
       streamFn: options.streamFn,
     });
     this.unsubscribeAgent?.();
@@ -455,7 +465,7 @@ export class AssistantSession {
       if (event.type === 'agent_end') {
         try {
           // `event.messages` holds only this run's new messages; persist the whole history.
-          await this.save(agent.state.messages);
+          await this.save();
         } catch {
           /* Exposed as persistenceError and the save state. */
         }
@@ -488,6 +498,19 @@ export class AssistantSession {
   }
 }
 
+/**
+ * Replaces the system message that leads the transcript with this turn's prompt
+ * and tools. The prompt is rebuilt for every turn (skills, launch and page
+ * context), so the transcript keeps one leading system message instead of a
+ * history of prompt changes, and Pi finds no tool changes to declare.
+ */
+function setTurnSystemMessage(agent: Agent, systemPrompt: string, tools: AgentTool[]) {
+  const system = createInitialSystemMessage(systemPrompt, tools.map(toToolDeclaration));
+  const conversation = conversationMessages(agent.state.messages);
+  agent.state.tools = tools;
+  agent.state.messages = system ? [system, ...conversation] : conversation;
+}
+
 async function summarizeWithModel(
   streamFn: StreamFn,
   model: Agent['state']['model'],
@@ -496,10 +519,10 @@ async function summarizeWithModel(
 ) {
   const stream = await streamFn(
     model,
-    {
+    normalizeContext({
       systemPrompt: SUMMARIZER_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: buildSummarizerPrompt(input), timestamp: Date.now() }],
-    },
+    }),
     { maxTokens: Math.min(SUMMARY_MAX_OUTPUT_TOKENS, model.maxTokens || SUMMARY_MAX_OUTPUT_TOKENS), signal }
   );
   const message = await stream.result();

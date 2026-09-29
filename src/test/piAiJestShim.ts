@@ -1,3 +1,14 @@
+// The real transcript helpers: the agent loop replays system messages with them.
+export {
+  createInitialSystemMessage,
+  getCurrentSystemMessage,
+  getCurrentSystemPrompt,
+  getCurrentTools,
+  getToolStateChanges,
+  normalizeContext,
+  toToolDeclaration,
+} from '../../node_modules/@earendil-works/pi-ai/dist/utils/transcript.js';
+
 export class EventStream<T, R = T> implements AsyncIterable<T> {
   private queue: T[] = [];
   private waiting: Array<(result: IteratorResult<T>) => void> = [];
