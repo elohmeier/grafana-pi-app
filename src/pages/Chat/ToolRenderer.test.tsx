@@ -165,6 +165,8 @@ describe('ToolRenderer', () => {
 
     expect(container.textContent).toContain('Run bash');
     expect(container.textContent).toContain('grafana-prom query up');
+    expect(container.querySelector('code.language-bash')?.textContent).toBe('grafana-prom query up');
+    expect(container.querySelector('code.language-bash span')?.textContent).toBe('grafana-prom');
     expect(container.textContent).toContain('partial output');
     expect(container.textContent).not.toContain('Specialist agent');
   });
@@ -1028,6 +1030,10 @@ describe('ToolRenderer', () => {
     expect(container.textContent).toContain('Exit code');
     expect(container.textContent).toContain('42 ms');
     expect(container.textContent).toContain('jq . /workspace/a.json > /grafana/dashboards/abc/dashboard.json');
+    expect(container.querySelector('code.language-bash')?.textContent).toBe(
+      'jq . /workspace/a.json > /grafana/dashboards/abc/dashboard.json'
+    );
+    expect(container.querySelector('code.language-bash span')?.textContent).toBe('jq');
     expect(container.textContent).toContain('{ "ok": true }');
     const outputs = Array.from(container.querySelectorAll('details')).filter((details) =>
       ['stdout', 'stderr'].includes(details.querySelector('summary')?.textContent ?? '')
@@ -1036,6 +1042,7 @@ describe('ToolRenderer', () => {
       ['stdout', true],
       ['stderr', false],
     ]);
+    expect(outputs.every((details) => details.querySelector('pre span') === null)).toBe(true);
     const rows = Array.from(container.querySelectorAll('tbody tr')).map((row) =>
       Array.from(row.querySelectorAll('td')).map((cell) => cell.textContent)
     );

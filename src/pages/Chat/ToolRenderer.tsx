@@ -5,6 +5,7 @@ import type { AgentToolResult } from '@earendil-works/pi-agent-core';
 import { renderMarkdown, type GrafanaTheme2, type IconName } from '@grafana/data';
 import { Badge, Icon, LinkButton, Spinner, type BadgeColor, useStyles2 } from '@grafana/ui';
 import { structuredPatch } from 'diff';
+import { highlightBash } from './bashRendering';
 import type { ArtifactPreview, ArtifactRef } from './domain';
 import {
   highlightJsonnetLines,
@@ -285,6 +286,7 @@ type SimpleToolCallSummary = {
   summary: string;
   items?: Array<{ label: string; value?: React.ReactNode }>;
   code?: string;
+  language?: 'bash';
 };
 
 function SimpleToolCallSummaryView({ call }: { call: SimpleToolCallSummary }) {
@@ -293,7 +295,12 @@ function SimpleToolCallSummaryView({ call }: { call: SimpleToolCallSummary }) {
     <div className={styles.structuredResult}>
       <div className={styles.resultSummary}>{call.summary}</div>
       {call.items && <ResultMetaGrid items={call.items} />}
-      {call.code && <pre className={styles.queryBlock}>{call.code}</pre>}
+      {call.code &&
+        (call.language === 'bash' ? (
+          <BashCodeBlock command={call.code} />
+        ) : (
+          <pre className={styles.queryBlock}>{call.code}</pre>
+        ))}
     </div>
   );
 }
@@ -471,6 +478,7 @@ function workspaceBashToolCallSummary(record: Record<string, unknown>): SimpleTo
       { label: 'Timeout', value: formatDurationMs(numberField(record, 'timeoutMs')) },
     ],
     code: stringField(record, 'command'),
+    language: 'bash',
   };
 }
 
@@ -2507,7 +2515,7 @@ function WorkspaceBashResultView({ result }: { result: WorkspaceBashResult }) {
           { label: 'CWD', value: result.cwd ? <code>{result.cwd}</code> : undefined },
         ]}
       />
-      <pre className={styles.queryBlock}>{result.command}</pre>
+      <BashCodeBlock command={result.command} />
       {result.discardedChanges && (
         <div className={styles.notice}>
           <strong>discarded</strong>
@@ -2748,6 +2756,18 @@ function safeLinkHref(href: string): string | undefined {
     return trimmed;
   }
   return undefined;
+}
+
+function BashCodeBlock({ command }: { command: string }) {
+  const styles = useStyles2(getToolStyles);
+  const tokens = useMemo(() => highlightBash(command), [command]);
+  return (
+    <pre className={styles.queryBlock}>
+      <code className="language-bash">
+        {tokens?.length ? <CodeLineText text={command} tokens={tokens} /> : command}
+      </code>
+    </pre>
+  );
 }
 
 function CodeViewer({ lines, language = 'jsonnet' }: { lines: CodeLine[]; language?: 'jsonnet' | 'plain' }) {
