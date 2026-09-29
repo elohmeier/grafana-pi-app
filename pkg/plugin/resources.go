@@ -197,11 +197,22 @@ func (a *App) handleLLMStream(w http.ResponseWriter, req *http.Request) {
 	modelID = model.ID
 	body.Options.MaxTokens = clampRequestMaxTokens(body.Options.MaxTokens, model)
 
+	// fail ends the stream with an error, or as aborted when the client went away.
+	fail := func(stream proxyEventWriter, err error) {
+		if req.Context().Err() != nil {
+			status, reason = "aborted", "aborted"
+			event := errorEvent("request aborted")
+			event["reason"] = "aborted"
+			_ = stream.write(event)
+			return
+		}
+		_ = stream.write(errorEvent(err.Error()))
+	}
+
 	protocol := a.openAIProtocolForRequest(model)
 	upstreamRes, err := a.doOpenAIUpstreamRequest(req.Context(), body, model, protocol)
 	if err != nil {
-		stream := startProxyStream(w)
-		_ = stream.write(errorEvent(err.Error()))
+		fail(startProxyStream(w), err)
 		return
 	}
 
@@ -215,8 +226,7 @@ func (a *App) handleLLMStream(w http.ResponseWriter, req *http.Request) {
 			upstreamRes, err = a.doOpenAIUpstreamRequest(req.Context(), body, model, protocol)
 			upstreamError = nil
 			if err != nil {
-				stream := startProxyStream(w)
-				_ = stream.write(errorEvent(err.Error()))
+				fail(startProxyStream(w), err)
 				return
 			}
 		}
@@ -245,7 +255,7 @@ func (a *App) handleLLMStream(w http.ResponseWriter, req *http.Request) {
 		usage, reason, relayErr = a.relayOpenAIChatStream(upstreamRes.Body, stream)
 	}
 	if relayErr != nil {
-		_ = stream.write(errorEvent(relayErr.Error()))
+		fail(stream, relayErr)
 		return
 	}
 	status = "completed"
