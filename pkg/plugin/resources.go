@@ -120,7 +120,8 @@ type openAIStreamChunk struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
-	Usage *openAIUsage `json:"usage,omitempty"`
+	Usage *openAIUsage    `json:"usage,omitempty"`
+	Error json.RawMessage `json:"error,omitempty"`
 }
 
 type openAIUsage struct {
@@ -354,6 +355,7 @@ func (a *App) relayOpenAIChatStream(body io.Reader, stream proxyEventWriter) (pr
 	toolCalls := map[int]*streamedToolCall{}
 	usage := zeroUsage()
 	doneReason := "stop"
+	finished := false
 	dataLines := make([]string, 0, 4)
 
 	processData := func(data string) error {
@@ -362,6 +364,7 @@ func (a *App) relayOpenAIChatStream(body io.Reader, stream proxyEventWriter) (pr
 			return nil
 		}
 		if data == "[DONE]" {
+			finished = true
 			return errOpenAIStreamDone
 		}
 
@@ -369,11 +372,17 @@ func (a *App) relayOpenAIChatStream(body io.Reader, stream proxyEventWriter) (pr
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			return fmt.Errorf("invalid upstream stream chunk: %w", err)
 		}
+		if message := upstreamStreamError(chunk.Error); message != "" {
+			return fmt.Errorf("upstream error: %s", message)
+		}
 		if chunk.Usage != nil {
 			usage = usageFromOpenAI(chunk.Usage)
 		}
 
 		for _, choice := range chunk.Choices {
+			if choice.FinishReason != "" {
+				finished = true
+			}
 			if choice.FinishReason == "length" {
 				doneReason = "length"
 			}
@@ -498,6 +507,9 @@ func (a *App) relayOpenAIChatStream(body io.Reader, stream proxyEventWriter) (pr
 	if err := flushData(); err != nil && !errors.Is(err, errOpenAIStreamDone) {
 		return usage, "error", err
 	}
+	if !finished {
+		return usage, "error", errors.New("upstream stream ended before a finish reason")
+	}
 	if textStarted {
 		if err := stream.write(map[string]interface{}{"type": "text_end", "contentIndex": textIndex}); err != nil {
 			return usage, "error", err
@@ -527,6 +539,23 @@ func (a *App) relayOpenAIChatStream(body io.Reader, stream proxyEventWriter) (pr
 		return usage, "error", err
 	}
 	return usage, doneReason, nil
+}
+
+// upstreamStreamError returns the message of an error object or string that
+// OpenAI-compatible servers put into a stream chunk instead of choices.
+func upstreamStreamError(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var message string
+	if err := json.Unmarshal(raw, &message); err == nil {
+		return strings.TrimSpace(message)
+	}
+	var envelope openAIResponsesError
+	if err := json.Unmarshal(raw, &envelope); err == nil && strings.TrimSpace(envelope.Message) != "" {
+		return strings.TrimSpace(envelope.Message)
+	}
+	return string(raw)
 }
 
 func reasoningDelta(values ...string) string {
