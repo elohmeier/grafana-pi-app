@@ -4,7 +4,7 @@ describe('chat system prompt', () => {
   it('describes a single agent working through the session filesystem tools', () => {
     expect(BASE_SYSTEM_PROMPT).toContain('Your main tools are read, write, edit, and bash');
     expect(BASE_SYSTEM_PROMPT).toContain('`workspace apply`');
-    expect(BASE_SYSTEM_PROMPT).toContain('Alerting is read-only for you');
+    expect(BASE_SYSTEM_PROMPT).toContain('Change alert rules only when the user asks for an alert rule change');
   });
 
   it('does not reference specialists or removed tools', () => {

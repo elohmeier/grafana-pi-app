@@ -43,7 +43,7 @@ function makeReadTool(workspace: SessionWorkspace): AgentTool {
     name: 'read',
     label: 'Read',
     description:
-      'Read a file from the session filesystem with line numbers, or list a directory. Large files are returned in windows: pass offset (1-based line) and limit to continue. Reading /grafana/dashboards/<uid>/dashboard.json fetches that dashboard on first access. The result includes a revision you can pass to write/edit to guard against concurrent changes.',
+      'Read a file from the session filesystem with line numbers, or list a directory. Large files are returned in windows: pass offset (1-based line) and limit to continue. Reading /grafana/dashboards/<uid>/dashboard.json or /grafana/alert-rules/<uid>/rule.json loads that resource on first access. The result includes a revision you can pass to write/edit to guard against concurrent changes.',
     parameters: Type.Object({
       path: Type.String({ description: 'Absolute path, or relative to /workspace.' }),
       offset: Type.Optional(Type.Number({ description: '1-based first line to return. Defaults to 1.' })),
@@ -90,7 +90,7 @@ function makeWriteTool(workspace: SessionWorkspace): AgentTool {
     name: 'write',
     label: 'Write',
     description:
-      'Create or overwrite one file in the session filesystem. Writable locations: /workspace, /session, /tmp, and /grafana/dashboards/<uid>/dashboard.json (a local working copy; nothing reaches Grafana until an approved `workspace apply`). Parent directories are created automatically. Prefer edit for small changes to existing files.',
+      'Create or overwrite one file in the session filesystem. Writable locations: /workspace, /session, /tmp, /grafana/dashboards/<uid>/dashboard.json, and /grafana/alert-rules/<uid>/rule.json (local working copies; nothing reaches Grafana until an approved `workspace apply`). Parent directories are created automatically. Prefer edit for small changes to existing files.',
     executionMode: 'sequential',
     parameters: Type.Object({
       path: Type.String({ description: 'Absolute path, or relative to /workspace.' }),

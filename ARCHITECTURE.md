@@ -287,7 +287,7 @@ same list on every turn:
 - `read`, `write`, `edit`, `bash`: the session filesystem tools from
   `src/pages/Chat/workspace/tools.ts`. Discovery, PromQL queries, dashboard
   editing, validation, Jsonnet, dashboard-derived metric usage
-  (`grafana-usage`), alert lookups (`grafana-alert`), the investigation report
+  (`grafana-usage`), alert lookups and validation (`grafana-alert`), the investigation report
   (the Markdown file `/session/report.md`, rendered next to the chat),
   navigation (`grafana open`), screenshots
   (`grafana-dashboard screenshot`), and writes all happen here.
@@ -316,6 +316,9 @@ from local overlays and scratch files.
 | `/grafana/dashboards/<uid>/meta.json`         | generated, read-only                 | Provider-owned metadata: revision (`resourceVersion`), folder, API version, and managed-by.                                                                                                                                             |
 | `/grafana/catalog/dashboards.ndjson`          | generated, read-only                 | Metadata of every dashboard visible to the user (uid, title, folder, tags), cached for 5 minutes. The same listing is the index behind `/grafana/dashboards`.                                                                           |
 | `/grafana/catalog/coverage.json`              | generated, read-only                 | Dashboard count and when the listing was loaded.                                                                                                                                                                                        |
+| `/grafana/alert-rules/<uid>/rule.json`        | resource                             | Working copy of a Grafana-managed alert rule (`{apiVersion, kind, metadata: {name, folder annotation}, spec}`). Every visible rule is listed and served from one paginated App Platform listing. Writes stage an overlay.               |
+| `/grafana/alert-rules/<uid>/meta.json`        | generated, read-only                 | Provider-owned metadata: revision, folder, evaluation group and position, provenance (`managedBy`), and `preconditions: client`.                                                                                                        |
+| `/grafana/catalog/alert-rules.ndjson`         | generated, read-only                 | Every visible alert rule (uid, title, folder, group, labels, provenance, linked dashboard and panel), cached for 5 minutes. The same listing is the index behind `/grafana/alert-rules`.                                                |
 | `/live/dashboard/dashboard.json`, `info.json` | generated; `dashboard.json` writable | Unsaved state of the dashboard open in the browser as a v2 resource (variant only). Edits stage a non-persisted overlay that `live apply` applies to the browser.                                                                       |
 | `/workspace`                                  | scratch, persisted                   | Default working directory.                                                                                                                                                                                                              |
 | `/session`                                    | scratch, persisted                   | Durable notes, such as `findings.md`.                                                                                                                                                                                                   |
@@ -403,7 +406,7 @@ The system prompt lists them from the same registry.
 | `grafana-dashboard screenshot UID\|PATH`           | Render the saved dashboard or one panel with the image renderer; the image is attached to the bash result.                      |
 | `grafana-dashboard add-panel\|set-panel PATH`      | Typed panel edits on any dashboard file (working copy or live): title, queries by refId, unit, type, position; classic and v2.  |
 | `grafana-usage dashboard\|search\|related`         | Dashboard-derived Prometheus metric usage and related metrics (see [Metrics](#metrics-and-prometheus)).                         |
-| `grafana-alert find\|get`                          | Read-only alert rules linked to a panel, with PromQL checks (see [Alerting Commands](#alerting-commands)).                      |
+| `grafana-alert find\|get\|validate`                | Alert rules linked to a panel with PromQL checks, and validation of rule working copies (see [Alert Rules](#alert-rules)).      |
 
 Commands reach Grafana through the `WorkspaceBroker` in
 `workspace/grafanaBroker.ts`: dashboards through `getBackendSrv()` and the
@@ -481,8 +484,8 @@ Bundled skills live under `assistant/skills/`:
 
 - `grafana-dashboard`: dashboard, panel, Jsonnet, validation, direct apply, and
   live-edit workflow.
-- `grafana-alerting`: read-only troubleshooting of Grafana-managed alert rules,
-  especially rules linked to dashboard panels.
+- `grafana-alerting`: troubleshooting of Grafana-managed alert rules, especially
+  rules linked to dashboard panels, and the rule change workflow.
 - `investigation`: evidence-based incident investigation workflow.
 
 `npm run generate:skills` runs `scripts/generate-bundled-skills.mjs`, which:
@@ -546,26 +549,62 @@ Important safety and cost controls:
 - The system prompt requires checking labels with `grafana-prom labels` or
   `series` before using them, and validating PromQL with concrete selectors.
 
-## Alerting Commands
+## Alert Rules
 
-Alert lookups are in `src/pages/Chat/domain/alerts.ts`, exposed as
-`grafana-alert`, and are strictly read-only:
+Grafana-managed alert rules are resources of the session filesystem, like
+dashboards, and use the same change sets.
 
-- `grafana-alert find --dashboard UID --panel ID`: reads AlertRule resources from
-  `/apis/rules.alerting.grafana.app/v0alpha1` and links them to a panel through
-  `spec.panelRef` and the `__dashboardUid__`/`__panelId__` annotations.
-- `grafana-alert get NAME`: reads one AlertRule and returns a normalized expression
-  plus `prometheusChecks` PromQL suggestions the model runs with
-  `grafana-prom query` to compare alert conditions against panel data.
+- Listing: `createAlertRuleCatalog` (`workspace/mounts.ts`) lists every rule
+  through `AlertRuleBroker.list` (`GET /apis/rules.alerting.grafana.app/v0alpha1/namespaces/<ns>/alertrules`,
+  paginated) plus folder titles, caches the listing for 5 minutes, and serves
+  `rule.json` from it, so scanning all rules costs one request.
+- Working copy: `toAlertRuleSnapshot` (`workspace/alertRuleModel.ts`) keeps
+  `apiVersion`, `kind`, `metadata.name`, the folder annotation, and `spec`. Group
+  labels (`grafana.com/group`, `grafana.com/group-index`), provenance
+  (`grafana.com/provenance`), and the other provider annotations stay in
+  `meta.json`; `alertRuleWriteBody` merges them back from the stored rule on
+  every write, so a write never moves a rule out of its group.
+- Provisioned rules (non-empty provenance or `grafana.app/managedBy`) are
+  read-only: writes and deletions fail with `EROFS`.
+- `grafana-alert validate [PATH...]` (all changed rules by default) and
+  `workspace apply` run `validateAlertRuleDocument`: envelope and folder,
+  title, evaluation interval and durations, no-data and error states, reserved
+  labels, the expression graph (exactly one `source`, references of reduce,
+  threshold, resample, math, and classic-condition expressions, query time
+  ranges), `panelRef` consistency, PromQL syntax through the backend parser,
+  contact point, time interval, and routing tree references (listed from the
+  `notifications.alerting.grafana.app` API), and the datasource allow-list.
+  Against the fetched rule it rejects folder moves and interval changes of
+  grouped rules: Grafana's single-rule update silently keeps the group's
+  interval (`AlertRuleService.UpdateAlertRule`), so such a change would be
+  reported as applied without taking effect.
+- Preconditions: the AlertRule API is backed by legacy storage and accepts
+  writes and deletes with any `resourceVersion`. `AlertRuleBroker.update` and
+  `delete` therefore read the stored rule and return `conflicted` when its
+  revision moved since the working copy was fetched. A write by someone else
+  between that read and the write is not detected; `meta.json` says
+  `preconditions: client`, and the review tells the user.
+- Creation: a new directory `/grafana/alert-rules/<uid>/rule.json` creates the
+  rule in no evaluation group (Grafana rejects group labels on create).
+  `rm -r` stages a deletion. Reverts reverse the receipt's diff or fall back to
+  the rule's version history (`grafana.app/get-history`).
 
-There are no alert create, update, pause, silence, or delete tools or
-commands. The system prompt and the `grafana-alerting` skill both mandate
-read-only troubleshooting.
+`grafana-alert find` and `get` (`src/pages/Chat/domain/alerts.ts`) read the
+rules as stored in Grafana and link them to a panel through `spec.panelRef` and
+the `__dashboardUid__`/`__panelId__` annotations. They return a normalized
+expression summary, `prometheusChecks` for `grafana-prom query`, and the
+working-copy `path` of each rule.
+
+Silences, contact points, notification policies, and moving rules between
+folders or groups have no commands.
 
 ## Dashboard Changes: Direct Apply
 
-The assistant edits `/grafana/dashboards/<uid>/dashboard.json` and runs
+The assistant edits `/grafana/dashboards/<uid>/dashboard.json` (and
+`/grafana/alert-rules/<uid>/rule.json`, see [Alert Rules](#alert-rules)) and runs
 `workspace apply [--path PATH]`. No planning mode or separate plan command exists.
+One change set can hold dashboards and alert rules; each kind is validated and
+written through its own broker (`resourceWriter` in `workspace/apply.ts`).
 
 `workspace/apply.ts` validates every selected overlay in parallel, captures the
 exact contents and base revisions, computes a digest, and requests approval of
@@ -757,10 +796,10 @@ and commands can do, not from per-turn tool selection:
 
 - The shell has no network, process, or link commands, and Python runs in a
   worker with no network access or JavaScript bridge.
-- The only remote write paths are `workspace apply` (saved dashboards, with
-  approval) and `live apply` (the unsaved browser dashboard). `write`, `edit`,
-  bash, and Python can only stage local changes.
-- Alert tools and dashboard metric tools are read-only.
+- The only remote write paths are `workspace apply` (saved dashboards and
+  alert rules, with approval) and `live apply` (the unsaved browser dashboard).
+  `write`, `edit`, bash, and Python can only stage local changes.
+- Alert lookups and dashboard metric tools are read-only.
 - Generated mounts (`meta.json`, the catalog, `/live/dashboard/info.json`,
   `/artifacts`, `/.agents/skills`) are read-only; `/live/dashboard/dashboard.json`
   only stages a local overlay.
@@ -771,9 +810,10 @@ and commands can do, not from per-turn tool selection:
 
 `workspace apply` requests approval through the `WorkspaceApprovalService`
 (`session/ApprovalChannel.ts`). `ChangeSetReview.tsx` shows the change set: a
-summary, the repeated replacements with an example each, and a folder-grouped
-dashboard list with line counts, validation badges, per-dashboard diffs, a
-filter, and checkboxes per dashboard, folder, and replacement group. The decision
+summary, the repeated replacements with an example each, and one section each
+for dashboards (grouped by folder) and alert rules (grouped by folder and
+evaluation group) with line counts, validation badges, per-resource diffs, a
+filter, and checkboxes per resource, group, and replacement group. The decision
 returns the kept paths. Denying records an unapproved journal entry, and the
 command fails without writing anything.
 
@@ -792,9 +832,9 @@ The allow-list is enforced in the frontend:
 
 - `grafana-prom` and the dashboard metric context tools only discover and
   query allowed Prometheus datasources,
-- `grafana-dashboard validate` and `workspace apply` reject dashboards that
-  reference disallowed datasource UIDs (built-in UIDs such as `__expr__` and
-  `grafana` are exempt).
+- `grafana-dashboard validate`, `grafana-alert validate`, and `workspace apply`
+  reject dashboards and alert rules that reference disallowed datasource UIDs
+  (built-in UIDs such as `__expr__` and `grafana` are exempt).
 
 The backend no longer validates dashboards, so this check is not enforced
 server-side.
@@ -809,7 +849,8 @@ The base system prompt in `src/pages/Chat/systemPrompt.ts` says to:
   `validationError` or zero series as unusable evidence,
 - change dashboards only when the user asks, and never claim a change before
   `workspace apply` reports `applied`,
-- keep alerting read-only,
+- change alert rules only when the user asks, through the same apply workflow,
+  and keep troubleshooting read-only,
 - keep durable notes in `/session` for long tasks.
 
 The session filesystem section (`workspace/prompt.ts`) documents the layout,

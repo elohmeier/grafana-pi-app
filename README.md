@@ -13,9 +13,9 @@ The [conversational alerting design](docs/conversational-alerting.md) covers Mat
 - Searches dashboards and loads them lazily into the session filesystem as local working copies (`/grafana/dashboards/<uid>/dashboard.json`), so `rg`, `jq`, `yq`, `python3`, and `edit` work on real dashboard JSON.
 - Extracts Prometheus metric usage from existing dashboards, including panel co-usage, labels, grouping labels, functions, and related metric neighborhoods.
 - Creates new dashboards from model-authored Jsonnet evaluated by the backend with the vendored Grafana libraries, and edits existing dashboards as JSON.
-- Writes dashboard changes only through `workspace apply`: the user reviews the change set (repeated replacements, per-dashboard diffs, checkboxes to leave dashboards out), and the browser writes as the current user with revision preconditions. `workspace revert` undoes an apply through the same review.
+- Writes dashboard and alert rule changes only through `workspace apply`: the user reviews the change set (repeated replacements, per-resource diffs, checkboxes to leave resources out), and the browser writes as the current user with revision preconditions. `workspace revert` undoes an apply through the same review.
 - Edits many dashboards at once: every visible dashboard is listed under `/grafana/dashboards` and loads on demand, `grafana-dashboard queries --metric NAME` finds every panel query that uses a metric (with its jq path), and one script changes them all.
-- Troubleshoots Grafana-managed alert rules linked to dashboard panels, read-only.
+- Troubleshoots Grafana-managed alert rules linked to dashboard panels, and changes alert rules as working copies (`/grafana/alert-rules/<uid>/rule.json`: thresholds, pending periods, labels, queries) through the same reviewed change sets as dashboards. Provisioned rules stay read-only; silences, contact points, and notification policies are not edited.
 - Screenshots dashboards and navigates within Grafana.
 - Adds dashboard panel menu actions for contextual Assistant prompts.
 - Optionally runs as the `grafana-assistant-app` variant with Grafana's extension sidebar integration enabled.
@@ -88,6 +88,8 @@ Each chat has its own filesystem:
 | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/grafana/dashboards/<uid>/dashboard.json` | Local working copy of a dashboard resource. Every visible dashboard is listed; content is fetched on first read (scans load all of them in parallel) through Grafana's dashboard App Platform API as the current user. `meta.json` next to it is read-only. |
 | `/grafana/catalog/dashboards.ndjson`       | Metadata of every visible dashboard (uid, title, folder, tags).                                                                                                                                                                                             |
+| `/grafana/alert-rules/<uid>/rule.json`     | Local working copy of a Grafana-managed alert rule. Every visible rule is listed and loaded from one App Platform listing. `meta.json` next to it is read-only (revision, evaluation group, provenance).                                                    |
+| `/grafana/catalog/alert-rules.ndjson`      | Metadata of every visible alert rule (uid, title, folder, group, labels, provenance, linked dashboard and panel).                                                                                                                                           |
 | `/live/dashboard/dashboard.json`           | Unsaved state of the dashboard open in the browser as a v2 resource (variant with the mutation API only). Editable; `live apply` applies it to the browser. `info.json` next to it is read-only.                                                            |
 | `/workspace`, `/session`                   | Scratch files persisted with the chat. `/workspace` is the default working directory; `/session/findings.md` holds durable notes, and `/session/report.md` is shown to the user next to the chat.                                                           |
 | `/tmp`                                     | Scratch files that are not persisted.                                                                                                                                                                                                                       |
@@ -104,9 +106,9 @@ Each tool call or bash invocation is one transaction with path checks and a stor
 - `grafana-prom datasources|metrics|labels|series|query`: Prometheus discovery and bounded query summaries. `query` accepts several `-e EXPR` in one call.
 - `grafana-dashboard inspect|queries|fix|validate|data|add-panel|set-panel|label-filter|screenshot`: `queries` lists panel and variable queries of every dashboard (or the given files) as NDJSON with the jq path of each query text, filtered by `--metric`, `--match`, or `--ds`; dashboard summaries (panels with row path, layout, queries, legend, transformations, units and thresholds; variables with current values), explicit layout repair, validation (structure, PromQL syntax with the upstream Prometheus parser, datasource allow-list, and with `--server` a Grafana dry-run of the save), panel data checks that run a panel's queries and apply its transformations, units, and reducers, `add-panel` and `set-panel`, which add or change panels (title, queries, unit, type, position) with schema-correct JSON for classic and v2 files, `label-filter`, which adds a variable-bound Prometheus label matcher to every selected query of a dashboard file (and optionally the query variable), and `screenshot`, which renders a dashboard or panel with the image renderer and attaches the image to the bash result.
 - `grafana-usage dashboard|search|related`: Prometheus metric usage derived from every visible dashboard (or those matching a title search or tag) (metrics, labels, grouping labels, functions, panel co-usage) and metrics related to seed metrics. `dashboard` reads the local working copy, so it sees unsaved edits.
-- `grafana-alert find|get`: read-only Grafana-managed alert rules, found through `panelRef` and the `__dashboardUid__`/`__panelId__` annotations, with PromQL checks to run.
+- `grafana-alert find|get|validate`: Grafana-managed alert rules found through `panelRef` and the `__dashboardUid__`/`__panelId__` annotations, with PromQL checks to run and the path of each rule's working copy; `validate` checks changed rule working copies (expression graph, durations, PromQL, contact point and time interval references, datasource allow-list, and changes Grafana would ignore).
 - `jsonnet [eval] FILE [-o OUT] [--resource UID]`, `jsonnet fix FILE`: Jsonnet evaluation and repair in the backend. The vendored libraries are files under `/lib/jsonnet`.
-- `workspace status|diff|discard|apply|revert|receipts`: staged changes (`diff --stat` summarizes repeated replacements), reviewed writes, reverts, and receipts.
+- `workspace status|diff|discard|apply|revert|receipts`: staged dashboard and alert rule changes (`diff --stat` summarizes repeated replacements), reviewed writes, reverts, and receipts.
 - `live status|diff|apply|discard`: review and apply edits of `/live/dashboard/dashboard.json` to the unsaved dashboard in the browser.
 - `python3` / `python`: CPython compiled to WebAssembly, run in a Web Worker per invocation with no network access. It works on a copy of the filesystem; its file changes go through the same transaction.
 
@@ -123,6 +125,15 @@ Nothing reaches Grafana until the assistant runs:
 Every apply is journaled per operation as `applied`, `declined`, `conflicted`, `failed`, `unknown`, or `not attempted`. Imported chat sessions drop the journal, so approvals do not carry over. Jsonnet files from sessions created with the retired virtual-file tools migrate into `/workspace`.
 
 Live edits (`live apply`) change only the unsaved dashboard open in the browser and do not ask for approval. Saving that state still goes through Grafana's own save flow.
+
+## Alert rule changes
+
+Alert rules follow the same workflow: the assistant edits `/grafana/alert-rules/<uid>/rule.json`, runs `grafana-alert validate`, and applies with `workspace apply`; one review can hold dashboards and alert rules, listed in separate sections with rules grouped by folder and evaluation group. The working copy holds the rule's `spec` and folder; its evaluation group and provenance are kept from Grafana on every write.
+
+- Provisioned rules (file, API, or converted Prometheus provenance) are read-only.
+- Evaluation intervals belong to the rule group. Grafana ignores interval changes in single-rule updates, so validation rejects them for grouped rules; ungrouped rules can change theirs. Moving rules between folders or groups is not supported.
+- Grafana's AlertRule API does not enforce `resourceVersion` on writes, so the assistant compares the stored revision right before each write and reports `conflicted` when the rule changed since it was fetched. A change made in the moment between that check and the write is not detected; the review says so.
+- New rules are created from a new directory in no evaluation group; `rm -r /grafana/alert-rules/<uid>` stages a deletion. `workspace revert` restores a rule from the receipt's diff or the rule's version history.
 
 ## Context window and compaction
 

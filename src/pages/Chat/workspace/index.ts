@@ -128,7 +128,11 @@ export function createSessionWorkspaceToolkit(options: SessionWorkspaceToolkitOp
   };
   return {
     tools: createWorkspaceTools(deps),
-    promptSection: renderWorkspacePromptSection({ pythonAvailable: Boolean(options.python), liveDashboardMounted }),
+    promptSection: renderWorkspacePromptSection({
+      pythonAvailable: Boolean(options.python),
+      liveDashboardMounted,
+      alertRulesMounted: Boolean(alertRules),
+    }),
     runShell: (command, signal) => runWorkspaceBash(deps, { command }, signal),
   };
 }
