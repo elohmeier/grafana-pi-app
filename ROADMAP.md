@@ -84,6 +84,37 @@ design rationale, but three of its proposals were superseded:
 - **Session storage:** chat sessions, including the session filesystem, are
   stored per Grafana user in PostgreSQL for HA deployments, with plugin user
   storage kept for existing installations.
+- **Pi 0.87.1 and protocol parity (2026-09-29):** `pi-agent-core`/`pi-ai` are
+  upgraded from 0.75.5. The backend speaks Pi 0.87's proxy protocol (system
+  prompt and tools arrive as system messages with sections and tool deltas;
+  `toolcall_end` carries the parsed call), and `llm_protocol_parity_test.go`
+  covers Chat Completions/Responses translation: reasoning items and thinking
+  formats, usage, tool-call IDs across protocol switches, parallel calls,
+  cancellation, the `auto` fallback, upstream errors, and output clamping. The
+  tests found and fixed three bugs: in-stream Chat Completions errors and
+  truncated streams passed as normal replies, Responses `call|item` IDs leaked
+  into Chat Completions history, and user cancellation was reported as a
+  transport failure instead of `aborted`. `AssistantSession` tests cover
+  streaming, tool round trips, cancellation mid-stream and mid-tool, and resume
+  with a compaction summary; `llm_smoke_test.go` is an opt-in check against a
+  real model server (`PI_LLM_SMOKE_URL`).
+- **Alert rules as change sets (M5 subset, 2026-09-29):** every visible
+  Grafana-managed rule is a working copy at
+  `/grafana/alert-rules/<uid>/rule.json` (read-only `meta.json`, catalog
+  `/grafana/catalog/alert-rules.ndjson`) through the App Platform AlertRule API.
+  `grafana-alert validate` checks structure, the expression graph and
+  condition, PromQL syntax with the upstream parser, contact point, time
+  interval and routing references, and the datasource allow-list.
+  `workspace status|diff|apply|revert|receipts` handle dashboards and rules in
+  one change set; the review groups rules by folder and evaluation group.
+  Creates and deletes work. Provisioned rules are read-only; writes keep the
+  stored group and provenance; interval changes on grouped rules and moves
+  between folders or groups are rejected, because Grafana's single-rule update
+  would silently keep the group's interval. Grafana does not enforce
+  `resourceVersion` for this API (legacy storage), so the broker re-reads each
+  rule right before writing and reports `conflicted` if it moved; a write in
+  between is not detected, which `meta.json` (`preconditions: client`) and the
+  review state.
 
 ### Decisions taken since the review
 
@@ -155,28 +186,27 @@ design rationale, but three of its proposals were superseded:
 - **Server-side policy:** the datasource allow-list and dashboard validation run
   in the browser, and approval is bound to the change-set digest but not to the
   actor or an expiry (see the decision above).
-- **Alert resources and commands (M5).** Alerting is read-only: `grafana-alert`
-  finds and prints rules.
+- **Rest of M5:** rule group operations (interval, reordering, moves), silences,
+  contact points, notification policies, and mute timings.
 - **Restricted MSSQL/Elasticsearch sources and the output policy (M6).**
 - **Conversational alerting and channels (M7)**, including presentation events
   that channel adapters can render; `evidence show` renders only in the Grafana chat.
-- **Pi upgrade.** The app pins `pi-agent-core` 0.75.5; the reviewed checkout is
-  0.87.1. Upgrade it with stream, cancellation, tool, reasoning, and resume tests
-  before the host pilot rather than during it.
 - **Release.** The redesign is on the `bash` branch and not yet released.
 
 ### Next steps
 
 1. Run the compaction benchmark for each model profile in use and tune the
    summarizer prompt or trigger ratios where recall drops.
-2. Upgrade Pi and add protocol parity tests for the backend's Chat
-   Completions/Responses translation (reasoning items, usage, tool-call IDs,
-   cancellation, retries), so a host can take over protocol handling.
-3. Run the OpenClaw/Mattermost host and identity pilot (A0) with `AssistantSession`
-   as the unit a server host runs.
-4. With a server host: a query broker that enforces the datasource allow-list,
-   approvals bound to actor, change-set digest, and expiry, and read-only alert
-   commands and silences toward M5 and the companion plan's A1–A4.
+2. Run the alert troubleshooting and dashboard benchmarks against the Pi 0.87
+   build and the default local model, and add a benchmark for a model-driven
+   alert rule edit through `workspace apply`.
+3. Silences as reviewed changes (`grafana-alert silence`, expire), using the
+   change-set review and operation journal, toward the companion plan's A2.
+4. Build the Pi host and Mattermost identity spike (A0): a Node service running
+   `AssistantSession` with a server `SessionHost` and broker-issued grants.
+5. With the server host: a query broker that enforces the datasource allow-list,
+   approvals bound to actor, change-set digest, and expiry, and the companion
+   plan's A1–A4.
 
 The follow-up [conversational alerting design](docs/conversational-alerting.md)
 extends this roadmap with proactive Mattermost/Webex incident threads, screenshots,
@@ -315,9 +345,9 @@ model authorization. Switch only after parity tests for reasoning items, usage,
 tool-call IDs, cancellation, and retries; avoid maintaining two competing protocol
 implementations after cutover.
 
-The app pins Pi **0.75.5**. The local Pi checkout reviewed is **0.87.1** at
-`5fd446ca1`; its newer runtime APIs must not be assumed compatible. Upgrade as
-an explicit change with stream, cancellation, tools, reasoning, and resume tests.
+At review time the app pinned Pi **0.75.5** against a reviewed checkout of
+**0.87.1** (`5fd446ca1`). The upgrade to 0.87.1 landed on 2026-09-29 with
+stream, cancellation, tool, reasoning, and resume tests (see [Status](#implemented)).
 
 ### Suggested code ownership
 
