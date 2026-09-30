@@ -120,9 +120,9 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
     },
     'add-panel': {
       summary:
-        'Add a Prometheus panel to a dashboard file (working copy or /live/dashboard/dashboard.json) with schema-correct JSON for classic or v2. Placed at the bottom, next to/below another panel, or at explicit grid coordinates.',
+        'Add a Prometheus panel to a dashboard file (working copy or /live/dashboard/dashboard.json) with schema-correct JSON for classic or v2. Placed at the bottom, at the top (--top), next to/below another panel, or at explicit grid coordinates; panels in the way move down (reported as moved). The datasource defaults to the one of the anchor panel; --like also copies its visualization, options, and field config.',
       usage:
-        'grafana-dashboard add-panel PATH --title TITLE --expr EXPR [--expr EXPR]... [--legend FMT]... [--type timeseries] [--unit UNIT] [--right-of ID | --below ID | --x X --y Y] [--w 12] [--h 8] [--row TITLE]',
+        'grafana-dashboard add-panel PATH --title TITLE --expr EXPR [--expr EXPR]... [--legend FMT]... [--type timeseries] [--unit UNIT] [--like ID] [--right-of ID | --below ID | --top | --x X --y Y] [--w 12] [--h 8] [--row TITLE]',
       effect: 'local-stage',
       options: {
         ...PANEL_CONTENT_OPTIONS,
@@ -131,6 +131,12 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
           description: 'Place to the right of this panel (id or element name), or below it if it does not fit.',
         },
         below: { type: 'string', description: 'Place directly below this panel.' },
+        top: { type: 'boolean', description: 'Place at the top of the row or grid; the panels there move down.' },
+        like: {
+          type: 'string',
+          description:
+            'Copy visualization type, options, field config (unit, thresholds, legend), and query datasource from this panel; --type/--unit override.',
+        },
         row: { type: 'string', description: 'Row or tab title to add the panel to (default: the last one).' },
       },
       examples: [
@@ -149,15 +155,17 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
             rightOf: stringOption(parsed, 'right-of'),
             below: stringOption(parsed, 'below'),
             row: stringOption(parsed, 'row'),
+            top: parsed.options.top === true,
+            like: stringOption(parsed, 'like'),
           });
         });
       },
     },
     'set-panel': {
       summary:
-        'Change a panel in a dashboard file: title, description, visualization type, unit, queries by refId (unknown refIds are added), and grid position or size.',
+        'Change a panel in a dashboard file: title, description, visualization type, unit, queries by refId (unknown refIds are added; --ds converts queries of another datasource to PromQL), and grid position or size.',
       usage:
-        'grafana-dashboard set-panel PATH --panel ID [--title T] [--type T] [--unit U] [--expr EXPR [--ref A]]... [--legend FMT]... [--x X] [--y Y] [--w W] [--h H]',
+        'grafana-dashboard set-panel PATH --panel ID [--title T] [--type T] [--unit U] [--ds UID] [--expr EXPR [--ref A]]... [--legend FMT]... [--x X] [--y Y] [--w W] [--h H]',
       effect: 'local-stage',
       options: {
         panel: { type: 'string', description: 'Panel id (classic or v2) or v2 element name.' },
@@ -174,7 +182,11 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
             throw new UsageError('--panel is required');
           }
           const queries = listOption(parsed, 'expr').length > 0 ? panelQueries(parsed) : undefined;
-          return setPanel(resource, { panel, ...panelFields(parsed), ...(queries ? { queries } : {}) });
+          return setPanel(resource, {
+            panel,
+            ...panelFields(parsed),
+            ...(queries ? { queries, refIdsImplicit: listOption(parsed, 'ref').length < queries.length } : {}),
+          });
         });
       },
     },

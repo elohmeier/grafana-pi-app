@@ -11,7 +11,7 @@ import React, {
   useSyncExternalStore,
 } from 'react';
 import { css, cx } from '@emotion/css';
-import { type AgentEvent, type AgentMessage, type StreamFn, streamProxy } from '@earendil-works/pi-agent-core';
+import { type AgentEvent, type AgentMessage, type StreamFn } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, ToolResultMessage } from '@earendil-works/pi-ai';
 import { SceneComponentProps, SceneObjectBase, SceneObjectState } from '@grafana/scenes';
 import {
@@ -46,6 +46,7 @@ import { DEFAULT_SHELL_CWD } from './workspace/shell';
 import { navigatePromptHistory, promptHistory, type PromptHistoryState } from './promptHistory';
 import { usePluginMeta } from '../../utils/utils.plugin';
 import { formatAssistantError, type AssistantErrorView } from './llmErrors';
+import { createGrafanaStreamFn } from './grafanaStream';
 import { getConfiguredModels, resolveChatModelSettings, type PiAppJsonData, type PiAppThinkingLevel } from './model';
 import {
   conversationMessages,
@@ -233,14 +234,12 @@ export function ChatApp({
     : THINKING_LEVEL_OPTIONS;
   const skills = useMemo(() => getGrafanaSkills(jsonData), [jsonData]);
   const assistantTelemetry = useMemo(() => createAssistantTelemetryReporter(), []);
-  const streamFn = useCallback<StreamFn>(
-    (model, context, options) =>
-      streamProxy(model, context, {
-        ...options,
-        // Request the configured output budget explicitly; the backend clamps it per model.
-        maxTokens: options?.maxTokens ?? model.maxTokens,
-        authToken: 'grafana',
+  const streamFn = useMemo<StreamFn>(
+    () =>
+      createGrafanaStreamFn({
         proxyUrl: `/api/plugins/${PLUGIN_ID}/resources/llm`,
+        // backendSrv renews an expired session token on 401 before failing this request.
+        refreshSession: () => getBackendSrv().get('/api/user', undefined, undefined, { showErrorAlert: false }),
       }),
     []
   );

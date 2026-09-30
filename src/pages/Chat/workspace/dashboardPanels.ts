@@ -152,7 +152,7 @@ export function collectVariables(shape: DashboardShape, dashboard: JsonObject): 
     const spec = isObject(item.spec) ? item.spec : item;
     const name = asText(spec.name);
     if (name) {
-      variables[name] = templateValue(spec);
+      variables[name] = templateValue(spec, asText(spec.type) || asText(item.kind));
     }
   }
   return variables;
@@ -284,9 +284,13 @@ function substituteVars(
   return value;
 }
 
-function templateValue(spec: JsonObject): TemplateValue {
+function templateValue(spec: JsonObject, type: string): TemplateValue {
   const current = isObject(spec.current) ? spec.current : {};
-  const values = asValues(current.value);
+  let values = asValues(current.value);
+  // Constants and text boxes take their value from `query` when no current value is saved.
+  if (values.length === 0 && /^(constant|textbox|ConstantVariable|TextVariable)$/.test(type)) {
+    values = asValues(spec.query);
+  }
   const text = Array.isArray(current.text) ? current.text.map(asText) : asText(current.text);
   const allValues = (Array.isArray(spec.options) ? spec.options : [])
     .filter(isObject)
@@ -440,7 +444,7 @@ function v2QueryToTarget(query: JsonObject, refId: string): JsonObject {
 type V2Placement = { order: number; rowPath: string[]; gridPos?: JsonObject };
 
 /** Layout order, row/tab path, and grid position of each referenced element. */
-function v2LayoutPlacements(layout: unknown): Map<string, V2Placement> {
+export function v2LayoutPlacements(layout: unknown): Map<string, V2Placement> {
   const placements = new Map<string, V2Placement>();
   const walk = (node: unknown, rowPath: string[], gridPos: JsonObject | undefined): void => {
     if (Array.isArray(node)) {
@@ -565,7 +569,7 @@ export function isObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function deepClone<T>(value: T): T {
+export function deepClone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 

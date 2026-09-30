@@ -11,6 +11,7 @@ import type { DashboardMutationAPI } from '@grafana/data';
 import type { PiAppThinkingLevel } from '../../../types';
 import {
   conversationMessages,
+  userPromptTexts,
   convertChatMessagesToLlm,
   createUserShellMessage,
   hasPersistableMessages,
@@ -410,7 +411,10 @@ export class AssistantSession {
   /** System prompt, tools, and active skills for the next prompt. */
   private buildTurn(prompt: string, environment: SessionEnvironment) {
     const page = environment.pageInPrompt ? environment.page : undefined;
-    const skillSelection = selectGrafanaSkills(prompt, environment.skills, sidebarPageContextSkillHints(page));
+    const skillSelection = selectGrafanaSkills(prompt, environment.skills, {
+      ...sidebarPageContextSkillHints(page),
+      previousPrompts: userPromptTexts(this.messages),
+    });
     const toolkit = this.toolkitFor(environment);
     const systemPrompt = [
       renderGrafanaSystemPrompt({

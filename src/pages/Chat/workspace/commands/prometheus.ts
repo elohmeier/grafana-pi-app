@@ -1,3 +1,11 @@
+import {
+  applyVariableOverrides,
+  DashboardWalkError,
+  prometheusVariableFormatter,
+  replaceVariables,
+  type TemplateValue,
+  unresolvedVariables,
+} from '../dashboardPanels';
 import { normalizeWorkspacePath } from '../paths';
 import {
   json,
@@ -38,10 +46,16 @@ export const grafanaPromCommand: WorkspaceCommandSpec = {
         const result = await requireProm(ctx).metricNames(stringOption(parsed, 'ds'), ctx.signal);
         const names = regex ? result.names.filter((name) => regex.test(name)) : result.names;
         const shown = names.slice(0, limit);
-        const stderr =
+        const invalid = names.filter((name) => !METRIC_NAME.test(name));
+        const stderr = [
+          names.length === 0 && pattern ? `# no metric names match ${pattern}\n` : '',
           names.length > shown.length
             ? `# ${names.length - shown.length} more metrics omitted (--limit ${limit})\n`
-            : '';
+            : '',
+          invalid.length > 0
+            ? `# ${invalid.length} names are not PromQL identifiers; select them by name, e.g. {__name__=${JSON.stringify(invalid[0])}}\n`
+            : '',
+        ].join('');
         return ok(shown.length ? `${shown.join('\n')}\n` : '', stderr);
       },
     },
@@ -68,15 +82,16 @@ export const grafanaPromCommand: WorkspaceCommandSpec = {
             names.names.length > limit ? `# ${names.names.length - limit} more labels omitted\n` : ''
           );
         }
-        const result = await requireProm(ctx).labelValues(
-          stringOption(parsed, 'ds'),
-          label,
-          stringOption(parsed, 'match'),
-          ctx.signal
-        );
+        const match = stringOption(parsed, 'match');
+        checkSelector(match);
+        const result = await requireProm(ctx).labelValues(stringOption(parsed, 'ds'), label, match, ctx.signal);
         const shown = result.values.slice(0, limit);
         const stderr =
-          result.values.length > shown.length ? `# ${result.values.length - shown.length} more values omitted\n` : '';
+          result.values.length === 0
+            ? `# no values for label ${label}${match ? ` matching ${match}` : ''}\n`
+            : result.values.length > shown.length
+              ? `# ${result.values.length - shown.length} more values omitted\n`
+              : '';
         return ok(shown.length ? `${shown.join('\n')}\n` : '', stderr);
       },
     },
@@ -93,6 +108,7 @@ export const grafanaPromCommand: WorkspaceCommandSpec = {
         if (!match) {
           throw new UsageError('SELECTOR is required');
         }
+        checkSelector(match);
         const limit = numberOption(parsed, 'limit', 50, 1, 500);
         const result = await requireProm(ctx).series(stringOption(parsed, 'ds'), match, limit, ctx.signal);
         const stderr = result.truncated ? `# more than ${limit} series matched; narrow the selector\n` : '';
@@ -106,11 +122,16 @@ export const grafanaPromCommand: WorkspaceCommandSpec = {
       summary:
         'Run PromQL and print {queryType, failed, results: [...]} with compact min/max/last summaries per expression (never raw frames). Repeat -e to validate several expressions in one call.',
       usage:
-        'grafana-prom query EXPR | -e EXPR [-e EXPR]... | --file FILE [--range] [--from now-1h] [--to now] [--step 1m] [--ds UID]',
+        'grafana-prom query EXPR | -e EXPR [-e EXPR]... | --file FILE [--var NAME=VALUE]... [--range] [--from now-1h] [--to now] [--step 1m] [--ds UID]',
       effect: 'remote-read',
       options: {
         file: { type: 'string', alias: 'f', description: 'Read one expression per line from FILE; - reads stdin.' },
-        expr: { type: 'string[]', alias: 'e', description: 'PromQL expression (repeatable, max 10).' },
+        expr: { type: 'string[]', alias: 'e', description: 'PromQL expression (repeatable).' },
+        var: {
+          type: 'string[]',
+          description:
+            'Dashboard variable value NAME=VALUE for $NAME in the expressions (repeat a name for several values).',
+        },
         range: { type: 'boolean', description: 'Run a range query instead of an instant query.' },
         from: { type: 'string', description: 'Range start (implies --range).' },
         to: { type: 'string', description: 'Range end (implies --range).' },
@@ -143,15 +164,13 @@ export const grafanaPromCommand: WorkspaceCommandSpec = {
         if (expressions.length === 0) {
           throw new UsageError('EXPR is required');
         }
-        if (expressions.length > 10) {
-          throw new UsageError('at most 10 expressions per call');
-        }
+        const queries = substituteVariables(expressions, listOption(parsed, 'var'));
         const from = stringOption(parsed, 'from');
         const to = stringOption(parsed, 'to');
         const step = stringOption(parsed, 'step');
         const type = parsed.options.range === true || from || to || step ? 'range' : 'instant';
         const summaries = [];
-        for (const query of expressions) {
+        for (const query of queries) {
           const summary = await requireProm(ctx).query(
             stringOption(parsed, 'ds'),
             {
@@ -170,6 +189,16 @@ export const grafanaPromCommand: WorkspaceCommandSpec = {
             data: summary,
             summary: `${type} query, ${String(summary.totalSeries ?? 0)} series`,
           });
+          if (summary.totalSeries === 0 && typeof summary.validationError !== 'string') {
+            const notices = Array.isArray(summary.notices) ? summary.notices : [];
+            summary.notices = [
+              ...notices,
+              {
+                severity: 'info',
+                text: 'no series matched; check metric and label names and values with `grafana-prom series` before treating this as "no data right now"',
+              },
+            ];
+          }
           summaries.push(artifact ? { ...summary, artifact: `/artifacts/${artifact.id}.json` } : summary);
         }
         const failed = summaries.filter((summary) => typeof summary.validationError === 'string').length;
@@ -178,6 +207,47 @@ export const grafanaPromCommand: WorkspaceCommandSpec = {
     },
   },
 };
+
+/**
+ * Substitutes --var values like the Prometheus datasource does. A dashboard variable left in the
+ * expression reaches Prometheus as a literal `$name` (a regex anchor inside =~), so it matches nothing
+ * or fails; refuse instead of reporting zero series. Grafana's own `$__` macros pass through.
+ */
+function substituteVariables(expressions: string[], items: string[]) {
+  const variables: Record<string, TemplateValue> = {};
+  try {
+    applyVariableOverrides(variables, items);
+  } catch (error) {
+    if (error instanceof DashboardWalkError) {
+      throw new UsageError(error.message);
+    }
+    throw error;
+  }
+  const queries = expressions.map((expression) => replaceVariables(expression, variables, prometheusVariableFormatter));
+  const missing = [
+    ...new Set(queries.flatMap((query) => unresolvedVariables(query)).filter((name) => !name.startsWith('__'))),
+  ];
+  if (missing.length > 0) {
+    throw new UsageError(
+      `the expression uses dashboard variables ${missing.map((name) => `$${name}`).join(', ')}, which only a dashboard resolves; pass ${missing.map((name) => `--var ${name}=VALUE`).join(' ')}, or check a panel with \`grafana-dashboard data PATH --panel ID\``
+    );
+  }
+  return queries;
+}
+
+const METRIC_NAME = /^[A-Za-z_:][A-Za-z0-9_:]*$/;
+
+/** `name with spaces{...}` is not PromQL; Prometheus answers such selectors with a bare 400. */
+function checkSelector(selector: string | undefined) {
+  const match = selector?.trim().match(/^([^{}()"=~!]+?)\s*(?:\{(.*)\})?$/s);
+  if (!match || METRIC_NAME.test(match[1])) {
+    return;
+  }
+  const matchers = [`__name__=${JSON.stringify(match[1])}`, ...(match[2]?.trim() ? [match[2].trim()] : [])];
+  throw new UsageError(
+    `${JSON.stringify(match[1])} is not a valid PromQL metric name; select it by name: {${matchers.join(', ')}}`
+  );
+}
 
 function requireProm(ctx: WorkspaceCommandContext) {
   if (!ctx.broker.prometheus) {

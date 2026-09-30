@@ -37,6 +37,16 @@ export function formatAssistantError(errorMessage?: string, stopReason?: string)
     };
   }
 
+  if (/^Proxy error: 401\b/.test(rawMessage.trim())) {
+    return {
+      title: 'Grafana session expired',
+      message:
+        'Grafana rejected the request because the login session is no longer valid. Reload the page and sign in again if asked, then send the message again. Work in the chat and unsaved dashboard changes in the browser are kept.',
+      details: rawMessage,
+      severity: 'error',
+    };
+  }
+
   if (normalized === 'OpenAI-compatible API key is not configured') {
     return {
       title: 'LLM API key is not configured',

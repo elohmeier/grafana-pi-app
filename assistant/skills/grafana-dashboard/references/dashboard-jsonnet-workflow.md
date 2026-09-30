@@ -16,7 +16,7 @@ For new dashboards, prefer the bundled helper library:
 local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
 ```
 
-Use `d.dashboard.new(title=..., uid=..., time={ from: 'now-6h', to: 'now' }, rows=[...])`, `d.row`, `d.layout.full`, `d.layout.twoUp`, `d.layout.threeUp`, `d.layout.fourUp`, `d.layout.statStrip`, `d.panel.timeseries`, `d.panel.stat`, `d.panel.table`, and `d.prom.query`.
+Use `d.dashboard.new(title=..., uid=..., time={ from: 'now-6h', to: 'now' }, rows=[...])`, `d.row`, `d.layout.full`, `d.layout.twoUp`, `d.layout.threeUp`, `d.layout.fourUp`, `d.layout.statStrip`, `d.panel.timeseries`, `d.panel.stat`, `d.panel.bargauge`, `d.panel.piechart`, `d.panel.table`, `d.panel.text`, and `d.prom.query`.
 
 Valid `d.dashboard.new` named arguments are `title`, `uid`, `tags`, `timezone`, `time`, `refresh`, `rows`, `panels`, and `variables`. `rows` takes `d.row(...)` results; `d.layout.*` groups in `rows` or `panels` are laid out without a row header. `d.prom.query(expr, datasourceUid, refId=null, legend='', instant=false)` also accepts `legendFormat=` for `legend=`. Do not use `timeframe`, `timeFrom`, or `timeTo`.
 
@@ -26,9 +26,12 @@ Valid helper panel signatures:
 
 - `d.panel.timeseries(title, datasourceUid, targets=[], unit=null, decimals=null, options={}, fieldConfig={})`
 - `d.panel.stat(title, datasourceUid, targets=[], unit=null, decimals=null, options={}, fieldConfig={})`
-- `d.panel.table(title, datasourceUid, targets=[], columns=[], rename={}, transformations=[], options={}, fieldConfig={})`
+- `d.panel.bargauge(title, datasourceUid, targets=[], unit=null, decimals=null, options={}, fieldConfig={})`
+- `d.panel.piechart(title, datasourceUid, targets=[], unit=null, decimals=null, options={}, fieldConfig={})`
+- `d.panel.table(title, datasourceUid, targets=[], columns=[], rename={}, transformations=[], unit=null, decimals=null, options={}, fieldConfig={})`
+- `d.panel.text(title, content, mode='markdown')`
 
-Do not pass `span`, `description`, `sortByField`, or `sortDesc` to helper panels. Do not pass `unit` or `decimals` to `d.panel.table`; use `fieldConfig` defaults if needed.
+Do not pass `span`, `description`, `sortByField`, or `sortDesc` to helper panels.
 
 Do not import Grafonnet and do not use constructor chains such as `grafana.dashboard.new()` or `.with_*` methods. If you write raw panels instead of helper calls, write a plain object with explicit `panels`, `targets`, and `gridPos` fields.
 
@@ -63,7 +66,7 @@ Other constructors: `d.variable.query(name, query, datasourceUid)`, `d.variable.
 
 For tables, pass explicit `columns=[...]` and `rename={...}` to `d.panel.table` so the generated panel filters and organizes visible columns.
 
-Before writing dashboard panels, validate candidate rate/trend PromQL with a range query (`grafana-prom query EXPR --from ... --to ...`) matching the dashboard time range. Treat `validationError` or zero-series candidates as unusable evidence. If the supervisor task already provides explicit panel queries and says they were validated from tool evidence with non-zero series and no `validationError`, trust that handoff and move directly to writing the Jsonnet.
+Before writing dashboard panels, validate candidate rate/trend PromQL with a range query (`grafana-prom query EXPR --from ... --to ...`) matching the dashboard time range. Treat `validationError` or zero-series candidates as unusable evidence.
 
 Prefer short file names that match the dashboard subject, for example `node-overview.jsonnet` or `service-latency.jsonnet`.
 

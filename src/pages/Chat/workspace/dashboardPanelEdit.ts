@@ -5,6 +5,8 @@
  * these functions produce the schema-correct JSON for either format.
  */
 
+import { deepClone } from './dashboardPanels';
+
 type AnyRecord = Record<string, any>;
 
 export type PanelQueryInput = { refId: string; expr: string; legendFormat?: string };
@@ -25,6 +27,10 @@ export type AddPanelOptions = PanelPosition & {
   below?: string;
   /** Row or tab title to add the panel to (default: the last row or tab). */
   row?: string;
+  /** Place at the top of the row or grid (x=0 unless given), pushing the panels there down. */
+  top?: boolean;
+  /** Copy visualization type, options, field config, and query datasource from this panel. */
+  like?: string;
 };
 
 export type SetPanelOptions = PanelPosition & {
@@ -35,6 +41,9 @@ export type SetPanelOptions = PanelPosition & {
   unit?: string;
   /** Queries to set by refId; an unknown refId adds a query. */
   queries?: PanelQueryInput[];
+  /** The refIds were assigned by position (A, B, ...), not given explicitly. */
+  refIdsImplicit?: boolean;
+  /** Prometheus datasource UID for the set queries; converts non-Prometheus queries. */
   datasourceUid?: string;
 };
 
@@ -44,6 +53,9 @@ export type PanelEditReport = {
   title?: string;
   position?: { x: number; y: number; w: number; h: number };
   changed: string[];
+  /** Panels pushed down to make room, by id (classic) or element name (v2). */
+  moved?: string[];
+  note?: string;
 };
 
 type GridItem = { x: number; y: number; w: number; h: number };
@@ -74,7 +86,15 @@ function addClassicPanel(spec: AnyRecord, options: AddPanelOptions): PanelEditRe
   spec.panels = Array.isArray(spec.panels) ? spec.panels : [];
   const all = classicPanels(spec.panels);
   const id = Math.max(0, ...all.map((panel) => (typeof panel.id === 'number' ? panel.id : 0))) + 1;
-  const datasourceUid = options.datasourceUid ?? classicPrometheusUid(all);
+  const reference = referencePanelKey(options);
+  const referencePanel = reference ? all.find((panel) => String(panel.id) === reference) : undefined;
+  if (options.like && !referencePanel) {
+    throw new Error(`no panel with id ${JSON.stringify(options.like)} to copy with --like`);
+  }
+  const datasourceUid =
+    options.datasourceUid ??
+    (referencePanel ? classicPrometheusUid([referencePanel]) : undefined) ??
+    classicPrometheusUid(all);
   let container: AnyRecord[] = spec.panels;
   let siblings = spec.panels.filter((panel: AnyRecord) => panel?.type !== 'row');
   if (options.row) {
@@ -90,37 +110,46 @@ function addClassicPanel(spec: AnyRecord, options: AddPanelOptions): PanelEditRe
       siblings = classicRowSection(spec.panels, row);
     }
   }
-  const position = place(
+  const { position, note } = place(
     options,
     siblings.map((panel: AnyRecord) => ({ key: String(panel.id), ...classicGrid(panel) })),
     options.row ? classicRowFloor(spec.panels, options.row) : 0
   );
+  const like = options.like ? referencePanel : undefined;
   const panel = {
     id,
-    type: options.type ?? 'timeseries',
+    type: options.type ?? (like && typeof like.type === 'string' ? like.type : 'timeseries'),
     title: options.title,
     ...(options.description ? { description: options.description } : {}),
     ...(datasourceUid ? { datasource: { type: 'prometheus', uid: datasourceUid } } : {}),
     gridPos: { x: position.x, y: position.y, w: position.w, h: position.h },
-    fieldConfig: { defaults: options.unit ? { unit: options.unit } : {}, overrides: [] },
-    options: {},
+    fieldConfig: withUnit(like?.fieldConfig, options.unit),
+    options: isRecord(like?.options) ? deepClone(like.options) : {},
     targets: options.queries.map((query) => classicTarget(query, datasourceUid)),
   };
-  if (container === spec.panels && options.row) {
-    // Insert after the last panel of the row section so the row keeps the panel.
-    const section = classicRowSection(
-      spec.panels,
-      spec.panels.find((p: AnyRecord) => p?.type === 'row' && p.title === options.row)
-    );
-    const last = section[section.length - 1];
-    const index = last
-      ? spec.panels.indexOf(last) + 1
-      : spec.panels.findIndex((p: AnyRecord) => p?.type === 'row' && p.title === options.row) + 1;
-    spec.panels.splice(index, 0, panel);
+  // Grafana compacts overlapping panels unpredictably; move the ones in the way down instead.
+  const moved = makeRoom(
+    container.filter(isRecord).map((item: AnyRecord) => ({
+      key: String(item.id),
+      ...classicGrid(item),
+      move: (y: number) => (item.gridPos = { ...item.gridPos, y }),
+    })),
+    position
+  );
+  if (container === spec.panels) {
+    insertInGridOrder(spec.panels, panel);
   } else {
     container.push(panel);
   }
-  return { format: 'classic', panel: String(id), title: options.title, position, changed: ['added'] };
+  return {
+    format: 'classic',
+    panel: String(id),
+    title: options.title,
+    position,
+    changed: ['added'],
+    ...(moved.length ? { moved } : {}),
+    ...(note ? { note } : {}),
+  };
 }
 
 function setClassicPanel(spec: AnyRecord, options: SetPanelOptions): PanelEditReport {
@@ -151,24 +180,49 @@ function setClassicPanel(spec: AnyRecord, options: SetPanelOptions): PanelEditRe
   }
   if (options.queries?.length) {
     panel.targets = Array.isArray(panel.targets) ? panel.targets : [];
+    checkImplicitRefIds(
+      options,
+      panel.targets.map((target: AnyRecord, index: number) => target?.refId ?? String.fromCharCode(65 + index))
+    );
+    const inherited = isRecord(panel.datasource) ? { ...panel.datasource } : undefined;
     const datasourceUid =
-      options.datasourceUid ??
-      (isRecord(panel.datasource) ? panel.datasource.uid : undefined) ??
-      classicPrometheusUid([panel]);
+      options.datasourceUid ?? classicPrometheusUid([panel]) ?? classicPrometheusUid(classicPanels(spec.panels));
     for (const query of options.queries) {
-      const target = panel.targets.find((candidate: AnyRecord) => (candidate?.refId ?? 'A') === query.refId);
-      if (target) {
+      const index = panel.targets.findIndex((candidate: AnyRecord) => (candidate?.refId ?? 'A') === query.refId);
+      const target = panel.targets[index];
+      const type = target ? classicDatasourceType(target.datasource ?? panel.datasource) : 'prometheus';
+      if (target && type !== 'prometheus') {
+        // A PromQL expression next to builder fields of another datasource is a broken query; rebuild it.
+        panel.targets[index] = {
+          ...classicTarget(query, requirePrometheusUid(options.datasourceUid, query.refId, type)),
+          ...(target.hide !== undefined ? { hide: target.hide } : {}),
+        };
+      } else if (target) {
         target.expr = query.expr;
         if (query.legendFormat !== undefined) {
           target.legendFormat = query.legendFormat;
+        }
+        if (options.datasourceUid) {
+          target.datasource = { type: 'prometheus', uid: options.datasourceUid };
         }
       } else {
         panel.targets.push(classicTarget(query, datasourceUid));
       }
       changed.push(`query ${query.refId}`);
     }
+    // The panel datasource must match its queries, or Grafana runs them against the old one.
+    const effective = panel.targets.map((target: AnyRecord) => target?.datasource ?? inherited);
+    const uids = new Set(effective.map((datasource: AnyRecord) => datasource?.uid));
+    const types = new Set(effective.map(classicDatasourceType));
+    if (types.size > 1) {
+      panel.targets.forEach((target: AnyRecord) => (target.datasource ??= inherited));
+      panel.datasource = { type: 'datasource', uid: '-- Mixed --' };
+    } else if (types.has('prometheus') && uids.size === 1 && typeof [...uids][0] === 'string') {
+      panel.datasource = { type: 'prometheus', uid: [...uids][0] };
+    }
   }
   let position: GridItem | undefined;
+  let moved: string[] = [];
   if (hasPosition(options)) {
     const current = classicGrid(panel);
     position = {
@@ -180,8 +234,46 @@ function setClassicPanel(spec: AnyRecord, options: SetPanelOptions): PanelEditRe
     checkBounds(position);
     panel.gridPos = { ...panel.gridPos, ...position };
     changed.push('position');
+    const panels: AnyRecord[] = spec.panels;
+    const container = panels.includes(panel)
+      ? panels
+      : (panels.find((row) => Array.isArray(row?.panels) && row.panels.includes(panel))?.panels ?? []);
+    moved = makeRoom(
+      container
+        .filter((item: AnyRecord) => isRecord(item) && item !== panel)
+        .map((item: AnyRecord) => ({
+          key: String(item.id),
+          ...classicGrid(item),
+          move: (y: number) => (item.gridPos = { ...item.gridPos, y }),
+        })),
+      position
+    );
+    if (container === panels) {
+      panels.splice(panels.indexOf(panel), 1);
+      insertInGridOrder(panels, panel);
+    }
   }
-  return { format: 'classic', panel: options.panel, title: panel.title, ...(position ? { position } : {}), changed };
+  return {
+    format: 'classic',
+    panel: options.panel,
+    title: panel.title,
+    ...(position ? { position } : {}),
+    changed,
+    ...(moved.length ? { moved } : {}),
+  };
+}
+
+/** Expanded rows own the panels that follow them, so top-level panels go in grid order to stay in their row. */
+function insertInGridOrder(panels: AnyRecord[], panel: AnyRecord) {
+  const position = classicGrid(panel);
+  const index = panels.findIndex((item) => {
+    if (!isRecord(item)) {
+      return false;
+    }
+    const grid = classicGrid(item);
+    return grid.y > position.y || (grid.y === position.y && grid.x > position.x);
+  });
+  panels.splice(index < 0 ? panels.length : index, 0, panel);
 }
 
 function classicPanels(panels: AnyRecord[]): AnyRecord[] {
@@ -234,6 +326,29 @@ function classicPrometheusUid(panels: AnyRecord[]): string | undefined {
   return undefined;
 }
 
+function classicDatasourceType(datasource: unknown): string {
+  // A missing type (or a bare UID string) is treated as Prometheus, as in the rest of the dashboard checks.
+  return isRecord(datasource) && typeof datasource.type === 'string' ? datasource.type : 'prometheus';
+}
+
+function requirePrometheusUid(datasourceUid: string | undefined, refId: string, type: string): string {
+  if (!datasourceUid) {
+    throw new Error(
+      `query ${refId} uses ${type}; pass --ds with a Prometheus datasource UID to replace it with a PromQL query`
+    );
+  }
+  return datasourceUid;
+}
+
+/** Positional refIds only make sense when they cover every query; otherwise `--expr X` meant for B overwrites A. */
+function checkImplicitRefIds(options: SetPanelOptions, existing: string[]) {
+  if (options.refIdsImplicit && existing.length > (options.queries?.length ?? 0)) {
+    throw new Error(
+      `the panel has queries ${existing.join(', ')}; pass --ref for each --expr to say which query it replaces`
+    );
+  }
+}
+
 function classicTarget(query: PanelQueryInput, datasourceUid: string | undefined) {
   return {
     refId: query.refId,
@@ -261,7 +376,23 @@ function addV2Panel(spec: AnyRecord, options: AddPanelOptions): PanelEditReport 
   const grid = anchor
     ? (findV2GridOf(spec.layout, anchor) ?? targetV2Grid(spec, options.row))
     : targetV2Grid(spec, options.row);
-  const datasourceUid = options.datasourceUid ?? v2PrometheusUid(elements);
+  const reference = referencePanelKey(options);
+  const referenceName = reference ? v2ElementName(elements, reference) : undefined;
+  if (options.like && !referenceName) {
+    throw new Error(`no panel ${JSON.stringify(options.like)} to copy with --like`);
+  }
+  const referenceQuery = referenceName
+    ? elements[referenceName]?.spec?.data?.spec?.queries?.find(
+        (query: AnyRecord) => query?.spec?.query?.group === 'prometheus'
+      )?.spec?.query
+    : undefined;
+  // A reference query without a datasource uses the default datasource; keep it that way.
+  const datasourceUid =
+    options.datasourceUid ??
+    (referenceQuery ? referenceQuery.datasource?.name : undefined) ??
+    (referenceQuery ? undefined : v2PrometheusUid(elements));
+  const like = options.like && referenceName ? elements[referenceName]?.spec?.vizConfig : undefined;
+  const likeSpec = isRecord(like?.spec) ? like.spec : {};
   elements[name] = {
     kind: 'Panel',
     spec: {
@@ -279,28 +410,47 @@ function addV2Panel(spec: AnyRecord, options: AddPanelOptions): PanelEditReport 
       },
       vizConfig: {
         kind: 'VizConfig',
-        group: options.type ?? 'timeseries',
-        version: '',
-        spec: { options: {}, fieldConfig: { defaults: options.unit ? { unit: options.unit } : {}, overrides: [] } },
+        group: options.type ?? (typeof like?.group === 'string' ? like.group : 'timeseries'),
+        version: typeof like?.version === 'string' ? like.version : '',
+        spec: {
+          options: isRecord(likeSpec.options) ? deepClone(likeSpec.options) : {},
+          fieldConfig: withUnit(likeSpec.fieldConfig, options.unit),
+        },
       },
     },
   };
-  const reference = { kind: 'ElementReference', name };
+  const elementReference = { kind: 'ElementReference', name };
   if (grid.kind === 'AutoGridLayout') {
-    grid.node.spec.items.push({ kind: 'AutoGridLayoutItem', spec: { element: reference } });
+    grid.node.spec.items.push({ kind: 'AutoGridLayoutItem', spec: { element: elementReference } });
     return { format: 'v2', panel: name, title: options.title, changed: ['added'] };
   }
   const items: AnyRecord[] = grid.node.spec.items;
-  const position = place(
+  const { position, note } = place(
     options,
     items.map((item) => ({ key: item.spec?.element?.name, ...v2Grid(item) })),
     0
   );
+  const moved = makeRoom(
+    items.filter(isRecord).map((item) => ({
+      key: String(item.spec?.element?.name),
+      ...v2Grid(item),
+      move: (y: number) => (item.spec.y = y),
+    })),
+    position
+  );
   items.push({
     kind: 'GridLayoutItem',
-    spec: { x: position.x, y: position.y, width: position.w, height: position.h, element: reference },
+    spec: { x: position.x, y: position.y, width: position.w, height: position.h, element: elementReference },
   });
-  return { format: 'v2', panel: name, title: options.title, position, changed: ['added'] };
+  return {
+    format: 'v2',
+    panel: name,
+    title: options.title,
+    position,
+    changed: ['added'],
+    ...(moved.length ? { moved } : {}),
+    ...(note ? { note } : {}),
+  };
 }
 
 function setV2Panel(spec: AnyRecord, options: SetPanelOptions): PanelEditReport {
@@ -345,13 +495,26 @@ function setV2Panel(spec: AnyRecord, options: SetPanelOptions): PanelEditReport 
       : { kind: 'QueryGroup', spec: { transformations: [], queryOptions: {} } };
     panel.data.spec.queries = Array.isArray(panel.data.spec.queries) ? panel.data.spec.queries : [];
     const queries: AnyRecord[] = panel.data.spec.queries;
+    checkImplicitRefIds(
+      options,
+      queries.map((query, index) => query?.spec?.refId ?? String.fromCharCode(65 + index))
+    );
     const datasourceUid = options.datasourceUid ?? v2PrometheusUid({ [name]: element }) ?? v2PrometheusUid(elements);
     for (const query of options.queries) {
-      const existing = queries.find((candidate) => (candidate?.spec?.refId ?? 'A') === query.refId);
-      if (existing && isRecord(existing.spec?.query?.spec)) {
+      const index = queries.findIndex((candidate) => (candidate?.spec?.refId ?? 'A') === query.refId);
+      const existing = queries[index];
+      const group = existing?.spec?.query?.group;
+      if (existing && typeof group === 'string' && group !== 'prometheus') {
+        const rebuilt = v2PanelQuery(query, requirePrometheusUid(options.datasourceUid, query.refId, group));
+        rebuilt.spec.hidden = existing.spec.hidden === true;
+        queries[index] = rebuilt;
+      } else if (existing && isRecord(existing.spec?.query?.spec)) {
         existing.spec.query.spec.expr = query.expr;
         if (query.legendFormat !== undefined) {
           existing.spec.query.spec.legendFormat = query.legendFormat;
+        }
+        if (options.datasourceUid) {
+          existing.spec.query.datasource = { name: options.datasourceUid };
         }
       } else {
         queries.push(v2PanelQuery(query, datasourceUid));
@@ -360,6 +523,7 @@ function setV2Panel(spec: AnyRecord, options: SetPanelOptions): PanelEditReport 
     }
   }
   let position: GridItem | undefined;
+  let moved: string[] = [];
   if (hasPosition(options)) {
     const item = findV2Item(spec.layout, name);
     if (!item) {
@@ -375,8 +539,26 @@ function setV2Panel(spec: AnyRecord, options: SetPanelOptions): PanelEditReport 
     checkBounds(position);
     Object.assign(item.spec, { x: position.x, y: position.y, width: position.w, height: position.h });
     changed.push('position');
+    const items: AnyRecord[] = findV2GridOf(spec.layout, name)?.node.spec.items ?? [];
+    moved = makeRoom(
+      items
+        .filter((entry) => isRecord(entry) && entry !== item)
+        .map((entry) => ({
+          key: String(entry.spec?.element?.name),
+          ...v2Grid(entry),
+          move: (y: number) => (entry.spec.y = y),
+        })),
+      position
+    );
   }
-  return { format: 'v2', panel: name, title: panel.title, ...(position ? { position } : {}), changed };
+  return {
+    format: 'v2',
+    panel: name,
+    title: panel.title,
+    ...(position ? { position } : {}),
+    changed,
+    ...(moved.length ? { moved } : {}),
+  };
 }
 
 function v2PanelQuery(query: PanelQueryInput, datasourceUid: string | undefined) {
@@ -472,25 +654,83 @@ function findV2Item(node: unknown, name: string): AnyRecord | undefined {
 
 // Placement ----------------------------------------------------------------
 
-/** Position for a new panel: explicit coordinates, next to/below an anchor, or at the bottom of the grid. */
-function place(options: AddPanelOptions, items: Array<GridItem & { key: string }>, floor: number): GridItem {
+/**
+ * Position for a new panel: explicit coordinates, the top of the grid, next to/below an anchor, or the
+ * bottom of the grid. Panels in the way are moved down afterwards (makeRoom).
+ */
+function place(
+  options: AddPanelOptions,
+  items: Array<GridItem & { key: string }>,
+  floor: number
+): { position: GridItem; note?: string } {
   const w = options.w ?? DEFAULT_WIDTH;
   const h = options.h ?? DEFAULT_HEIGHT;
   const bottom = Math.max(floor, ...items.map((item) => item.y + item.h));
-  let position: GridItem = { x: options.x ?? 0, y: options.y ?? bottom, w, h };
+  let position: GridItem = { x: options.x ?? 0, y: options.y ?? (options.top ? floor : bottom), w, h };
+  let note: string | undefined;
   const anchorKey = options.rightOf ?? options.below;
-  if (anchorKey && options.x === undefined && options.y === undefined) {
+  if (anchorKey && options.x === undefined && options.y === undefined && !options.top) {
     const anchor = items.find((item) => item.key === anchorKey || item.key === `panel-${anchorKey}`);
     if (!anchor) {
       throw new Error(`no panel ${JSON.stringify(anchorKey)} in the target grid`);
     }
-    position =
-      options.rightOf && anchor.x + anchor.w + w <= GRID_COLUMNS
-        ? { x: anchor.x + anchor.w, y: anchor.y, w, h: options.h ?? anchor.h }
-        : { x: anchor.x, y: anchor.y + anchor.h, w, h };
+    if (options.rightOf && anchor.x + anchor.w + w <= GRID_COLUMNS) {
+      position = { x: anchor.x + anchor.w, y: anchor.y, w, h: options.h ?? anchor.h };
+    } else {
+      position = { x: anchor.x, y: anchor.y + anchor.h, w, h };
+      if (options.rightOf) {
+        note = `no room to the right of ${anchorKey} (x=${anchor.x}, w=${anchor.w}); placed below it. To place it beside, narrow ${anchorKey} first (set-panel --w ${GRID_COLUMNS - w}).`;
+      }
+    }
   }
   checkBounds(position);
-  return position;
+  return { position, ...(note ? { note } : {}) };
+}
+
+type MovableItem = GridItem & { key: string; move: (y: number) => void };
+
+/**
+ * Moves grid items down so none overlaps the new position, cascading like Grafana's grid does.
+ * Only items displaced by the new panel or by a moved item move; returns their keys.
+ */
+function makeRoom(items: MovableItem[], position: GridItem): string[] {
+  const overlaps = (a: GridItem, b: GridItem) =>
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+  const displaced: GridItem[] = [position];
+  const moved: string[] = [];
+  for (const item of [...items].sort((a, b) => a.y - b.y || a.x - b.x)) {
+    let y = item.y;
+    for (let blocker = displaced.find((rect) => overlaps(rect, { ...item, y })); blocker; ) {
+      y = blocker.y + blocker.h;
+      blocker = displaced.find((rect) => overlaps(rect, { ...item, y }));
+    }
+    if (y !== item.y) {
+      item.move(y);
+      moved.push(item.key);
+      displaced.push({ ...item, y });
+    }
+  }
+  return moved;
+}
+
+function referencePanelKey(options: AddPanelOptions) {
+  return options.like ?? options.rightOf ?? options.below;
+}
+
+function v2ElementName(elements: AnyRecord, key: string): string | undefined {
+  return key in elements
+    ? key
+    : Object.keys(elements).find((name) => String(elements[name]?.spec?.id) === key || name === `panel-${key}`);
+}
+
+function withUnit(fieldConfig: unknown, unit: string | undefined): AnyRecord {
+  const copy: AnyRecord = isRecord(fieldConfig) ? deepClone(fieldConfig) : {};
+  copy.defaults = isRecord(copy.defaults) ? copy.defaults : {};
+  copy.overrides = Array.isArray(copy.overrides) ? copy.overrides : [];
+  if (unit) {
+    copy.defaults.unit = unit;
+  }
+  return copy;
 }
 
 function checkBounds(position: GridItem) {

@@ -43,6 +43,20 @@ export function createUserShellMessage(result: WorkspaceBashResult): UserShellMe
  * with a system message holding the prompt and tools of the current turn;
  * the chat shows, stores, and compacts only the conversation.
  */
+/** Texts of the prompts the user sent, oldest first (not shell commands). */
+export function userPromptTexts(messages: readonly AgentMessage[]): string[] {
+  return messages.flatMap((message) => {
+    if (message.role !== 'user') {
+      return [];
+    }
+    const text =
+      typeof message.content === 'string'
+        ? message.content
+        : message.content.map((part) => (part.type === 'text' ? part.text : '')).join('\n');
+    return text.trim() ? [text] : [];
+  });
+}
+
 export function conversationMessages(messages: AgentMessage[]): AgentMessage[] {
   return messages.some((message) => message.role === 'system')
     ? messages.filter((message) => message.role !== 'system')

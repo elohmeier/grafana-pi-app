@@ -305,13 +305,38 @@ local variableList(value) =
       panelBase('stat', title, datasourceUid, targets, unit, decimals, options, fieldConfig)
     ),
 
-    table(title, datasourceUid, targets=[], columns=[], rename={}, transformations=[], options={}, fieldConfig={}):: (
+    table(title, datasourceUid, targets=[], columns=[], rename={}, transformations=[], unit=null, decimals=null, options={}, fieldConfig={}):: (
       local controlledTransforms =
         if std.length(columns) == 0 then []
         else [tableLabelsToFields(), tableFilterFields(columns), tableOrganize(columns, rename)];
-      panelBase('table', title, datasourceUid, targets, null, null, options, fieldConfig) + {
+      panelBase('table', title, datasourceUid, targets, unit, decimals, options, fieldConfig) + {
         transformations: controlledTransforms + transformations,
       }
     ),
+
+    // Horizontal bars per series, e.g. top-N or shares from instant queries.
+    bargauge(title, datasourceUid, targets=[], unit=null, decimals=null, options={}, fieldConfig={}):: (
+      panelBase('bargauge', title, datasourceUid, targets, unit, decimals, {
+        orientation: 'horizontal',
+        displayMode: 'gradient',
+        reduceOptions: { calcs: ['lastNotNull'], fields: '', values: false },
+      } + options, fieldConfig)
+    ),
+
+    // Shares of a whole, e.g. one instant query grouped by the split label.
+    piechart(title, datasourceUid, targets=[], unit=null, decimals=null, options={}, fieldConfig={}):: (
+      panelBase('piechart', title, datasourceUid, targets, unit, decimals, {
+        pieType: 'pie',
+        legend: { displayMode: 'table', placement: 'right', values: ['value', 'percent'] },
+        reduceOptions: { calcs: ['lastNotNull'], fields: '', values: false },
+      } + options, fieldConfig)
+    ),
+
+    // Markdown notes such as data caveats; no queries.
+    text(title, content, mode='markdown'):: {
+      title: title,
+      type: 'text',
+      options: { mode: mode, content: content },
+    },
   },
 }

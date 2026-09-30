@@ -71,9 +71,10 @@ export const grafanaUsageCommand: WorkspaceCommandSpec = {
       async run(parsed, ctx) {
         const query = parsed.positionals.join(' ').trim() || undefined;
         const tag = stringOption(parsed, 'tag');
+        const dashboards = await loadDashboards(ctx, { query, tag });
         const result = await requireUsage(ctx).search(
           {
-            dashboards: await loadDashboards(ctx, { query, tag }),
+            dashboards,
             query,
             tag,
             seedMetrics: listOption(parsed, 'seed'),
@@ -82,7 +83,14 @@ export const grafanaUsageCommand: WorkspaceCommandSpec = {
           },
           ctx.signal
         );
-        return withArtifact(ctx, 'Dashboard metric usage search', 'grafana-usage search', result);
+        const note =
+          query && dashboards.length === 0
+            ? `no dashboard title matches ${JSON.stringify(query)}; QUERY selects dashboards by title, not metrics. Rank around a metric with --seed METRIC, or find panel queries with \`grafana-dashboard queries --match REGEX\`.`
+            : undefined;
+        return withArtifact(ctx, 'Dashboard metric usage search', 'grafana-usage search', {
+          ...(result as object),
+          ...(note ? { note } : {}),
+        });
       },
     },
     related: {

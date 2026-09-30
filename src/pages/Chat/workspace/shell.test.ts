@@ -219,6 +219,17 @@ describe('workspace commands', () => {
     expect(calls.filter((call) => call.startsWith('update:'))).toHaveLength(1);
   });
 
+  it('warns in the review when a change drops panels or variables from a saved dashboard', async () => {
+    const { run, approvals } = setup();
+    await run(
+      `jq '.spec.panels = [] | .spec.templating.list = [{"name": "env", "type": "custom"}]' /grafana/dashboards/checkout/dashboard.json > /tmp/c && mv /tmp/c /grafana/dashboards/checkout/dashboard.json`
+    );
+    const apply = await run('workspace apply');
+    expect(apply.exitCode).toBe(0);
+    const review = (approvals.request.mock.calls[0] as unknown[])[0] as { operations: Array<{ warnings: string[] }> };
+    expect(review.operations[0].warnings).toContain('removal: removes 1 of 1 panels: "Requests"');
+  });
+
   it('rejects changes during approval and reports remote conflicts', async () => {
     const { run, touch, approvals, workspace, calls } = setup();
     await run(`sed -i 's/"Payments"/"Payments 2"/' /grafana/dashboards/payments/dashboard.json`);
@@ -377,6 +388,30 @@ describe('jsonnet command', () => {
     expect(workspace.status()).toEqual([expect.objectContaining({ uid: 'new-slo', change: 'created' })]);
   });
 
+  it('refuses to render over a saved dashboard when the result drops its panels, unless --replace', async () => {
+    const { run, workspace } = jsonnetSetup();
+    await run(`echo '{}' > dash.jsonnet`);
+    // Re-rendering that keeps every panel (here the same "Requests" panel) is a normal update.
+    const keeping = await run(
+      'jsonnet dash.jsonnet --resource payments -o /grafana/dashboards/payments/dashboard.json'
+    );
+    expect(keeping.exitCode).toBe(0);
+
+    const target = '/grafana/dashboards/checkout/dashboard.json';
+    await run(
+      `jq '.spec.panels += [{"id": 2, "type": "stat", "title": "Errors"}]' ${target} > /tmp/c && mv /tmp/c ${target}`
+    );
+    const dropping = await run(`jsonnet dash.jsonnet --resource checkout -o ${target}`);
+    expect(dropping.exitCode).toBe(1);
+    expect(dropping.stderr).toContain('removes 1 of 2 panels: "Errors"');
+    expect(dropping.stderr).toContain('--replace');
+    expect(JSON.parse(workspace.resourceContent(workspace.getResource('checkout')!)!).spec.panels).toHaveLength(2);
+
+    const replaced = await run(`jsonnet dash.jsonnet --resource checkout -o ${target} --replace`);
+    expect(replaced.exitCode).toBe(0);
+    expect(JSON.parse(workspace.resourceContent(workspace.getResource('checkout')!)!).spec.panels).toHaveLength(1);
+  });
+
   it('rejects --resource output that is not a classic dashboard, with the helper usage', async () => {
     const { run, workspace } = jsonnetSetup();
     await run(`echo wrapped > wrapped.jsonnet && echo rows-as-panels > rows.jsonnet && mkdir -p /grafana/dashboards/x`);
@@ -448,6 +483,69 @@ describe('grafana-prom query batches', () => {
       `grafana-prom query -e up -e 'sum(rate(http_requests_total[5m]))' --from now-1h | jq -c '[.queryType, (.results | length)]'`
     );
     expect(result.stdout).toBe('["range",2]\n');
+  });
+
+  it('runs every expression it is given', async () => {
+    const { run } = setup();
+    const flags = Array.from({ length: 13 }, (_, index) => `-e 'up{instance="i${index}"}'`).join(' ');
+    const result = await run(`grafana-prom query ${flags} | jq '.results | length'`);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe('13\n');
+  });
+
+  it('refuses unresolved dashboard variables and substitutes --var values', async () => {
+    const { run } = setup();
+    const expr = 'sum(rate(http_requests_total{env=~"$env", namespace="${ns}"}[$__rate_interval]))';
+    const refused = await run(`grafana-prom query '${expr}'`);
+    expect(refused.exitCode).toBe(2);
+    expect(refused.stderr).toContain('$env, $ns');
+    expect(refused.stderr).toContain('--var env=VALUE');
+
+    const substituted = await run(
+      `grafana-prom query '${expr}' --var env=prod --var env=staging --var ns=team-a | jq -r '.results[0].query'`
+    );
+    expect(substituted.stdout).toBe(
+      'sum(rate(http_requests_total{env=~"(prod|staging)", namespace="team-a"}[$__rate_interval]))\n'
+    );
+  });
+
+  it('says when a query matched no series', async () => {
+    const { run, broker } = setup();
+    broker.prometheus!.query = async (_ds, spec) => ({
+      datasourceUid: 'prometheus',
+      query: spec.query,
+      queryType: spec.type,
+      totalSeries: 0,
+      series: [],
+      notices: [],
+    });
+    const result = await run(`grafana-prom query 'up{job="missing"}' | jq -r '.results[0].notices[].text'`);
+    expect(result.stdout).toMatch(/^no series matched/);
+  });
+});
+
+describe('grafana-prom metric names that are not PromQL identifiers', () => {
+  it('shows how to select them and rejects them as bare selectors', async () => {
+    const { run, broker } = setup();
+    broker.prometheus!.metricNames = async () => ({
+      datasourceUid: 'prometheus',
+      names: ['up', 'win service_state'],
+    });
+    const metrics = await run('grafana-prom metrics');
+    expect(metrics.stdout).toBe('up\nwin service_state\n');
+    expect(metrics.stderr).toContain('{__name__="win service_state"}');
+
+    const series = await run(`grafana-prom series 'win service_state{service="svc a"}'`);
+    expect(series.exitCode).toBe(2);
+    expect(series.stderr).toContain('{__name__="win service_state", service="svc a"}');
+  });
+
+  it('says when nothing matched', async () => {
+    const { run } = setup();
+    const metrics = await run(`grafana-prom metrics '^nothing_'`);
+    expect(metrics.stderr).toBe('# no metric names match ^nothing_\n');
+    const values = await run(`grafana-prom labels route --match 'up{job="api"}'`);
+    expect(values.stderr).toBe('# no values for label route matching up{job="api"}\n');
   });
 });
 
@@ -632,6 +730,40 @@ describe('grafana-dashboard data', () => {
       intervalMs: 60_000,
     });
     expect(Number(sent.to) - Number(sent.from)).toBeCloseTo(3_600_000, -4);
+  });
+
+  it('resolves variables without a saved value like Grafana does on load, and skips panels it cannot resolve', async () => {
+    const { run, setDataResponse, dataRequests } = setup();
+    const panels = [
+      {
+        ...PANEL,
+        targets: [{ refId: 'A', expr: 'sum(rate(http_requests_total{env=~"$env", namespace=~"$ns"}[5m]))' }],
+      },
+      { ...PANEL, id: 2, title: 'Pods', targets: [{ refId: 'A', expr: 'count(up{pod=~"$pod"})' }] },
+    ];
+    // Freshly rendered Jsonnet variables carry no current value.
+    const templating = {
+      list: [
+        { name: 'env', type: 'query', multi: true, includeAll: true, current: null },
+        { name: 'ns', type: 'query', current: {}, options: [{ value: 'team-a' }, { value: 'team-b' }] },
+        { name: 'pod', type: 'query', current: null },
+      ],
+    };
+    await run(
+      `jq '.spec.panels = ${JSON.stringify(panels).replace(/'/g, "'\\''")} | .spec.templating = ${JSON.stringify(templating)}' /grafana/dashboards/checkout/dashboard.json > /tmp/d && mv /tmp/d /grafana/dashboards/checkout/dashboard.json`
+    );
+    setDataResponse(() => ({ results: { A: { frames: [frame('A', {}, [1, 2])] } } }));
+
+    const result = await run('grafana-dashboard data /grafana/dashboards/checkout/dashboard.json');
+    const report = JSON.parse(result.stdout);
+    expect(dataRequests.map((request) => request.queries[0].expr)).toEqual([
+      'sum(rate(http_requests_total{env=~".*", namespace=~"team-a"}[5m]))',
+    ]);
+    expect(report.notes.join('\n')).toMatch(/\$env.*All/);
+    expect(report.notes.join('\n')).toMatch(/\$ns.*team-a/);
+    expect(report.panels[1]).toMatchObject({ status: 'skipped' });
+    expect(report.panels[1].skippedReason).toContain('$pod has no value');
+    expect(report.panels[1].skippedReason).toContain('--var pod=VALUE');
   });
 
   it('reports errors inside HTTP 200 responses, empty results, and unknown panels', async () => {

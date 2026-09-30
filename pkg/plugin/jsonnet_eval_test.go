@@ -133,6 +133,67 @@ local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
 	}
 }
 
+func TestPiDashboardHelperPanelKinds(t *testing.T) {
+	output, err := evaluateWorkspaceJsonnet(context.Background(), jsonnetEvalRequest{
+		Entrypoint: "/workspace/dash.jsonnet",
+		Files: map[string]string{"/workspace/dash.jsonnet": `
+local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
+local q = d.prom.query('sum by (namespace) (rate(http_requests_total[$__rate_interval]))', 'prom-main', instant=true);
+d.dashboard.new(
+  title='Kinds',
+  panels=[
+    d.layout.twoUp([
+      d.panel.table('Share', 'prom-main', [q], unit='percent', decimals=1),
+      d.panel.bargauge('Top', 'prom-main', [q], unit='reqps'),
+    ]),
+    d.layout.twoUp([
+      d.panel.piechart('Split', 'prom-main', [q], unit='reqps'),
+      d.panel.text('Notes', 'Counts come from the ingest tier.'),
+    ]),
+  ],
+)`},
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	var dashboard struct {
+		Panels []struct {
+			Title       string         `json:"title"`
+			Type        string         `json:"type"`
+			GridPos     map[string]int `json:"gridPos"`
+			Datasource  any            `json:"datasource"`
+			Targets     []any          `json:"targets"`
+			Options     map[string]any `json:"options"`
+			FieldConfig struct {
+				Defaults map[string]any `json:"defaults"`
+			} `json:"fieldConfig"`
+		} `json:"panels"`
+	}
+	if err := json.Unmarshal([]byte(output), &dashboard); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(dashboard.Panels) != 4 {
+		t.Fatalf("panels = %d, want 4: %s", len(dashboard.Panels), output)
+	}
+	table, bargauge, piechart, text := dashboard.Panels[0], dashboard.Panels[1], dashboard.Panels[2], dashboard.Panels[3]
+	if table.Type != "table" || table.FieldConfig.Defaults["unit"] != "percent" || table.FieldConfig.Defaults["decimals"] != float64(1) {
+		t.Fatalf("table = %+v", table)
+	}
+	if bargauge.Type != "bargauge" || bargauge.FieldConfig.Defaults["unit"] != "reqps" || len(bargauge.Targets) != 1 {
+		t.Fatalf("bargauge = %+v", bargauge)
+	}
+	if piechart.Type != "piechart" || piechart.FieldConfig.Defaults["unit"] != "reqps" {
+		t.Fatalf("piechart = %+v", piechart)
+	}
+	if text.Type != "text" || text.Datasource != nil || len(text.Targets) != 0 ||
+		text.Options["content"] != "Counts come from the ingest tier." || text.Options["mode"] != "markdown" {
+		t.Fatalf("text = %+v", text)
+	}
+	if text.GridPos["x"] != 12 || text.GridPos["y"] != piechart.GridPos["y"] {
+		t.Fatalf("text gridPos = %v, piechart gridPos = %v", text.GridPos, piechart.GridPos)
+	}
+}
+
 func TestPiDashboardHelperForgivesCommonMistakes(t *testing.T) {
 	output, err := evaluateWorkspaceJsonnet(context.Background(), jsonnetEvalRequest{
 		Entrypoint: "/workspace/dash.jsonnet",

@@ -40,6 +40,9 @@ func repairJsonnetDashboardSource(source string) (string, []string, error) {
 	}
 	dashboardExpression := repair.findDashboardExpression(root)
 	if dashboardExpression == nil || dashboardExpression.dashboardCall == nil {
+		if findJsonnetApplyAnywhere(root, "d.dashboard.new") {
+			return "", nil, errors.New("jsonnet fix only rewrites Grafonnet g.dashboard.new(...) chains; this source uses the pi-dashboard helpers (d.dashboard.new), which need no repair. Fix the line the evaluation error names with edit, checking the helper signatures in /lib/jsonnet/github.com/g42/pi-dashboard/main.libsonnet")
+		}
 		return "", nil, errors.New("supported repair requires a g.dashboard.new(...) call")
 	}
 
@@ -624,4 +627,19 @@ func indentJsonnet(source string, levels int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func findJsonnetApplyAnywhere(node ast.Node, name string) bool {
+	if node == nil {
+		return false
+	}
+	if findJsonnetApply(node, name) != nil {
+		return true
+	}
+	for _, child := range toolutils.Children(node) {
+		if findJsonnetApplyAnywhere(child, name) {
+			return true
+		}
+	}
+	return false
 }

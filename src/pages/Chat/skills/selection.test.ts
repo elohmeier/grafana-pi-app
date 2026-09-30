@@ -41,6 +41,17 @@ describe('Grafana skill selection', () => {
     expect(selection.activeSkillNames).toEqual(['grafana-dashboard']);
   });
 
+  it('keeps skills of earlier prompts active for follow-ups that do not name the subject again', () => {
+    const followUp = 'i need a filter for environment and namespaces from "team-*"';
+    expect(selectGrafanaSkills(followUp, GRAFANA_SKILLS).activeSkillNames).toEqual([]);
+
+    const selection = selectGrafanaSkills(followUp, GRAFANA_SKILLS, {
+      previousPrompts: ['Create a dashboard for HTTP request rate and errors for all team-* namespaces'],
+    });
+    expect(selection.activeSkillNames).toEqual(['grafana-dashboard']);
+    expect(selection.explicitSkillNames).toEqual([]);
+  });
+
   it('activates the dashboard skill for contextual sidebar dashboard prompts', () => {
     const selection = selectGrafanaSkills('why is this empty?', GRAFANA_SKILLS, {
       pageType: 'dashboard',

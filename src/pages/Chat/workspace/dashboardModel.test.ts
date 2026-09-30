@@ -177,3 +177,84 @@ describe('validateDashboardDocument v2 variables', () => {
     expect(report.errors).toEqual([]);
   });
 });
+
+describe('validateDashboardDocument display and layout warnings', () => {
+  const ds = { type: 'prometheus', uid: 'prom-main' };
+  const classic = (panels: unknown[]) =>
+    JSON.stringify({
+      apiVersion: 'dashboard.grafana.app/v1',
+      kind: 'Dashboard',
+      metadata: { name: 'team-a' },
+      spec: { title: 'Team A', panels },
+    });
+  const stat = (id: number, unit: string, expr: string, gridPos = { x: (id - 1) * 6, y: 0, w: 6, h: 4 }) => ({
+    id,
+    type: 'stat',
+    title: `S${id}`,
+    datasource: ds,
+    gridPos,
+    fieldConfig: { defaults: { unit }, overrides: [] },
+    targets: [{ refId: 'A', expr }],
+  });
+
+  it('warns when a percent unit does not match the scale of the expression', async () => {
+    const ratio = 'sum(rate(http_requests_total{code=~"5.."}[5m])) / sum(rate(http_requests_total[5m]))';
+    const report = await validateDashboardDocument(
+      classic([
+        stat(1, 'percentunit', `100 * ${ratio}`),
+        stat(2, 'percent', ratio),
+        stat(3, 'percentunit', ratio),
+        stat(4, 'percent', `${ratio} * 100`),
+        stat(5, 'percentunit', `${ratio} * 1000`),
+      ])
+    );
+    expect(report.warnings.map((warning) => [warning.path, warning.message])).toEqual([
+      [
+        'panel 1 "S1" query A',
+        'unit percentunit expects 0-1, but the expression is multiplied by 100; use unit percent or drop the factor',
+      ],
+      [
+        'panel 2 "S2" query A',
+        'unit percent expects 0-100, but the expression looks like a 0-1 ratio; use unit percentunit or multiply by 100',
+      ],
+    ]);
+  });
+
+  it('warns about overlapping panels in classic and v2 grids', async () => {
+    const overlapping = await validateDashboardDocument(
+      classic([
+        stat(1, 'short', 'up', { x: 0, y: 0, w: 12, h: 8 }),
+        stat(2, 'short', 'up', { x: 6, y: 4, w: 12, h: 8 }),
+        stat(3, 'short', 'up', { x: 0, y: 8, w: 6, h: 4 }),
+      ])
+    );
+    expect(overlapping.warnings.map((warning) => warning.message)).toEqual([
+      'panel 1 "S1" overlaps panel 2 "S2"; Grafana moves one of them. Fix the gridPos values (grafana-dashboard set-panel moves panels out of the way).',
+    ]);
+
+    const item = (name: string, x: number, y: number) => ({
+      kind: 'GridLayoutItem',
+      spec: { x, y, width: 12, height: 8, element: { kind: 'ElementReference', name } },
+    });
+    const panel = (title: string) => ({
+      kind: 'Panel',
+      spec: { title, data: { kind: 'QueryGroup', spec: { queries: [] } } },
+    });
+    const v2 = await validateDashboardDocument(
+      JSON.stringify({
+        apiVersion: 'dashboard.grafana.app/v2',
+        kind: 'Dashboard',
+        metadata: { name: 'live' },
+        spec: {
+          title: 'Live',
+          elements: { 'panel-1': panel('A'), 'panel-2': panel('B') },
+          layout: { kind: 'GridLayout', spec: { items: [item('panel-1', 0, 8), item('panel-2', 0, 8)] } },
+          variables: [],
+        },
+      })
+    );
+    expect(v2.warnings.map((warning) => warning.message)).toEqual([
+      'panel panel-1 "A" overlaps panel panel-2 "B"; Grafana moves one of them. Fix the gridPos values (grafana-dashboard set-panel moves panels out of the way).',
+    ]);
+  });
+});

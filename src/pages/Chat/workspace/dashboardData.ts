@@ -134,10 +134,11 @@ export async function collectDashboardData(
   const range = parseRange(from, to);
   const variables = collectVariables(shape, dashboard);
   applyVariableOverrides(variables, options.vars ?? []);
-  const notes = approximateAllValues(variables);
+  const defaults = resolveUnsetVariables(variables);
+  const approximated = approximateAllValues(variables);
 
   const reports = await mapConcurrent(selected, QUERY_CONCURRENCY, (panel) =>
-    queryPanel(panel, variables, range, options).catch((error): PanelDataReport => {
+    queryPanel(panel, variables, range, options, defaults.unset).catch((error): PanelDataReport => {
       if (options.signal?.aborted) {
         throw error;
       }
@@ -157,7 +158,8 @@ export async function collectDashboardData(
     panels: reports,
     ...(queryable.length > selected.length ? { panelsOmitted: queryable.length - selected.length } : {}),
     notes: [
-      ...notes,
+      ...defaults.notes,
+      ...approximated,
       'Values come from the saved dashboard variables and time range unless overridden with --var/--from/--to.',
       'Not emulated: variable queries, repeats, panel plugin rendering, and datasource frontend processing.',
     ],
@@ -168,7 +170,8 @@ async function queryPanel(
   panel: WalkedPanel,
   variables: Record<string, TemplateValue>,
   range: TimeRange,
-  options: DashboardDataOptions
+  options: DashboardDataOptions,
+  unset: Set<string> = new Set()
 ): Promise<PanelDataReport> {
   const identity = panelIdentity(panel);
   if (panel.libraryPanel) {
@@ -200,6 +203,14 @@ async function queryPanel(
       );
     }
     const missing = unresolvedVariables(asText(target.expr)).filter((name) => !name.startsWith('__'));
+    const noValue = missing.filter((name) => unset.has(name));
+    if (noValue.length > 0) {
+      return skipped(
+        identity,
+        queries,
+        `variable ${noValue.map((name) => `$${name}`).join(', ')} has no value (no saved current value, All option, or options); pass ${noValue.map((name) => `--var ${name}=VALUE`).join(' ')}`
+      );
+    }
     if (missing.length > 0) {
       return skipped(identity, queries, `undefined variable ${missing.map((name) => `$${name}`).join(', ')}`);
     }
@@ -302,6 +313,44 @@ function selectPanels(panels: WalkedPanel[], ids: string[], types: string[]) {
     selected = selected.filter((panel) => ids.includes(panel.id) || ids.includes(panel.key));
   }
   return selected;
+}
+
+/**
+ * Variables saved without a current value (as rendered Jsonnet saves them) get the value Grafana selects
+ * on load: All when the variable offers it, else the first saved option. Variables with neither are left
+ * unresolved so their panels are skipped instead of querying with an empty matcher.
+ */
+function resolveUnsetVariables(variables: Record<string, TemplateValue>) {
+  const notes: string[] = [];
+  const unset = new Set<string>();
+  for (const [name, variable] of Object.entries(variables)) {
+    if (variable.values.length > 0 || variable.isAll) {
+      continue;
+    }
+    if (variable.includeAll) {
+      variables[name] = new TemplateValue(
+        ['$__all'],
+        'All',
+        variable.multi,
+        true,
+        true,
+        variable.allValue,
+        variable.allValues,
+        variable.multi
+      );
+      notes.push(`Variable $${name} has no saved value; used All, as Grafana selects on load.`);
+    } else if (variable.allValues.length > 0) {
+      const first = variable.allValues[0];
+      variables[name] = new TemplateValue([first], first, variable.multi, false, false, undefined, variable.allValues);
+      notes.push(
+        `Variable $${name} has no saved value; used its first option ${JSON.stringify(first)}, as Grafana selects on load.`
+      );
+    } else {
+      delete variables[name];
+      unset.add(name);
+    }
+  }
+  return { notes, unset };
 }
 
 /** Query variables saved as All without a custom all value: approximate with `.*` and say so. */

@@ -1,4 +1,5 @@
 import { collectPanels, transformationId, unwrapDashboard, type WalkedPanel } from './dashboardPanels';
+import { describeBuilderQuery } from './dashboardQueries';
 import { checkDashboardPromql, lezerParser, type PromqlParser } from './promqlCheck';
 
 export const DASHBOARD_API_GROUP = 'dashboard.grafana.app';
@@ -10,8 +11,9 @@ export type DashboardQueryInfo = {
   datasourceUid?: string;
   datasourceType?: string;
   expr?: string;
-  /** Query text of non-PromQL targets (query, rawSql, expression, ...). */
+  /** Query text of non-PromQL targets (query, rawSql, expression, ...), or a description of a builder query. */
   query?: string;
+  builder?: boolean;
   legendFormat?: string;
   hidden?: boolean;
 };
@@ -21,8 +23,8 @@ export type DashboardPanelInfo = {
   id?: number;
   title: string;
   type: string;
-  /** Row and tab titles from the outermost layout level inward. */
-  rowPath?: string[];
+  /** Row and tab titles from the outermost layout level inward; empty outside rows. */
+  rowPath: string[];
   collapsed?: boolean;
   gridPos?: Record<string, unknown>;
   description?: string;
@@ -239,6 +241,7 @@ export async function validateDashboardDocument(
     validateV1Structure(record.spec, errors, warnings);
   }
   levels.structure = errors.length > structureErrors ? 'failed' : 'passed';
+  warnings.push(...layoutAndDisplayWarnings(resource));
 
   const inspection = inspectDashboard(resource);
   const queryErrors = errors.length;
@@ -290,6 +293,67 @@ export async function validateDashboardDocument(
   }
   levels.policy = errors.length > policyErrors ? 'failed' : 'passed';
   return finish(format);
+}
+
+/** Checks Grafana does not do: overlapping grid items (it rearranges them) and percent units at the wrong scale. */
+function layoutAndDisplayWarnings(resource: unknown): ValidationDiagnostic[] {
+  let panels: WalkedPanel[];
+  try {
+    const [shape, dashboard] = unwrapDashboard(resource);
+    panels = collectPanels(shape, dashboard, { includeCollapsed: true });
+  } catch {
+    return [];
+  }
+  const warnings: ValidationDiagnostic[] = [];
+  const label = (panel: WalkedPanel) => `panel ${panel.id} ${JSON.stringify(panel.title)}`;
+  const grids = new Map<string, WalkedPanel[]>();
+  for (const panel of panels) {
+    if (!panel.gridPos) {
+      continue;
+    }
+    // Classic expanded rows share one grid; collapsed rows and v2 rows or tabs have their own.
+    const grid = panel.source === 'v2' ? panel.rowPath.join('\u0000') : panel.collapsed ? `row:${panel.row}` : '';
+    grids.set(grid, [...(grids.get(grid) ?? []), panel]);
+  }
+  const box = (panel: WalkedPanel) => {
+    const grid = panel.gridPos as Record<string, unknown>;
+    const value = (key: string) => (typeof grid[key] === 'number' ? (grid[key] as number) : 0);
+    return { x: value('x'), y: value('y'), w: value('w'), h: value('h') };
+  };
+  for (const members of grids.values()) {
+    members.forEach((panel, index) => {
+      const a = box(panel);
+      for (const other of members.slice(index + 1)) {
+        const b = box(other);
+        if (a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h) {
+          warnings.push({
+            level: 'structure',
+            message: `${label(panel)} overlaps ${label(other)}; Grafana moves one of them. Fix the gridPos values (grafana-dashboard set-panel moves panels out of the way).`,
+          });
+        }
+      }
+    });
+  }
+  for (const panel of panels) {
+    const unit = isRecord(panel.fieldConfig.defaults) ? panel.fieldConfig.defaults.unit : undefined;
+    if (unit !== 'percent' && unit !== 'percentunit') {
+      continue;
+    }
+    for (const target of panel.targets) {
+      const expr = typeof target.expr === 'string' ? target.expr : '';
+      const scaled = /(^|[^\w.])100(\.0*)?\s*\*|\*\s*100(\.0*)?(?![\w.])/.test(expr);
+      const message =
+        unit === 'percentunit' && scaled
+          ? 'unit percentunit expects 0-1, but the expression is multiplied by 100; use unit percent or drop the factor'
+          : unit === 'percent' && !scaled && /\)\s*\/\s*\(?\s*(sum|count|avg)\b/.test(expr)
+            ? 'unit percent expects 0-100, but the expression looks like a 0-1 ratio; use unit percentunit or multiply by 100'
+            : undefined;
+      if (message) {
+        warnings.push({ level: 'queries', path: `${label(panel)} query ${String(target.refId ?? '?')}`, message });
+      }
+    }
+  }
+  return warnings;
 }
 
 const BUILTIN_DATASOURCE_UIDS = new Set([
@@ -526,7 +590,7 @@ function panelInfo(panel: WalkedPanel): DashboardPanelInfo {
     id: /^\d+$/.test(panel.id) ? Number(panel.id) : undefined,
     title: panel.title,
     type: panel.type,
-    rowPath: panel.rowPath.length ? panel.rowPath : undefined,
+    rowPath: panel.rowPath,
     collapsed: panel.collapsed,
     gridPos: panel.gridPos,
     description: shortText(raw.description),
@@ -537,12 +601,14 @@ function panelInfo(panel: WalkedPanel): DashboardPanelInfo {
       const targetDatasource = datasourceRef(target.datasource);
       const expr = stringOrUndefined(target.expr);
       const queryKey = expr ? undefined : QUERY_TEXT_KEYS.find((key) => typeof target[key] === 'string' && target[key]);
+      const builder = expr || queryKey ? undefined : describeBuilderQuery(target, targetDatasource.type);
       return compact({
         refId: stringOrUndefined(target.refId),
         datasourceUid: targetDatasource.uid,
         datasourceType: targetDatasource.type,
         expr,
-        query: queryKey ? shortText(target[queryKey]) : undefined,
+        query: queryKey ? shortText(target[queryKey]) : builder,
+        builder: builder ? true : undefined,
         legendFormat: stringOrUndefined(target.legendFormat),
         hidden: target.hide === true ? true : undefined,
       });

@@ -18,6 +18,8 @@ import {
 } from '@earendil-works/pi-ai';
 import { SUMMARIZER_SYSTEM_PROMPT } from '../compaction';
 import { createFakeDashboardBroker } from '../workspace/testUtils';
+import { GRAFANA_SKILLS } from '../skills/catalog';
+import type { GrafanaSkill } from '../skills/types';
 import { AssistantSession, type SessionHost } from './AssistantSession';
 import type { StoredSession } from './sessionRecord';
 
@@ -112,7 +114,11 @@ function scriptedModel(replies: Reply[], summary = '- summary') {
   return { streamFn, requests };
 }
 
-function createHost(streamFn: StreamFn, contextWindow = 100000, options: { hangDashboardReads?: boolean } = {}) {
+function createHost(
+  streamFn: StreamFn,
+  contextWindow = 100000,
+  options: { hangDashboardReads?: boolean; skills?: GrafanaSkill[] } = {}
+) {
   const records: StoredSession[] = [];
   const { broker } = createFakeDashboardBroker([{ uid: 'one', title: 'One' }]);
   if (options.hangDashboardReads) {
@@ -134,7 +140,7 @@ function createHost(streamFn: StreamFn, contextWindow = 100000, options: { hangD
       } as never,
       thinkingLevel: 'off',
       broker,
-      skills: [],
+      skills: options.skills ?? [],
     }),
     persist: async (record) => {
       records.push(clone(record));
@@ -146,6 +152,23 @@ function createHost(streamFn: StreamFn, contextWindow = 100000, options: { hangD
 function roles(messages: readonly AgentMessage[]) {
   return messages.map((message) => message.role);
 }
+
+it('keeps the skills of earlier prompts active in follow-up turns', async () => {
+  const { streamFn } = scriptedModel([
+    { blocks: [{ type: 'text', text: 'Done.' }] },
+    { blocks: [{ type: 'text', text: 'Done.' }] },
+  ]);
+  const { host } = createHost(streamFn, 100000, { skills: [...GRAFANA_SKILLS] });
+  const activeSkills: string[][] = [];
+  host.onPromptStart = (start) => activeSkills.push(start.activeSkills.map((skill) => skill.name));
+  const session = new AssistantSession();
+  session.attach(host);
+
+  await session.prompt('Create a dashboard for HTTP request rate for all team-* namespaces');
+  await session.prompt('Trenne 4xx und 5xx Fehler und filtere nach Environment');
+
+  expect(activeSkills).toEqual([['grafana-dashboard'], ['grafana-dashboard']]);
+});
 
 it('streams thinking and text into one assistant message', async () => {
   const { streamFn, requests } = scriptedModel([

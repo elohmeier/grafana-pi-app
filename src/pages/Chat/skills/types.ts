@@ -34,4 +34,6 @@ export type GrafanaSkillContext = {
   hasDashboardContext?: boolean;
   hasPanelContext?: boolean;
   liveDashboardEditingAvailable?: boolean;
+  /** Earlier user prompts of the chat; their skills stay active for follow-ups. */
+  previousPrompts?: readonly string[];
 };

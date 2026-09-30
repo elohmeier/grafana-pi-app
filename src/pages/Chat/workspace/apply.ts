@@ -7,6 +7,7 @@ import type {
   WorkspaceBroker,
 } from './broker';
 import { groupChanges } from './changeGroups';
+import { describeDashboardRemovals } from './dashboardChanges';
 import { validateDashboardDocument } from './dashboardModel';
 import { canonicalJson, sha256Hex } from './hash';
 import type { PromqlParser } from './promqlCheck';
@@ -119,7 +120,12 @@ async function prepareOperation(
     const baseErrors = before !== undefined ? new Set((await validate(before, entry, options)).errors) : new Set();
     const introduced = report.errors.filter((error) => !baseErrors.has(error));
     preexistingErrors = report.errors.filter((error) => baseErrors.has(error));
-    validation = { ok: introduced.length === 0, errors: introduced, warnings: report.warnings };
+    // Whole-document rewrites drop panels silently; the reviewer should see it next to the diff.
+    const removals =
+      entry.kind === 'dashboard' && before !== undefined
+        ? describeDashboardRemovals(before, after).map((removal) => `removal: ${removal}`)
+        : [];
+    validation = { ok: introduced.length === 0, errors: introduced, warnings: [...removals, ...report.warnings] };
     try {
       const parsed = JSON.parse(after);
       title = typeof parsed?.spec?.title === 'string' ? parsed.spec.title : title;

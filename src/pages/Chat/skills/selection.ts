@@ -20,7 +20,10 @@ export function selectGrafanaSkills(
 ): GrafanaSkillSelection {
   const skillByName = new Map(skills.map((skill) => [skill.name, skill]));
   const explicitSkillNames = extractSkillReferences(prompt).filter((name) => skillByName.has(name));
-  const activeNames = new Set<string>();
+  // A chat keeps its subject: "now filter by environment" after "build a dashboard" is still dashboard work.
+  const activeNames = new Set<string>(
+    (context?.previousPrompts ?? []).flatMap((previous) => selectGrafanaSkills(previous, skills).activeSkillNames)
+  );
 
   for (const skillName of explicitSkillNames) {
     activeNames.add(skillName);

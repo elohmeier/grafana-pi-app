@@ -85,8 +85,13 @@ async function runPrometheusQuerySummary(
       timeRange,
       interval,
       signal
-    ).catch(() => {
-      throw error;
+    ).catch((fallbackError) => {
+      throwIfAborted(signal);
+      if (!(error instanceof GenericQueryError)) {
+        throw error;
+      }
+      // The datasource gave no reason; the fallback's error usually names the PromQL or upstream problem.
+      throw new Error(`${error.message}; resource fallback: ${formatBackendFetchError(fallbackError)}`);
     });
     summary.notices.unshift({
       severity: 'info',
@@ -150,7 +155,7 @@ function failedPrometheusQuerySummary(
   const timeRange =
     queryType === 'range' ? makeTimeRange(querySpec.start ?? 'now-1h', querySpec.end ?? 'now') : getDefaultTimeRange();
   const interval = queryType === 'range' ? rangeInterval(querySpec.step, timeRange) : '1m';
-  const message = error instanceof Error ? error.message : String(error);
+  const message = formatBackendFetchError(error);
 
   return {
     datasourceUid: ds.uid,
@@ -305,15 +310,29 @@ async function withPrometheusRetry<T>(
   throw lastError instanceof Error ? lastError : new Error(String(lastError ?? 'Prometheus request failed'));
 }
 
+const GENERIC_QUERY_ERRORS = new Set(['Query data error', 'Query error', 'Unknown error']);
+
+/** A failed query response that carried no reason. */
+class GenericQueryError extends Error {}
+
 function prometheusQueryResponseError(response: DataQueryResponse): Error {
   const first = response.errors?.[0] as Record<string, unknown> | undefined;
-  const message =
-    stringRecordValue(first, 'message') ||
-    stringRecordValue(first, 'error') ||
-    stringRecordValue(first, 'status') ||
-    'Prometheus query failed';
-  const error = new Error(message);
+  const data = recordFieldValue(first, 'data');
+  // DataQueryError keeps the Prometheus reason in data.error or data.message; message is often generic.
+  const candidates = [
+    stringRecordValue(data, 'error'),
+    stringRecordValue(first, 'error'),
+    stringRecordValue(first, 'message'),
+    stringRecordValue(data, 'message'),
+    stringRecordValue(first, 'statusText'),
+    stringRecordValue(first, 'status'),
+  ].filter((value): value is string => Boolean(value));
   const status = numberRecordValue(first, 'status') ?? numberRecordValue(first, 'statusCode');
+  const reason = candidates.find((value) => !GENERIC_QUERY_ERRORS.has(value));
+  const statusSuffix = status !== undefined && !reason?.includes(String(status)) ? ` (status ${status})` : '';
+  const error = reason
+    ? new Error(`${reason}${statusSuffix}`)
+    : new GenericQueryError(`Prometheus query failed without an error message${statusSuffix}`);
   if (status !== undefined) {
     (error as Error & { status?: number }).status = status;
   }

@@ -463,7 +463,7 @@ async function metricUsageCorpusForDashboard({
   });
 }
 
-function metricUsageCorpus({
+export function metricUsageCorpus({
   dashboards,
   params,
 }: {
@@ -476,8 +476,11 @@ function metricUsageCorpus({
   const seedMetrics = normalizeSeedMetrics([params.seedMetric, ...(params.seedMetrics ?? [])]);
   // Rankings cover every usage; only the printed usage list is limited.
   const relations = summarizeMetricRelations(usages);
+  const summaries = summarizeMetricUsages(usages);
+  const used = new Set(summaries.map((summary) => summary.metric));
+  const seedsNotFound = seedMetrics.filter((metric) => !used.has(metric));
   const metrics = rankMetricSummaries({
-    summaries: summarizeMetricUsages(usages),
+    summaries,
     relations,
     seedMetrics,
     query: params.query,
@@ -485,6 +488,8 @@ function metricUsageCorpus({
 
   return {
     seedMetrics: seedMetrics.length > 0 ? seedMetrics : undefined,
+    // Without this, rankings of other metrics look like results for a seed no dashboard uses.
+    seedsNotFound: seedsNotFound.length > 0 ? seedsNotFound : undefined,
     metrics,
     relations: relations.slice(0, MAX_RESULT_RELATIONS),
     usages: limitedUsages,
@@ -492,6 +497,7 @@ function metricUsageCorpus({
     omitted: usages.length > limitedUsages.length ? { usages: usages.length - limitedUsages.length } : undefined,
   } as {
     seedMetrics?: string[];
+    seedsNotFound?: string[];
     metrics: DashboardMetricSummary[];
     relations: MetricRelation[];
     usages: DashboardMetricUsage[];
@@ -1009,13 +1015,20 @@ function rankMetricSummaries({
         queryScore > 0 ? 'text match' : undefined,
       ].filter((reason): reason is string => Boolean(reason));
 
+      // With seeds, the seeds and the metrics used together with them come first, whatever their usage count.
+      const tier = seedSet.size === 0 ? 0 : seedSet.has(summary.metric) ? 0 : relationScore ? 1 : 2;
       return {
         ...summary,
         score,
+        tier,
         reasons: reasons.length > 0 ? reasons : undefined,
       };
     })
-    .sort((left, right) => (right.score ?? 0) - (left.score ?? 0) || left.metric.localeCompare(right.metric));
+    .sort(
+      (left, right) =>
+        left.tier - right.tier || (right.score ?? 0) - (left.score ?? 0) || left.metric.localeCompare(right.metric)
+    )
+    .map(({ tier: _tier, ...summary }) => summary);
 }
 
 function scoreSummaryForQuery(summary: DashboardMetricSummary, searchTerms: string[]) {

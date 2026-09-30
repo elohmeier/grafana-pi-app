@@ -1,10 +1,13 @@
 import { createTwoFilesPatch } from 'diff';
+import { describeDashboardRemovals } from '../dashboardChanges';
 import { validateDashboardDocument } from '../dashboardModel';
 import { LIVE_DASHBOARD_PATH, liveDashboardDocument, liveRevision } from '../liveDashboard';
 import { truncateUtf8 } from '../paths';
 import { fail, json, ok, type WorkspaceCommandContext, type WorkspaceCommandSpec } from './registry';
 
 const MAX_DIFF_BYTES = 60_000;
+/** The browser state before the last `live apply`; /tmp lasts as long as the page, like the unsaved state. */
+const LIVE_UNDO_PATH = '/tmp/live/before-apply.json';
 
 export const liveCommand: WorkspaceCommandSpec = {
   name: 'live',
@@ -54,11 +57,15 @@ export const liveCommand: WorkspaceCommandSpec = {
     },
     apply: {
       summary:
-        'Validate the staged file (no separate validate needed) and replace the unsaved browser dashboard with its spec (APPLY_SPEC). Refuses when the browser state changed since the file was read, unless --force. Nothing is saved; the user saves in Grafana.',
-      usage: 'live apply [--force]',
+        'Validate the staged file (no separate validate needed) and replace the unsaved browser dashboard with its spec (APPLY_SPEC). Refuses when the browser state changed since the file was read, unless --force, and when the edit drops panels, queries, transformations, or variables, unless --allow-removals. Nothing is saved; the user saves in Grafana.',
+      usage: 'live apply [--force] [--allow-removals]',
       effect: 'remote-write',
       options: {
         force: { type: 'boolean', description: 'Apply even if the browser dashboard changed since the file was read.' },
+        'allow-removals': {
+          type: 'boolean',
+          description: 'Apply even though the edit removes panels, queries, transformations, or variables.',
+        },
       },
       async run(parsed, ctx) {
         const live = requireLive(ctx);
@@ -89,6 +96,13 @@ export const liveCommand: WorkspaceCommandSpec = {
             'live apply: the dashboard changed in the browser since the file was read (revision mismatch). Run `live diff` to compare, then `live discard` and redo the edit, or apply anyway with --force.'
           );
         }
+        // The spec replaces the whole browser state, so an array assignment where an append was meant loses user work.
+        const removed = describeDashboardRemovals({ spec: current.spec }, document);
+        if (removed.length > 0 && parsed.options['allow-removals'] !== true) {
+          return fail(
+            `live apply: the edit removes content from the open dashboard:\n  ${removed.join('\n  ')}\nIf the user asked for these removals, run \`live apply --allow-removals\`; otherwise restore them in ${LIVE_DASHBOARD_PATH} (append to arrays instead of replacing them) and apply again.`
+          );
+        }
         // metadata.resourceVersion is the live revision used above, not a Grafana resource version.
         const { resourceVersion: _revision, ...metadata } = document.metadata ?? {};
         const report = await validateDashboardDocument(JSON.stringify({ ...document, metadata }), {
@@ -103,6 +117,8 @@ export const liveCommand: WorkspaceCommandSpec = {
             'live apply: validation failed; nothing was applied\n'
           );
         }
+        await ctx.tx.mkdir('/tmp/live', { recursive: true });
+        await ctx.tx.writeFile(LIVE_UNDO_PATH, liveDashboardDocument(current));
         // An explicit remote mutation is a commit boundary. Read commands never commit.
         ctx.tx.checkpoint();
         const result = await live.apply(document.spec, ctx.signal);
@@ -114,8 +130,40 @@ export const liveCommand: WorkspaceCommandSpec = {
           applied: true,
           uid: current.uid,
           revision: result.spec ? liveRevision(result.spec) : undefined,
+          ...(removed.length > 0 ? { removed } : {}),
           warnings: [...report.warnings.map((warning) => warning.message), ...result.warnings],
+          undo: 'live undo',
           note: 'Applied to the unsaved dashboard in the browser; the user saves it in Grafana. Element names may be rekeyed; read the file again before further edits.',
+        });
+      },
+    },
+    undo: {
+      summary: `Stage the browser state from before the last \`live apply\` in ${LIVE_DASHBOARD_PATH}; \`live apply\` then restores it.`,
+      usage: 'live undo',
+      effect: 'local-stage',
+      async run(_parsed, ctx) {
+        const live = requireLive(ctx);
+        if (!(await ctx.tx.exists(LIVE_UNDO_PATH))) {
+          return fail(
+            'live undo: nothing to undo in this page session; the user can discard the unsaved changes in Grafana instead'
+          );
+        }
+        const before = JSON.parse(await ctx.tx.readFile(LIVE_UNDO_PATH));
+        const current = await live.get(ctx.signal);
+        if (before?.metadata?.name && current.uid && before.metadata.name !== current.uid) {
+          return fail(
+            `live undo: the saved state belongs to dashboard ${before.metadata.name}, but ${current.uid} is open now`
+          );
+        }
+        const removed = describeDashboardRemovals({ spec: current.spec }, before);
+        // Stage against the current revision so the restoring apply is not a conflict.
+        const staged = { ...before, metadata: { ...before.metadata, resourceVersion: current.revision } };
+        await ctx.tx.writeFile(LIVE_DASHBOARD_PATH, `${JSON.stringify(staged, null, 2)}\n`);
+        return json({
+          schemaVersion: 1,
+          staged: true,
+          ...(removed.length > 0 ? { removes: removed } : {}),
+          next: removed.length > 0 ? 'live diff, then live apply --allow-removals' : 'live diff, then live apply',
         });
       },
     },

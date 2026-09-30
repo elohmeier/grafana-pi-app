@@ -1,4 +1,4 @@
-import { isObject, type JsonObject } from './dashboardPanels';
+import { isObject, type JsonObject, v2LayoutPlacements } from './dashboardPanels';
 
 /** One query of a dashboard file, with the jq path that addresses its expression. */
 export type DashboardQueryLocation = {
@@ -7,7 +7,7 @@ export type DashboardQueryLocation = {
   /** Classic panel id, v2 element name, or variable name. */
   key: string;
   title: string;
-  /** Row titles above a classic panel. */
+  /** Row and tab titles of the panel; empty outside rows and for variables. */
   rowPath?: string[];
   refId?: string;
   datasource?: { uid?: string; type?: string };
@@ -15,6 +15,8 @@ export type DashboardQueryLocation = {
   expr: string;
   /** jq path of the query text, for example `.spec.panels[3].targets[0].expr`. */
   jqPath: string;
+  /** Built with a query builder: `expr` describes it, and `jqPath` addresses the whole target. */
+  builder?: boolean;
   hidden?: boolean;
 };
 
@@ -43,13 +45,28 @@ function classicQueries(spec: JsonObject): DashboardQueryLocation[] {
       }
       const field = queryField(target);
       if (!field) {
+        const described = describeBuilderQuery(target, datasourceRef(target.datasource)?.type ?? panelDatasource?.type);
+        if (described) {
+          locations.push({
+            kind: 'panel',
+            key: String(item.id ?? ''),
+            title: String(item.title ?? ''),
+            rowPath,
+            refId: typeof target.refId === 'string' ? target.refId : undefined,
+            datasource: datasourceRef(target.datasource) ?? panelDatasource,
+            expr: described,
+            jqPath: `${path}.targets[${index}]`,
+            builder: true,
+            ...(target.hide ? { hidden: true } : {}),
+          });
+        }
         return;
       }
       locations.push({
         kind: 'panel',
         key: String(item.id ?? ''),
         title: String(item.title ?? ''),
-        ...(rowPath.length ? { rowPath } : {}),
+        rowPath,
         refId: typeof target.refId === 'string' ? target.refId : undefined,
         datasource: datasourceRef(target.datasource) ?? panelDatasource,
         expr: String(target[field]),
@@ -107,6 +124,7 @@ function classicQueries(spec: JsonObject): DashboardQueryLocation[] {
 
 function v2Queries(spec: JsonObject): DashboardQueryLocation[] {
   const locations: DashboardQueryLocation[] = [];
+  const placements = v2LayoutPlacements(spec.layout);
   for (const [name, element] of Object.entries(spec.elements as JsonObject)) {
     if (!isObject(element) || element.kind !== 'Panel' || !isObject(element.spec)) {
       continue;
@@ -117,6 +135,22 @@ function v2Queries(spec: JsonObject): DashboardQueryLocation[] {
       const query = querySpec && isObject(querySpec.query) ? querySpec.query : undefined;
       const text = query && isObject(query.spec) ? query.spec : undefined;
       const field = text ? queryField(text) : undefined;
+      const described = text && !field ? describeBuilderQuery(text, String(query?.group ?? '')) : undefined;
+      if (querySpec && query && text && described) {
+        locations.push({
+          kind: 'panel',
+          key: name,
+          title: String((element.spec as JsonObject).title ?? ''),
+          rowPath: placements.get(name)?.rowPath ?? [],
+          refId: typeof querySpec.refId === 'string' ? querySpec.refId : undefined,
+          datasource: v2Datasource(query),
+          expr: described,
+          jqPath: `.spec.elements[${JSON.stringify(name)}].spec.data.spec.queries[${index}].spec.query.spec`,
+          builder: true,
+          ...(querySpec.hidden ? { hidden: true } : {}),
+        });
+        return;
+      }
       if (!querySpec || !query || !text || !field) {
         return;
       }
@@ -124,6 +158,7 @@ function v2Queries(spec: JsonObject): DashboardQueryLocation[] {
         kind: 'panel',
         key: name,
         title: String((element.spec as JsonObject).title ?? ''),
+        rowPath: placements.get(name)?.rowPath ?? [],
         refId: typeof querySpec.refId === 'string' ? querySpec.refId : undefined,
         datasource: v2Datasource(query),
         expr: String(text[field]),
@@ -151,6 +186,85 @@ function v2Queries(spec: JsonObject): DashboardQueryLocation[] {
     }
   });
   return locations;
+}
+
+const TEXT_QUERY_DATASOURCES = new Set(['prometheus', 'loki', '__expr__', 'datasource']);
+
+const QUERY_META_FIELDS = new Set([
+  'refId',
+  'datasource',
+  'hide',
+  'key',
+  'interval',
+  'intervalMs',
+  'maxDataPoints',
+  'queryType',
+  'editorMode',
+  'format',
+  'resultFormat',
+  'legendFormat',
+  'alias',
+  'rawQuery',
+  'policy',
+  'orderByTime',
+]);
+
+/**
+ * A readable form of a query built with a query builder instead of text: InfluxQL for the InfluxDB
+ * builder, otherwise the builder fields as JSON. Undefined when the target has no builder fields.
+ */
+export function describeBuilderQuery(target: JsonObject, datasourceType?: string): string | undefined {
+  if (typeof target.measurement === 'string' && target.measurement) {
+    return influxQl(target);
+  }
+  // Text-query datasources without text (a new, empty Prometheus query) have nothing to describe.
+  const type = datasourceType ?? (isObject(target.datasource) ? String(target.datasource.type ?? '') : '');
+  if (!type || TEXT_QUERY_DATASOURCES.has(type)) {
+    return undefined;
+  }
+  const fields = Object.fromEntries(Object.entries(target).filter(([key]) => !QUERY_META_FIELDS.has(key)));
+  return Object.keys(fields).length > 0 ? JSON.stringify(fields) : undefined;
+}
+
+function influxQl(target: JsonObject): string {
+  const parts = (value: unknown) => (Array.isArray(value) ? value.filter(isObject) : []);
+  const params = (part: JsonObject) => (Array.isArray(part.params) ? part.params.map(String) : []);
+  const selects = (Array.isArray(target.select) ? target.select : []).map((select) => {
+    let expression = '';
+    let alias = '';
+    for (const part of parts(select)) {
+      const type = String(part.type);
+      if (type === 'field') {
+        expression = `"${params(part)[0] ?? ''}"`;
+      } else if (type === 'math') {
+        expression += ` ${params(part).join(' ').trim()}`;
+      } else if (type === 'alias') {
+        alias = ` AS "${params(part)[0] ?? ''}"`;
+      } else {
+        expression = `${type}(${[expression, ...params(part)].filter(Boolean).join(', ')})`;
+      }
+    }
+    return `${expression}${alias}`;
+  });
+  const policy = typeof target.policy === 'string' && target.policy !== 'default' ? `"${target.policy}".` : '';
+  const conditions = parts(target.tags).map((tag, index) => {
+    const operator = String(tag.operator ?? '=');
+    const value = String(tag.value ?? '');
+    const quoted = operator.includes('~') || /^\/.*\/$/.test(value) ? value : `'${value}'`;
+    const condition = index > 0 ? `${String(tag.condition ?? 'AND')} ` : '';
+    return `${condition}"${String(tag.key)}" ${operator} ${quoted}`;
+  });
+  const groups = parts(target.groupBy).map((group) => {
+    const type = String(group.type);
+    return type === 'tag' ? `"${params(group)[0] ?? ''}"` : `${type}(${params(group).join(', ')})`;
+  });
+  return [
+    `SELECT ${selects.join(', ') || '*'} FROM ${policy}"${String(target.measurement)}"`,
+    conditions.length ? `WHERE ${conditions.join(' ')}` : '',
+    groups.length ? `GROUP BY ${groups.join(', ')}` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
 }
 
 function queryField(target: JsonObject) {

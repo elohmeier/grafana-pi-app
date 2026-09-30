@@ -150,3 +150,17 @@ func TestRepairJsonnetDashboardSourceRejectsUnsupportedSource(t *testing.T) {
 		t.Fatalf("expected parse error")
 	}
 }
+
+func TestRepairJsonnetDashboardSourceExplainsHelperSources(t *testing.T) {
+	source := `local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
+d.dashboard.new(title='Helper', panels=[d.layout.full(d.panel.timeseries('Rate', 'prom-main', []))])`
+	_, _, err := repairJsonnetDashboardSource(source)
+	if err == nil {
+		t.Fatal("expected an error for a pi-dashboard helper source")
+	}
+	for _, want := range []string{"d.dashboard.new", "pi-dashboard", "edit"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+}

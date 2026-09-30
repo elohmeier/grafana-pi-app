@@ -1,3 +1,4 @@
+import { describeDashboardRemovals } from '../dashboardChanges';
 import { isWithin, normalizeWorkspacePath } from '../paths';
 import { SCRATCH_MOUNTS } from '../workspace';
 import {
@@ -30,7 +31,8 @@ export const jsonnetCommand: WorkspaceCommandSpec = {
     eval: {
       summary:
         'Evaluate FILE (relative imports resolve in the workspace, library imports in the vendor tree). `jsonnet FILE` is shorthand.',
-      usage: 'jsonnet [eval] FILE [-o OUT] [-V KEY=VALUE]... [-A KEY=VALUE]... [-S] [--resource UID [--folder UID]]',
+      usage:
+        'jsonnet [eval] FILE [-o OUT] [-V KEY=VALUE]... [-A KEY=VALUE]... [-S] [--resource UID [--folder UID] [--replace]]',
       effect: 'remote-read',
       options: {
         output: { type: 'string', alias: 'o', description: 'Write the result to OUT instead of stdout.' },
@@ -43,6 +45,11 @@ export const jsonnetCommand: WorkspaceCommandSpec = {
             'Wrap a classic dashboard result as a dashboard.grafana.app/v1 resource with this UID (for -o /grafana/dashboards/UID/dashboard.json).',
         },
         folder: { type: 'string', description: 'Folder UID annotation for --resource output.' },
+        replace: {
+          type: 'boolean',
+          description:
+            'Allow --resource output to drop panels or variables of an existing dashboard at OUT (a deliberate full rewrite).',
+        },
       },
       examples: [
         'jsonnet /workspace/dashboard.jsonnet | jq .title',
@@ -79,6 +86,15 @@ export const jsonnetCommand: WorkspaceCommandSpec = {
         const target = stringOption(parsed, 'output');
         if (target) {
           const path = normalizeWorkspacePath(target, ctx.cwd);
+          if (resourceUid && parsed.options.replace !== true && (await ctx.tx.exists(path))) {
+            // Rendering a new dashboard over an existing one replaces it; small edits belong in the JSON.
+            const removed = describeDashboardRemovals(await ctx.tx.readFile(path), output);
+            if (removed.length > 0) {
+              return fail(
+                `jsonnet: ${path} already holds dashboard ${resourceUid}, and the rendered result drops content from it:\n  ${removed.join('\n  ')}\nEdit existing dashboards in place (edit, jq, grafana-dashboard add-panel|set-panel), render to a new UID, or pass --replace if the user asked to rebuild it.\n`
+              );
+            }
+          }
           await ctx.tx.writeFile(path, output);
           return ok('', '');
         }

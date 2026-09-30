@@ -27,6 +27,13 @@ describe('formatAssistantError', () => {
     expect(error?.message).toContain('http://host.docker.internal:8080/v1/chat/completions');
   });
 
+  it('explains a rejected Grafana session instead of a bare 401', () => {
+    const error = formatAssistantError('Proxy error: 401 Unauthorized', 'error');
+    expect(error?.title).toBe('Grafana session expired');
+    expect(error?.message).toMatch(/sign in again.*send the message again/i);
+    expect(error?.details).toBe('Proxy error: 401 Unauthorized');
+  });
+
   it('does not report a request the user stopped as an error', () => {
     expect(formatAssistantError('Request aborted by user', 'aborted')).toBeUndefined();
   });

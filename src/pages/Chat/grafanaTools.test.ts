@@ -261,6 +261,47 @@ describe('grafana datasource tool policy', () => {
     });
   });
 
+  it('keeps the reasons of a failed datasource query and a failed resource fallback', async () => {
+    const dataSource = {
+      uid: 'prom-b',
+      type: 'prometheus',
+      query: jest.fn().mockResolvedValue({ state: 'Error', errors: [{ refId: 'A' }], data: [] }),
+      getResource: jest
+        .fn()
+        .mockRejectedValue(grafanaFetchError(422, 'Unprocessable Entity', 'query timed out in expression evaluation')),
+    };
+    mockDataSourceSrv.get.mockResolvedValue(dataSource);
+    const body = await runPrometheusQuerySummaryOrValidationError(dataSource as any, {
+      query: 'sum(rate(http_requests_total[5m]))',
+    });
+    expect(body.validationError).toContain('without an error message');
+    expect(body.validationError).toContain('resource fallback');
+    expect(body.validationError).toContain('query timed out in expression evaluation');
+  });
+
+  it('reads the Prometheus reason from the data of a DataQueryError', async () => {
+    const dataSource = {
+      uid: 'prom-b',
+      type: 'prometheus',
+      query: jest.fn().mockResolvedValue({
+        state: 'Error',
+        errors: [
+          {
+            refId: 'A',
+            status: 422,
+            data: { message: 'Query data error', error: 'many-to-many matching not allowed' },
+          },
+        ],
+        data: [],
+      }),
+    };
+    mockDataSourceSrv.get.mockResolvedValue(dataSource);
+    const body = await runPrometheusQuerySummaryOrValidationError(dataSource as any, {
+      query: 'sum(rate(http_requests_total[5m])) / on() group_left sum(up)',
+    });
+    expect(body.validationError).toBe('many-to-many matching not allowed (status 422)');
+  });
+
   it('retries transient Prometheus query failures without exposing retry noise', async () => {
     jest.useFakeTimers();
     try {

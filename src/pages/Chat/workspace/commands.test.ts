@@ -81,6 +81,14 @@ describe('grafana-usage command', () => {
     );
   });
 
+  it('explains that the search text matches dashboard titles when no dashboard matched', async () => {
+    const search = jest.fn(async () => ({ metrics: [], usages: [], dashboards: [] }));
+    const { run } = setup({ metricUsage: { inspect: jest.fn(), search, neighborhood: jest.fn() } });
+    const result = await run('grafana-usage search http_requests | jq -r .note');
+    expect(result.stdout).toContain('no dashboard title matches "http_requests"');
+    expect(result.stdout).toContain('--seed');
+  });
+
   it('forwards seed metrics to the related-metrics broker', async () => {
     const neighborhood = jest.fn(async () => ({ seedMetrics: ['up'], neighbors: [{ metric: 'node_load1' }] }));
     const { run } = setup({ metricUsage: { inspect: jest.fn(), search: jest.fn(), neighborhood } });
@@ -237,6 +245,41 @@ describe('live dashboard file', () => {
     const forced = await run('live apply --force');
     expect(forced.exitCode).toBe(0);
     expect(applied[0].title).toBe('Mine');
+  });
+
+  it('refuses live edits that drop panels, queries, or transformations unless removals are allowed', async () => {
+    const { run, applied } = liveSetup();
+    await run(
+      `jq 'del(.spec.elements["panel-1"])' /live/dashboard/dashboard.json > /tmp/d.json && mv /tmp/d.json /live/dashboard/dashboard.json`
+    );
+    const refused = await run('live apply');
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toContain('removes 1 of 1 panels: "Requests"');
+    expect(refused.stderr).toContain('--allow-removals');
+    expect(applied).toHaveLength(0);
+
+    const allowed = await run('live apply --allow-removals | jq -c .removed');
+    expect(allowed.exitCode).toBe(0);
+    expect(JSON.parse(allowed.stdout)).toEqual(['removes 1 of 1 panels: "Requests"']);
+    expect(applied[0].elements).toEqual({});
+  });
+
+  it('stages the state before the last live apply with live undo', async () => {
+    const { run, applied } = liveSetup();
+    const none = await run('live undo');
+    expect(none.exitCode).toBe(1);
+    expect(none.stderr).toContain('nothing to undo');
+
+    await run(
+      `jq '.spec.title = "Edited"' /live/dashboard/dashboard.json > /tmp/d.json && mv /tmp/d.json /live/dashboard/dashboard.json`
+    );
+    const apply = await run('live apply | jq -r .undo');
+    expect(apply.stdout).toBe('live undo\n');
+
+    const undo = await run('live undo | jq -c "{staged, next}" && live apply | jq .applied');
+    expect(undo.stderr).toBe('');
+    expect(undo.stdout.trim().split('\n')).toEqual(['{"staged":true,"next":"live diff, then live apply"}', 'true']);
+    expect(applied.map((spec) => spec.title)).toEqual(['Edited', 'Live']);
   });
 
   it('adds a variable-bound label filter to every Prometheus query and discards on request', async () => {
