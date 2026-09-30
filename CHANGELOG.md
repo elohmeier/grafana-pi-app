@@ -1,3 +1,9 @@
+## [5.0.1](https://github.com/elohmeier/grafana-pi-app/compare/v5.0.0...v5.0.1) (2026-09-30)
+
+### Bug Fixes
+
+* **deps:** update dependencies with high and critical advisories ([cd9dec0](https://github.com/elohmeier/grafana-pi-app/commit/cd9dec081fde07b30a3e92022601ecca5e378dd2))
+
 ## [5.0.0](https://github.com/elohmeier/grafana-pi-app/compare/v4.0.0...v5.0.0) (2026-09-30)
 
 ### ⚠ BREAKING CHANGES
