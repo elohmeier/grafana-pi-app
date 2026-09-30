@@ -1,3 +1,54 @@
+## [5.0.0](https://github.com/elohmeier/grafana-pi-app/compare/v4.0.0...v5.0.0) (2026-09-30)
+
+### ⚠ BREAKING CHANGES
+
+* the typed tools update_report, navigate,
+screenshot_dashboard, read_artifact, find_panel_alert_rules,
+get_alert_rule, the dashboard metric-usage tools, and all
+*_live_dashboard_* tools are removed. Live dashboard editing requires
+Grafana's GET_SPEC and APPLY_SPEC mutation commands (Grafana 13.2+).
+* the run_*_agent specialist tools, the Jsonnet file/render/save
+and dashboard plan tools, raw metric/dashboard tools, read_skill_resource, and
+the /jsonnet-dashboards/* and /agent/* backend routes are removed. Durable
+dashboard changes now require workspace plan/apply approval and are written as
+the current user instead of the plugin service account.
+
+### Features
+
+* add Ctrl+R history search, Esc, and Ctrl+C to the chat composer ([b84558f](https://github.com/elohmeier/grafana-pi-app/commit/b84558f4bde793ff3f79ee612e62855404810ebb))
+* add dashboard data checks and upstream PromQL validation to the shell ([07076eb](https://github.com/elohmeier/grafana-pi-app/commit/07076eb09d0be75706511f15fd9e2f4d50a17610))
+* add HA PostgreSQL session storage and paginated history ([78a8520](https://github.com/elohmeier/grafana-pi-app/commit/78a85203bb0d0c8fe265bb948434bf27c6c2516e))
+* apply alert rule changes through the change-set review ([60fbd86](https://github.com/elohmeier/grafana-pi-app/commit/60fbd8696866cbcadfd5d925368b2d93eb958671))
+* cap folder depth and import general/ into General when importing dashboard trees ([fd14a0d](https://github.com/elohmeier/grafana-pi-app/commit/fd14a0dd0788ffa210cc22655659467c5773a603))
+* complete commands, options, and paths with Tab in shell mode ([38b7add](https://github.com/elohmeier/grafana-pi-app/commit/38b7add4704a9f32570d8cd1b89838eece81f6b8))
+* fold the tool steps of finished turns into one summary line ([7cd8dee](https://github.com/elohmeier/grafana-pi-app/commit/7cd8dee12d5e310cb59411b49936aa44d643b821))
+* highlight bash tool commands with Prism ([14900d2](https://github.com/elohmeier/grafana-pi-app/commit/14900d2cd1ed5dbbdfc1696d9f954f7e02acd1e5))
+* make read/write/edit/bash the only agent tools ([6594584](https://github.com/elohmeier/grafana-pi-app/commit/6594584c25cf149e10feb95c32789cab14729e86))
+* make the chat composer and transcript behave like a terminal ([4033bdc](https://github.com/elohmeier/grafana-pi-app/commit/4033bdc702bbc8b5ede1ee577294ab48aac4f5e9))
+* mount Grafana alert rules as validated working copies ([43570a8](https://github.com/elohmeier/grafana-pi-app/commit/43570a8f3959e92867d11830b1d177cc05b7e939))
+* move conversations into AssistantSession and show compaction in the chat ([673172f](https://github.com/elohmeier/grafana-pi-app/commit/673172f20df52940b2804a4b8a9e6dbe66fdeaae))
+* render tool calls as a compact terminal transcript ([6286b60](https://github.com/elohmeier/grafana-pi-app/commit/6286b60a70558d80bc82f705734f9a5736538fd6))
+* replace specialist tools with a session filesystem and single agent ([9beb2ba](https://github.com/elohmeier/grafana-pi-app/commit/9beb2ba48bff8c70ec78f6e7e0998543e413e8e9))
+* report dashboards edited in their stored version ([8028233](https://github.com/elohmeier/grafana-pi-app/commit/8028233ea0c7669d4f2e34280972f04a73562a98))
+* show the running host command and elapsed time of bash calls ([da7331d](https://github.com/elohmeier/grafana-pi-app/commit/da7331d0f5c588bb2cdb9cb752b376e1eb813e8d))
+* speak the Pi 0.87 proxy protocol in the LLM backend ([d0512b9](https://github.com/elohmeier/grafana-pi-app/commit/d0512b998eca1b4d8887ee5d63574971c7693be8))
+* support dashboard mass edits with a change-set review ([abee486](https://github.com/elohmeier/grafana-pi-app/commit/abee48697b14eab85da5f6b9e55bec4fe188bca4))
+* support DeepSeek thinking and local DS4 configuration ([2cae7d2](https://github.com/elohmeier/grafana-pi-app/commit/2cae7d2224aa1e2e920761d003c4289ff1090a0d))
+* support the max thinking level ([5b2d041](https://github.com/elohmeier/grafana-pi-app/commit/5b2d041af48a2809a67207bc75799a799e54c39d))
+
+### Bug Fixes
+
+* guard dashboard edits and tools against failures seen in session exports ([b0fe1e4](https://github.com/elohmeier/grafana-pi-app/commit/b0fe1e48f86c6595379782ea98f58d6ab89b1751))
+* never dock the assistant back onto Grafana sign-in pages ([ffc4c04](https://github.com/elohmeier/grafana-pi-app/commit/ffc4c04b6266e5f635084b35de6b9389d72478bc))
+* persist the complete chat history after each agent run ([cafe6a9](https://github.com/elohmeier/grafana-pi-app/commit/cafe6a991e9d2fd75f18358905a14acc83b8aa67))
+* register transformers with lazy loaders outside Grafana ([b1e1f57](https://github.com/elohmeier/grafana-pi-app/commit/b1e1f570f6d92a7c64d22e47ea2683887a1bbeb1))
+* report canceled LLM streams as aborted ([ef1e88e](https://github.com/elohmeier/grafana-pi-app/commit/ef1e88e8b920aacd8851ed1d9eebbcccfbfcf087))
+* report failed and truncated chat completion streams as errors ([b958bd9](https://github.com/elohmeier/grafana-pi-app/commit/b958bd96b5585aac665ed4d173946f6ff46196b8))
+* revert in the same invocation that discards a newer local change ([f0c1034](https://github.com/elohmeier/grafana-pi-app/commit/f0c10348a27dd6dd04758dbbe17c1d240b4566b4))
+* seed the rule editing samples through the provisioning API ([49f45a9](https://github.com/elohmeier/grafana-pi-app/commit/49f45a9ef1f9291d69a1529dc0a2daceb15d5288))
+* send plain call IDs in Chat Completions history ([e17c9bb](https://github.com/elohmeier/grafana-pi-app/commit/e17c9bb6a234cdbf67064d4fed4db8d9d1b63f1a))
+* stop repeated summarization when tool output crowds the context ([2b1d45d](https://github.com/elohmeier/grafana-pi-app/commit/2b1d45d816d0ee8b7b3db62335921db6458c6263))
+
 ## [4.0.0](https://github.com/elohmeier/grafana-pi-app/compare/v3.4.0...v4.0.0) (2026-09-10)
 
 ### ⚠ BREAKING CHANGES
