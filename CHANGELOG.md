@@ -1,3 +1,15 @@
+## [6.0.0](https://github.com/elohmeier/grafana-pi-app/compare/v5.0.1...v6.0.0) (2026-10-03)
+
+### ⚠ BREAKING CHANGES
+
+* chats from earlier versions (Grafana user storage and
+PostgreSQL session snapshots) are no longer shown and are not migrated, and
+importing old chat export files is no longer supported.
+
+### Features
+
+* run chats on pi-durable with server-side chat logs ([76a7444](https://github.com/elohmeier/grafana-pi-app/commit/76a7444d4f932b8c0ae6dce179c249f336bcdaac))
+
 ## [5.0.1](https://github.com/elohmeier/grafana-pi-app/compare/v5.0.0...v5.0.1) (2026-09-30)
 
 ### Bug Fixes
