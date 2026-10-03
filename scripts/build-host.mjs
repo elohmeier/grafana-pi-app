@@ -7,10 +7,11 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 await build({
-  // The host and its shell worker (worker_threads).
+  // The host and its shell and Python workers (worker_threads).
   entryPoints: {
     main: path.join(root, 'src/host/main.ts'),
     'shell.worker': path.join(root, 'src/host/shell.worker.ts'),
+    'python.worker': path.join(root, 'src/host/python.worker.ts'),
   },
   outdir: path.join(root, 'dist-host'),
   outExtension: { '.js': '.mjs' },

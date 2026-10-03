@@ -2,6 +2,7 @@ import { analysisPrompt, decideDelivery, firingFingerprints, formatAlertMessage,
 import { createSessionId } from '../pages/Chat/session/chatIdentity';
 import type { AssistantAnswer, AssistantRunProgress, ChatRef, PresentedEvidence } from './assistant';
 import type { ChannelFile, ChannelMessage, ChatChannel } from './channel';
+import type { Metrics } from './metrics';
 import type { HostStore } from './store';
 
 export type Assistant = {
@@ -12,6 +13,8 @@ export type Assistant = {
     onProgress?: (progress: AssistantRunProgress) => void,
     options?: { resume?: boolean }
   ): Promise<AssistantAnswer>;
+  /** Stops the conversation's run in progress; false when none runs. */
+  stop?(conversation: string): boolean;
   /** A share token for the chat; with it, answers link to a copy of the chat in Grafana. */
   share?(chatId: string): Promise<string>;
 };
@@ -30,6 +33,7 @@ export type ResponderOptions = {
   progressIntervalMs?: number;
   /** Screenshots of the panels a notification links to; posted in a new alert thread without the model. */
   alertPanels?: (payload: GrafanaWebhook) => Promise<Array<{ title: string; file: ChannelFile }>>;
+  metrics?: Metrics;
   /** The Grafana URL that copies a shared chat into the user's chats and opens it. */
   sharedChatUrl?: (token: string) => string;
 };
@@ -60,6 +64,13 @@ export class Responder {
       return;
     }
     const key = threadKey(channel.name, message.channelId, message.threadId);
+    if (/^(stop|cancel)[.!]?$/i.test(message.text.trim()) && this.options.assistant.stop) {
+      const stopped = this.options.assistant.stop(key);
+      if (!stopped) {
+        await channel.post(message.channelId, 'Nothing is running in this thread.', message.threadId);
+      }
+      return;
+    }
     const record = store.thread(key);
     // Thread posts since the last answer that did not mention the bot are context for this one.
     let context = '';
@@ -102,6 +113,13 @@ export class Responder {
       throw new Error('no alert channel is configured');
     }
     const delivery = decideDelivery(payload, store.episode(payload.groupKey));
+    this.options.metrics?.inc(
+      'assistant_host_alert_notifications_total',
+      'Grafana notifications received, by what they did.',
+      {
+        action: delivery.action,
+      }
+    );
     if (delivery.action === 'skip') {
       return { action: 'skip' as const };
     }
@@ -224,6 +242,9 @@ export class Responder {
       }
     }
     await editing;
+    this.options.metrics?.inc('assistant_host_runs_total', 'Assistant runs finished, by outcome.', {
+      outcome: result.error ? 'failed' : 'answered',
+    });
     await store.setThread(key, {
       pending: undefined,
       ...(result.chatId ? { chatStored: true, lastAnswerAt: Date.now() } : {}),

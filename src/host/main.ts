@@ -14,8 +14,10 @@ import { isGrafanaWebhook } from './alerts';
 import { AssistantHost } from './assistant';
 import { getBackendSrv, initGrafanaRuntime, refreshDatasources } from './grafanaRuntime';
 import { MattermostChannel } from './mattermost';
+import { Metrics } from './metrics';
 import { Responder } from './responder';
 import { renderAlertPanels } from './screenshots';
+import { createNodePythonRunner } from './python';
 import { nodeShellWorkers } from './shellWorkers';
 import { setShellWorkerFactory } from '../pages/Chat/workspace/shell';
 import { HostStore } from './store';
@@ -42,6 +44,11 @@ function setting(name: string, fallback?: string) {
 const grafanaUrl = setting('GRAFANA_URL').replace(/\/$/, '');
 const grafanaToken = setting('GRAFANA_TOKEN');
 const webhookToken = setting('ALERT_WEBHOOK_TOKEN', '');
+if (!webhookToken && setting('ALERT_WEBHOOK_INSECURE', 'false') !== 'true') {
+  throw new Error(
+    'ALERT_WEBHOOK_TOKEN is required; set ALERT_WEBHOOK_INSECURE=true to accept unauthenticated notifications'
+  );
+}
 const port = Number(setting('HOST_PORT', '8080'));
 
 // Scripts run in worker threads, so the run timeout and cancellation can terminate them.
@@ -79,6 +86,14 @@ const assistant = new AssistantHost({
   broker: createBroker,
   chatLog: grafanaChatLog(),
   concurrency: Number(setting('ASSISTANT_CONCURRENCY', '2')),
+  // The plugin's CPython-WASM assets; dist-host is built next to dist.
+  python: createNodePythonRunner({
+    assets: new URL(
+      `${setting('CPYTHON_DIR', new URL('../dist/cpython', import.meta.url).pathname).replace(/\/$/, '')}/`,
+      'file://'
+    ),
+    worker: new URL('./python.worker.mjs', import.meta.url),
+  }),
 });
 
 // Links people open: Grafana's public URL (root_url), not the address the host uses.
@@ -86,6 +101,10 @@ const publicUrl = setting(
   'GRAFANA_PUBLIC_URL',
   (await getBackendSrv().get<{ appUrl?: string }>('/api/frontend/settings')).appUrl ?? grafanaUrl
 ).replace(/\/$/, '');
+
+const metrics = new Metrics();
+metrics.gauge('assistant_host_runs_in_progress', 'Assistant runs using the model now.', () => assistant.load().running);
+metrics.gauge('assistant_host_runs_waiting', 'Assistant runs waiting for a turn.', () => assistant.load().waiting);
 
 const store = new HostStore(path.join(setting('HOST_DATA_DIR', './work/host'), 'state.json'));
 await store.load();
@@ -104,6 +123,7 @@ const responder = new Responder({
   channelIds: await Promise.all(channelNames.map((name) => channel.resolveChannel(name))),
   allowDirect: setting('MATTERMOST_ALLOW_DIRECT', 'true') !== 'false',
   alertPanels: async (payload) => renderAlertPanels(payload, createBroker(await jsonData()), log),
+  metrics,
   sharedChatUrl: (token) => `${publicUrl}/a/${PLUGIN_ID}/chat?share=${encodeURIComponent(token)}`,
   log,
 });
@@ -126,6 +146,11 @@ createServer((request, response) => {
 async function handle(request: IncomingMessage, response: ServerResponse) {
   if (request.method === 'GET' && request.url === '/healthz') {
     return reply(response, 200, { status: 'ok' });
+  }
+  if (request.method === 'GET' && request.url === '/metrics') {
+    response.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' });
+    response.end(metrics.render());
+    return;
   }
   if (request.method !== 'POST' || request.url !== '/alerts/grafana') {
     return reply(response, 404, { error: 'not found' });

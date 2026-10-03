@@ -23,7 +23,9 @@ session filesystem, and every shell command. Only the environment differs:
   which thread (`state.json` in `HOST_DATA_DIR`).
 - Bash runs in worker threads (`dist-host/shell.worker.mjs`, the browser's shell
   worker with `self` mapped to the parent port), so the run timeout and
-  cancellation terminate a runaway script. `python3` is not available.
+  cancellation terminate a runaway script.
+- `python3` runs CPython-WASM from the plugin's `dist/cpython` assets
+  (`CPYTHON_DIR`) in a worker thread per run, like the browser.
 
 ```text
 Grafana alerting --webhook--> assistant host --REST/websocket--> Mattermost
@@ -113,6 +115,8 @@ Thread posts since the bot's last answer that did not mention it are sent along
 as context. While the assistant works, a placeholder post shows its steps; the
 answer replaces it.
 
+Replying `@grafana-assistant stop` in a thread stops its running answer.
+
 Runs of one thread are serialized; at most `ASSISTANT_CONCURRENCY` runs (default 2) use the model at the same time.
 
 Before a run, the host stores it as pending with its placeholder post and
@@ -132,11 +136,17 @@ stored), and the answer replaces the placeholder.
 | `MATTERMOST_ALERT_CHANNEL`   | `team/channel` for alert notifications.                                                   |
 | `MATTERMOST_CHANNELS`        | Comma-separated `team/channel` list where mentions are answered (plus the alert channel). |
 | `MATTERMOST_ALLOW_DIRECT`    | `true` (default) to answer direct messages.                                               |
-| `ALERT_WEBHOOK_TOKEN`        | Bearer token the contact point sends; without it, the webhook accepts any caller.         |
+| `ALERT_WEBHOOK_TOKEN`        | Bearer token the contact point sends. Required unless `ALERT_WEBHOOK_INSECURE=true`.      |
+| `GRAFANA_PUBLIC_URL`         | Grafana URL in links people open (default: Grafana's `appUrl`).                           |
+| `CPYTHON_DIR`                | CPython-WASM assets (default: `dist/cpython` next to the host bundle).                    |
 | `ASSISTANT_CONCURRENCY`      | Concurrent assistant runs (default 2).                                                    |
 | `HOST_PORT`, `HOST_DATA_DIR` | HTTP port (default 8080) and state directory.                                             |
 
 Every secret can also be read from a file named by `<NAME>_FILE`.
+
+`GET /metrics` exposes Prometheus metrics: notifications by action
+(`assistant_host_alert_notifications_total`), finished runs by outcome
+(`assistant_host_runs_total`), and runs in progress and waiting.
 
 ## Local setup
 
@@ -172,8 +182,6 @@ npx playwright test tests/assistantHost.spec.ts --project=chromium --no-deps
 
 - **Webex:** a second `ChatChannel` (`src/host/channel.ts`) implementation.
 - **Silences** from a thread, as reviewed changes with actor-bound approval.
-- `python3` in the host: a worker_threads `PythonRunner` that loads CPython-WASM
-  from `dist/cpython`.
 - The host keeps its state in one JSON file and runs as a single instance.
 - Links in notifications come from Grafana's `root_url`. The local variant sets
   it to port 3001; the plugin setting `sessionGrafanaUrl` points the backend at

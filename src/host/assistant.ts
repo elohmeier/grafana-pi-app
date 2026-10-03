@@ -6,6 +6,7 @@ import { resolveChatModelSettings } from '../pages/Chat/model';
 import { AssistantSession, type SessionHost } from '../pages/Chat/session/AssistantSession';
 import { getGrafanaSkills } from '../pages/Chat/skills';
 import type { WorkspaceBroker } from '../pages/Chat/workspace/broker';
+import type { PythonRunner } from '../pages/Chat/workspace/python/pythonCommand';
 import type { PiAppJsonData } from '../types';
 
 /** What the model is told about answering outside Grafana. */
@@ -44,6 +45,8 @@ export type AssistantHostOptions = {
   streamFn: AssistantStreamFn;
   broker: (jsonData: PiAppJsonData) => WorkspaceBroker;
   chatLog: ChatLogClient;
+  /** `python3` in the session shell. */
+  python?: PythonRunner;
   /** Runs at the same time across conversations; more wait their turn. Bounds the load on the model server. */
   concurrency?: number;
 };
@@ -56,6 +59,8 @@ export type AssistantHostOptions = {
 export class AssistantHost {
   private queues = new Map<string, Promise<unknown>>();
   private running = 0;
+  /** Sessions with a run in progress, by conversation, so a run can be stopped. */
+  private active = new Map<string, AssistantSession>();
   private waiting: Array<() => void> = [];
 
   constructor(private readonly options: AssistantHostOptions) {}
@@ -74,7 +79,7 @@ export class AssistantHost {
     const previous = this.queues.get(conversation) ?? Promise.resolve();
     const run = previous
       .catch(() => undefined)
-      .then(() => this.limited(() => this.run(chat, text, onProgress, options.resume ?? false)));
+      .then(() => this.limited(() => this.run(conversation, chat, text, onProgress, options.resume ?? false)));
     this.queues.set(conversation, run);
     void run.finally(() => {
       if (this.queues.get(conversation) === run) {
@@ -102,7 +107,20 @@ export class AssistantHost {
     }
   }
 
+  /** Stops the conversation's run in progress; its answer ends where it stopped. */
+  stop(conversation: string) {
+    const session = this.active.get(conversation);
+    session?.abort();
+    return Boolean(session);
+  }
+
+  /** Runs in progress and waiting for a turn, for metrics. */
+  load() {
+    return { running: this.running, waiting: this.waiting.length };
+  }
+
   private async run(
+    conversation: string,
     chat: ChatRef,
     text: string,
     onProgress: ((progress: AssistantRunProgress) => void) | undefined,
@@ -120,7 +138,15 @@ export class AssistantHost {
       chatLog: this.options.chatLog,
       environment: (target) => {
         const { model, thinkingLevel } = resolveChatModelSettings(settings, target.getState());
-        return { jsonData: settings, streamFn: this.options.streamFn, model, thinkingLevel, broker, skills };
+        return {
+          jsonData: settings,
+          streamFn: this.options.streamFn,
+          model,
+          thinkingLevel,
+          broker,
+          skills,
+          python: this.options.python,
+        };
       },
     };
     // Nobody can review a change set in a channel.
@@ -149,6 +175,7 @@ export class AssistantHost {
         }
       }
     });
+    this.active.set(conversation, session);
     try {
       session.attach(host);
       await session.open();
@@ -168,13 +195,19 @@ export class AssistantHost {
       const answer = lastAssistantMessage(session.messages.slice(start));
       return {
         chatId: session.id,
-        text: answer ? messageText(answer) : '',
+        text:
+          answer?.stopReason === 'aborted'
+            ? `${messageText(answer)}\n\n_Stopped._`.trim()
+            : answer
+              ? messageText(answer)
+              : '',
         toolCalls: progress.toolCalls,
         ...(evidence.length ? { evidence } : {}),
         stagedChanges: session.workspace.status().length,
         ...(answer?.stopReason === 'error' ? { error: answer.errorMessage ?? 'the model request failed' } : {}),
       };
     } finally {
+      this.active.delete(conversation);
       unsubscribeEvents();
       unsubscribeApprovals();
       await session.close();

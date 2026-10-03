@@ -3,6 +3,7 @@ import type { ChannelFile, ChannelMessage, ChatChannel, ThreadPost } from './cha
 import { formatEvidence, Responder, split, type Assistant, type ResponderOptions } from './responder';
 import { alertPanels } from './screenshots';
 import type { ChatRef } from './assistant';
+import { Metrics } from './metrics';
 import { HostStore } from './store';
 
 function alert(fingerprint: string, status: 'firing' | 'resolved' = 'firing'): GrafanaWebhookAlert {
@@ -338,5 +339,34 @@ describe('continuing in Grafana', () => {
       'Done.\n\n:pencil2: [Review and apply the 2 staged changes in Grafana](http://grafana/a/app/chat?share=tok)'
     );
     expect(shares).toHaveLength(1);
+  });
+});
+
+describe('operations', () => {
+  it('stops the running answer of a thread on "stop"', async () => {
+    const stopped: string[] = [];
+    const { channel, asks, responder } = setup();
+    (responder as unknown as { options: { assistant: Assistant } }).options.assistant.stop = (conversation) => {
+      stopped.push(conversation);
+      return conversation === 'fake:ops:busy';
+    };
+    await responder.handleMessage(message({ threadId: 'busy', postId: 'p', text: 'stop' }));
+    await responder.handleMessage(message({ threadId: 'idle', postId: 'q', text: 'Stop!' }));
+    expect(stopped).toEqual(['fake:ops:busy', 'fake:ops:idle']);
+    expect(asks).toEqual([]);
+    expect(channel.posts.map((post) => post.text)).toEqual(['Nothing is running in this thread.']);
+  });
+
+  it('counts notifications and runs', async () => {
+    const metrics = new Metrics();
+    metrics.gauge('assistant_host_runs_waiting', 'Waiting runs.', () => 3);
+    const { responder } = setup(undefined, { metrics });
+    await responder.handleAlert(notification('firing', [alert('a')]));
+    await responder.handleAlert(notification('firing', [alert('a')]));
+    await settle();
+    expect(metrics.render()).toContain('assistant_host_alert_notifications_total{action="open"} 1');
+    expect(metrics.render()).toContain('assistant_host_alert_notifications_total{action="skip"} 1');
+    expect(metrics.render()).toContain('assistant_host_runs_total{outcome="answered"} 1');
+    expect(metrics.render()).toContain('assistant_host_runs_waiting 3');
   });
 });
