@@ -622,7 +622,9 @@ own chat, declines approvals, and adds a channel prompt to the system prompt
 addendum. `Responder` connects a `ChatChannel` (`mattermost.ts`) to it: Grafana
 webhook notifications are posted before the model runs, one thread per firing
 episode, and mentions continue the thread's chat. The plugin backend stores
-service account chats in their own scope. See
+service account chats in their own scope. Answers link to a shared copy of the
+thread's chat (`POST /chats/{id}/share`, `?share=TOKEN` on the chat page), where
+the user reviews and applies staged changes as themselves. See
 [Mattermost incident conversations](docs/mattermost.md).
 
 ## Alert Rules

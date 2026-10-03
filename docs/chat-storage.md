@@ -132,14 +132,19 @@ which backend stores chats and fails when it is unavailable.
 The backend derives the owner of a chat from the identity token Grafana
 forwards with every plugin request and verifies it against Grafana's signing
 keys: deployment namespace, organization, plugin ID, and the stable user UID.
-Anonymous users and service accounts cannot store chats.
+Service accounts (the [assistant host](mattermost.md)) store chats in a scope of
+their own; anonymous users cannot store chats.
 
-Tables (`chats`, `chat_rows`, and `chatlog_migrations`):
+Tables (`chats`, `chat_rows`, `chat_shares`, and `chatlog_migrations`):
 
 - `chats` holds each chat's title, timestamps, writer epoch, last sequence
   number and digest, stored size, and a deletion marker.
 - `chat_rows` holds the log: one row per stored write, keyed by chat, sequence
   number, and position in its commit, with an optional replacement key.
+- `chat_shares` holds share tokens: a chat's owner shares it, and any user with
+  app access who has the token can copy the chat, as it is at that moment, into
+  their own chats under a new ID. The copy is independent of the original. The
+  token is the only check, so treat links that contain it like the chat itself.
 
 Deleting a chat removes its rows and keeps a tombstone, so a view that still
 holds the chat cannot store it again. There is no automatic expiry or per-user
@@ -163,6 +168,8 @@ require app access, and return errors as `{"error": "..."}`; a conflict adds
 | `POST /chats/{id}/commits`           | Append one commit: `epoch`, `seq`, `digest`, `rows`, optional `title`.     |
 | `PATCH /chats/{id}`                  | Rename.                                                                    |
 | `DELETE /chats/{id}`                 | Delete and keep a tombstone.                                               |
+| `POST /chats/{id}/share`             | A share token for the caller's chat (the same token each time).            |
+| `POST /shares/{token}/copy`          | Copy the shared chat into the caller's chats; returns the new chat.        |
 
 ## Tests
 

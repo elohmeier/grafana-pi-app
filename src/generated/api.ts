@@ -94,6 +94,13 @@ export interface ChatCommitResult {
 export interface RenameChatRequest {
   title: string;
 }
+/**
+ * ChatShare is the response of POST /chats/{id}/share: a token that lets
+ * another user copy the chat with POST /shares/{token}/copy.
+ */
+export interface ChatShare {
+  token: string;
+}
 
 //////////
 // source: errors.go

@@ -60,9 +60,10 @@ tests.
   change-set review and operation journal. Needed for responder actions in
   Mattermost; a repeated create must find the earlier silence instead of
   creating a second one.
-- **Approvals from channels**, bound to the actor, the change-set digest, and an
-  expiry; with them, writes from a thread and Mattermost users mapped to
-  Grafana users.
+- **Silences and approvals in the thread** (buttons), bound to the actor, the
+  change-set digest, and an expiry, with Mattermost users mapped to Grafana
+  users. Until then, changes from a thread are reviewed and applied in Grafana
+  through the chat's share link.
 - **Rest of alerting:** rule group operations (interval, reordering, moves),
   contact points, notification policies, and mute timings.
 - **Grafana chats on the assistant host**, so runs continue while no browser

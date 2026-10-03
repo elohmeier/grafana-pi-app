@@ -81,6 +81,12 @@ const assistant = new AssistantHost({
   concurrency: Number(setting('ASSISTANT_CONCURRENCY', '2')),
 });
 
+// Links people open: Grafana's public URL (root_url), not the address the host uses.
+const publicUrl = setting(
+  'GRAFANA_PUBLIC_URL',
+  (await getBackendSrv().get<{ appUrl?: string }>('/api/frontend/settings')).appUrl ?? grafanaUrl
+).replace(/\/$/, '');
+
 const store = new HostStore(path.join(setting('HOST_DATA_DIR', './work/host'), 'state.json'));
 await store.load();
 
@@ -98,6 +104,7 @@ const responder = new Responder({
   channelIds: await Promise.all(channelNames.map((name) => channel.resolveChannel(name))),
   allowDirect: setting('MATTERMOST_ALLOW_DIRECT', 'true') !== 'false',
   alertPanels: async (payload) => renderAlertPanels(payload, createBroker(await jsonData()), log),
+  sharedChatUrl: (token) => `${publicUrl}/a/${PLUGIN_ID}/chat?share=${encodeURIComponent(token)}`,
   log,
 });
 await channel.start((message) => {

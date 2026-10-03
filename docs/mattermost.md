@@ -41,9 +41,23 @@ as in Grafana. Mattermost users are not mapped to Grafana users; whoever can
 talk to the bot uses the service account's access. Restrict that with
 `MATTERMOST_CHANNELS` and `MATTERMOST_ALLOW_DIRECT`.
 
-The host is **read-only**: approvals are declined, so `workspace apply` cannot
-write, and the model is told to describe changes instead. Changes are made in
-Grafana.
+The host cannot write: approvals are declined, so `workspace apply` cannot
+write from a thread. Changes are applied in Grafana, as the person who reviews
+them:
+
+1. Asked for a change, the assistant stages and validates it in the chat's
+   working copy.
+2. The answer ends with a link, "Review and apply the staged change in
+   Grafana" (otherwise "Continue in Grafana"). It contains a share token of the
+   thread's chat (`POST /chats/{id}/share`, see [chat storage](chat-storage.md)).
+3. Opening the link (`/a/<plugin>/chat?share=TOKEN`) copies the chat, with its
+   session filesystem and staged changes, into the user's own chats and opens
+   it. `workspace apply` there shows the usual review, and Grafana writes as
+   that user, with that user's permissions.
+
+The copy is a snapshot: the thread continues independently. Anyone with app
+access who has the link can open a copy, so the chat reaches whoever can read
+the thread.
 
 ### Alerts
 

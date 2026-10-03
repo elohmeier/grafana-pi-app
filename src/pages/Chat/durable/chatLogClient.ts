@@ -6,6 +6,7 @@ import type {
   ChatLogPage,
   ChatLogRow,
   ChatPage,
+  ChatShare,
   ErrorResponse,
   OpenedChat,
 } from '../../../generated/api';
@@ -44,6 +45,10 @@ export interface ChatLogClient {
   commit(id: string, commit: ChatCommit): Promise<ChatCommitResult>;
   rename(id: string, title: string): Promise<ChatSummary>;
   delete(id: string): Promise<void>;
+  /** A token that lets another user copy the chat (`copyShared`). */
+  share(id: string): Promise<string>;
+  /** Copies a shared chat, as it is now, into the caller's chats as a new chat. */
+  copyShared(token: string): Promise<ChatSummary>;
 }
 
 export type ChatLogRequest = (request: {
@@ -85,6 +90,8 @@ export function createChatLogClient(request: ChatLogRequest): ChatLogClient {
     delete: async (id) => {
       await send({ method: 'DELETE', path: chat(id) });
     },
+    share: async (id) => (await send<ChatShare>({ method: 'POST', path: `${chat(id)}/share` })).token,
+    copyShared: (token) => send({ method: 'POST', path: `/shares/${encodeURIComponent(token)}/copy` }),
   };
 }
 

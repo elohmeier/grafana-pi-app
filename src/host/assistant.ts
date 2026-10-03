@@ -10,13 +10,13 @@ import type { PiAppJsonData } from '../types';
 
 /** What the model is told about answering outside Grafana. */
 export const CHANNEL_PROMPT = `You are answering in a chat thread (Mattermost), not in Grafana.
-- You are read-only here: \`workspace apply\`, \`live apply\`, and navigation are not available. Do not stage dashboard or alert rule changes; when a change would help, describe it and say that it can be made in Grafana.
+- You cannot apply changes here: \`workspace apply\`, \`live apply\`, and navigation are not available. When people ask for a dashboard or alert rule change, stage it in the working copy and validate it, but do not run \`workspace apply\`: your answer gets a link that opens this chat in Grafana, where they review and apply the staged changes themselves.
 - Screenshots you take (\`grafana-dashboard screenshot UID --panel ID --from ... --to ...\`) are posted below your answer, so take only the ones people should see. Present a small table with \`evidence show FILE --view table\`; other tool output is not shown.
 - People read your answer in the thread: lead with the finding, keep it short (at most about 15 lines), use Markdown lists, and include exact numbers, times in UTC, and the names of dashboards, alert rules, and services you checked.
 - Earlier messages in the thread reach you as the conversation; the alert notification that started the thread is your starting point.`;
 
 const DECLINED =
-  'changes cannot be applied from a chat channel; nobody can review them here. Do not retry: describe the change and say it can be made in Grafana.';
+  'changes cannot be applied from a chat channel; nobody can review them here. Do not retry: keep the change staged, and say that the link below the answer opens this chat in Grafana to review and apply it.';
 
 /** The chat of a conversation: `stored` when it exists in the plugin backend. */
 export type ChatRef = { id: string; stored: boolean };
@@ -33,6 +33,8 @@ export type AssistantAnswer = {
   text: string;
   toolCalls: number;
   evidence?: PresentedEvidence[];
+  /** Resource changes staged in the chat's workspace, which can be applied in Grafana. */
+  stagedChanges?: number;
   error?: string;
 };
 
@@ -80,6 +82,11 @@ export class AssistantHost {
       }
     });
     return run;
+  }
+
+  /** A token that lets a Grafana user copy the chat into their own chats. */
+  share(chatId: string) {
+    return this.options.chatLog.share(chatId);
   }
 
   private async limited<T>(task: () => Promise<T>): Promise<T> {
@@ -164,6 +171,7 @@ export class AssistantHost {
         text: answer ? messageText(answer) : '',
         toolCalls: progress.toolCalls,
         ...(evidence.length ? { evidence } : {}),
+        stagedChanges: session.workspace.status().length,
         ...(answer?.stopReason === 'error' ? { error: answer.errorMessage ?? 'the model request failed' } : {}),
       };
     } finally {

@@ -311,3 +311,32 @@ describe('recovery and alert noise', () => {
     expect(channel.posts.at(-1)?.text).toContain('Not investigated automatically');
   });
 });
+
+describe('continuing in Grafana', () => {
+  it('links answers to a shared copy of the chat, once shared per thread', async () => {
+    let staged = 0;
+    const shares: string[] = [];
+    const { channel, responder } = setup(
+      async (_conversation, chat) => ({ chatId: chat.id, text: 'Done.', toolCalls: 1, stagedChanges: staged }),
+      { sharedChatUrl: (token) => `http://grafana/a/app/chat?share=${token}` }
+    );
+    (responder as unknown as { options: { assistant: Assistant } }).options.assistant.share = async (chatId) => {
+      shares.push(chatId);
+      return 'tok';
+    };
+    await responder.handleMessage(message());
+    expect(channel.posts[0].text).toBe('Done.\n\n[Continue in Grafana](http://grafana/a/app/chat?share=tok)');
+    staged = 2;
+    await responder.handleMessage(message({ postId: 'reply', createdAt: 5000 }));
+    // The fake channel splits posts at 100 characters.
+    expect(
+      channel.posts
+        .slice(-2)
+        .map((post) => post.text)
+        .join('')
+    ).toBe(
+      'Done.\n\n:pencil2: [Review and apply the 2 staged changes in Grafana](http://grafana/a/app/chat?share=tok)'
+    );
+    expect(shares).toHaveLength(1);
+  });
+});

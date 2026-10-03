@@ -108,6 +108,8 @@ const ACTIVE_CHAT_LEAVE_MESSAGE =
   'The assistant is still working. Leaving now will stop the run and discard any partial response.';
 const DRAFT_CHAT_LEAVE_MESSAGE = 'The current draft message will be discarded.';
 const CHAT_SESSION_PARAM = 'session';
+/** `?share=TOKEN` copies a shared chat into the user's chats (`POST /shares/{token}/copy`). */
+const CHAT_SHARE_PARAM = 'share';
 const SIDEBAR_SESSION_MENU_LIMIT = 8;
 const ASSISTANT_SIDEBAR_PLUGIN_ID = 'grafana-assistant-app';
 const STREAMING_REVISION_WATCHDOG_MS = 80;
@@ -913,6 +915,21 @@ export function ChatApp({
           locationService.partial(removeDashboardAssistantLaunchParams(), true);
         }
         return;
+      }
+
+      // A shared chat (for example an assistant host thread) is copied into the user's chats and opened.
+      const shareToken = new URLSearchParams(location.search).get(CHAT_SHARE_PARAM)?.trim();
+      if (shareToken) {
+        locationService.partial({ [CHAT_SHARE_PARAM]: null }, true);
+        const copied = await grafanaChatLog().copyShared(shareToken);
+        if (!mounted) {
+          return;
+        }
+        sessionsRef.current = [copied, ...sessionsRef.current];
+        setSessions(sessionsRef.current);
+        if (await initialLoadHandlersRef.current.loadSession(copied.id)) {
+          return;
+        }
       }
 
       const initialSessionId = initialSessionProp ?? chatSessionIdFromSearch(location.search);

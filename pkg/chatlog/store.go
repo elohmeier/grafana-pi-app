@@ -9,8 +9,10 @@ package chatlog
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,6 +85,10 @@ type Store interface {
 	Commit(ctx context.Context, scope, id string, c Commit) (CommitResult, error)
 	Rename(ctx context.Context, scope, id, title string) (Chat, error)
 	Delete(ctx context.Context, scope, id string) error
+	// Share returns a token that lets another scope copy the chat; the same chat keeps its token.
+	Share(ctx context.Context, scope, id string) (string, error)
+	// CopyShared copies the shared chat, as it is now, into scope as a new chat newID.
+	CopyShared(ctx context.Context, token, scope, newID string) (Chat, error)
 	Ping(ctx context.Context) error
 	// Backend describes the storage for health checks, e.g. "PostgreSQL".
 	Backend() string
@@ -211,6 +217,11 @@ func (s *sqlStore) migrate(ctx context.Context, tx *sql.Tx) error {
 		 PRIMARY KEY (scope, chat_id, seq, idx))`,
 		`CREATE INDEX IF NOT EXISTS chat_rows_key ON ` + s.d.t("chat_rows") + ` (scope, chat_id, key, seq) WHERE key IS NOT NULL`,
 		`INSERT INTO ` + s.d.t("chatlog_migrations") + ` (version) VALUES (1) ON CONFLICT DO NOTHING`,
+		// Version 2: share tokens (copies of a chat into another scope).
+		`CREATE TABLE IF NOT EXISTS ` + s.d.t("chat_shares") + ` (
+		 token text PRIMARY KEY, scope text NOT NULL, chat_id text NOT NULL, created_at bigint NOT NULL,
+		 UNIQUE (scope, chat_id))`,
+		`INSERT INTO ` + s.d.t("chatlog_migrations") + ` (version) VALUES (2) ON CONFLICT DO NOTHING`,
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -221,7 +232,7 @@ func (s *sqlStore) migrate(ctx context.Context, tx *sql.Tx) error {
 	if err := tx.QueryRowContext(ctx, "SELECT max(version) FROM "+s.d.t("chatlog_migrations")).Scan(&version); err != nil {
 		return err
 	}
-	if version != 1 {
+	if version != 2 {
 		return fmt.Errorf("unsupported chat schema version %d", version)
 	}
 	return nil
@@ -514,4 +525,69 @@ func (s *sqlStore) Delete(ctx context.Context, scope, id string) error {
 		_, err = s.exec(ctx, tx, "DELETE FROM "+s.d.t("chat_rows")+" WHERE scope = ? AND chat_id = ?", scope, id)
 		return err
 	})
+}
+
+func (s *sqlStore) Share(ctx context.Context, scope, id string) (string, error) {
+	if scope == "" || !ValidID(id) {
+		return "", ErrInvalid
+	}
+	random := make([]byte, 24)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(random)
+	err := s.write(ctx, func(tx *sql.Tx) error {
+		if _, err := s.lockChat(ctx, tx, scope, id); err != nil {
+			return err
+		}
+		now, err := s.now(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if _, err = s.exec(ctx, tx, "INSERT INTO "+s.d.t("chat_shares")+" (token, scope, chat_id, created_at) VALUES (?, ?, ?, ?) ON CONFLICT (scope, chat_id) DO NOTHING",
+			token, scope, id, now); err != nil {
+			return err
+		}
+		return tx.QueryRowContext(ctx, s.d.q("SELECT token FROM "+s.d.t("chat_shares")+" WHERE scope = ? AND chat_id = ?"), scope, id).Scan(&token)
+	})
+	return token, err
+}
+
+func (s *sqlStore) CopyShared(ctx context.Context, token, scope, newID string) (Chat, error) {
+	var result Chat
+	if scope == "" || token == "" || !ValidID(newID) {
+		return result, ErrInvalid
+	}
+	err := s.write(ctx, func(tx *sql.Tx) error {
+		var sourceScope, sourceID string
+		err := tx.QueryRowContext(ctx, s.d.q("SELECT scope, chat_id FROM "+s.d.t("chat_shares")+" WHERE token = ?"), token).Scan(&sourceScope, &sourceID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		source, err := s.lockChat(ctx, tx, sourceScope, sourceID)
+		if err != nil {
+			return err
+		}
+		now, err := s.now(ctx, tx)
+		if err != nil {
+			return err
+		}
+		// The copy starts unopened (epoch 0) at the source's sequence; its first writer opens it.
+		if _, err = s.exec(ctx, tx, "INSERT INTO "+s.d.t("chats")+" (scope, id, title, created_at, updated_at, last_seq, last_digest, bytes) "+
+			"SELECT ?, ?, title, ?, ?, last_seq, last_digest, bytes FROM "+s.d.t("chats")+" WHERE scope = ? AND id = ?",
+			scope, newID, now, now, sourceScope, sourceID); err != nil {
+			return err
+		}
+		if _, err = s.exec(ctx, tx, "INSERT INTO "+s.d.t("chat_rows")+" (scope, chat_id, seq, idx, key, body) "+
+			"SELECT ?, ?, seq, idx, key, body FROM "+s.d.t("chat_rows")+" WHERE scope = ? AND chat_id = ?",
+			scope, newID, sourceScope, sourceID); err != nil {
+			return err
+		}
+		result = Chat{ID: newID, Title: source.title, CreatedAt: micros(now), UpdatedAt: micros(now)}
+		return nil
+	})
+	return result, err
 }

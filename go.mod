@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/google/go-jsonnet v0.22.0
+	github.com/google/uuid v1.6.0
 	github.com/grafana/authlib v0.0.0-20260427145542-9c256e2dbcb2
 	github.com/grafana/authlib/types v0.0.0-20260304161757-e152786a5bb4
 	github.com/grafana/grafana-plugin-sdk-go v0.292.1
@@ -37,7 +38,6 @@ require (
 	github.com/google/flatbuffers v25.12.19+incompatible // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/grafana/dskit v0.0.0-20260108123158-1a1acfb6ef2e // indirect
 	github.com/grafana/otel-profiling-go v0.5.1 // indirect
 	github.com/grafana/pyroscope-go/godeltaprof v0.1.9 // indirect

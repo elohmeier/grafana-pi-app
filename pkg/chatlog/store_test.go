@@ -524,6 +524,54 @@ func runContract(t *testing.T, open opener) {
 			t.Fatal(results)
 		}
 	})
+
+	t.Run("share copies a chat into another scope", func(t *testing.T) {
+		s, ctx := open(t), t.Context()
+		opened, err := s.Open(ctx, "host", "chat-1", "Alert thread", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = s.Commit(ctx, "host", "chat-1", commit(opened.Epoch, 1, "d1", row(`{"n":1}`), keyed(`{"doc":1}`, "doc", true))); err != nil {
+			t.Fatal(err)
+		}
+		token, err := s.Share(ctx, "host", "chat-1")
+		if err != nil || len(token) != 48 {
+			t.Fatalf("%q %v", token, err)
+		}
+		if again, _ := s.Share(ctx, "host", "chat-1"); again != token {
+			t.Fatalf("a chat keeps its token: %q %q", again, token)
+		}
+		if _, err = s.Share(ctx, "user", "chat-1"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("shared a chat of another scope: %v", err)
+		}
+		copied, err := s.CopyShared(ctx, token, "user", "copy-1")
+		if err != nil || copied.ID != "copy-1" || copied.Title != "Alert thread" {
+			t.Fatalf("%+v %v", copied, err)
+		}
+		if got := bodies(readAll(t, s, "user", "copy-1", 10)); got != bodies(readAll(t, s, "host", "chat-1", 10)) {
+			t.Fatalf("copied rows %s", got)
+		}
+		// The copy continues with its own writer, after the source's sequence.
+		reopened, err := s.Open(ctx, "user", "copy-1", "", false)
+		if err != nil || reopened.Epoch != 1 || reopened.LastSeq != 1 {
+			t.Fatalf("%+v %v", reopened, err)
+		}
+		if _, err = s.Commit(ctx, "user", "copy-1", commit(reopened.Epoch, 2, "d2", row(`{"n":2}`))); err != nil {
+			t.Fatal(err)
+		}
+		if got := bodies(readAll(t, s, "host", "chat-1", 10)); strings.Contains(got, `"n":2`) {
+			t.Fatalf("the copy changed the source: %s", got)
+		}
+		if page, _ := s.List(ctx, "user", "", 10); len(page.Items) != 1 || page.Items[0].ID != "copy-1" {
+			t.Fatalf("%+v", page)
+		}
+		if _, err = s.CopyShared(ctx, "unknown-token", "user", "copy-2"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("copied with an unknown token: %v", err)
+		}
+		if _, err = s.CopyShared(ctx, token, "user", "copy-1"); err == nil {
+			t.Fatal("copied over an existing chat")
+		}
+	})
 }
 
 func TestSQLiteSharedAcrossInstances(t *testing.T) {

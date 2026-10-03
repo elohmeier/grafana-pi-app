@@ -7,6 +7,8 @@ export type ThreadRecord = {
   chatId?: string;
   /** The chat exists in the plugin backend. */
   chatStored?: boolean;
+  /** Share token of the chat, for the link that copies it into a user's Grafana chats. */
+  shareToken?: string;
   /** A run that has not posted its answer yet; resumed when the host starts. */
   pending?: { channelId: string; threadId: string; postId: string; prompt: string; startedAt: number };
   /** Bot posts of the thread are newer than this time (ms); later human posts are context for the next answer. */

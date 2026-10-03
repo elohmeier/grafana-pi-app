@@ -76,3 +76,9 @@ type ChatCommitResult struct {
 type RenameChatRequest struct {
 	Title string `json:"title"`
 }
+
+// ChatShare is the response of POST /chats/{id}/share: a token that lets
+// another user copy the chat with POST /shares/{token}/copy.
+type ChatShare struct {
+	Token string `json:"token"`
+}

@@ -133,4 +133,23 @@ export class FakeChatLog implements ChatLogClient {
       chat.title = '';
     }
   }
+
+  async share(id: string) {
+    this.chat(id);
+    return `share-${id}`;
+  }
+
+  async copyShared(token: string) {
+    const source = this.chat(token.replace(/^share-/, ''));
+    const id = `copy-${this.chats.size + 1}`;
+    const now = this.now();
+    this.chats.set(id, {
+      ...structuredClone(source),
+      id,
+      epoch: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return { id, title: source.title, createdAt: now, updatedAt: now };
+  }
 }

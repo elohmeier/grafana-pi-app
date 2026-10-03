@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/grafana/authlib/authn"
 	"github.com/grafana/authlib/types"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -126,6 +127,9 @@ func (a *App) registerChatRoutes(mux *http.ServeMux) {
 		"POST /chats/{id}/commits": a.handleChatCommit,
 		"PATCH /chats/{id}":        a.handleRenameChat,
 		"DELETE /chats/{id}":       a.handleDeleteChat,
+		"POST /chats/{id}/share":   a.handleShareChat,
+		// {id} is the share token here.
+		"POST /shares/{id}/copy": a.handleCopySharedChat,
 	}
 	for pattern, handler := range routes {
 		mux.HandleFunc(pattern, a.withAppAccess(a.chatRoute(handler, strings.Contains(pattern, "{id}"))))
@@ -315,4 +319,24 @@ func (a *App) handleDeleteChat(w http.ResponseWriter, r *http.Request, s chatlog
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) handleShareChat(w http.ResponseWriter, r *http.Request, s chatlog.Store, scope, id string) {
+	token, err := s.Share(r.Context(), scope, id)
+	if err != nil {
+		writeChatError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, api.ChatShare{Token: token})
+}
+
+// handleCopySharedChat copies a shared chat into the caller's chats, for
+// example an assistant host thread a user continues in Grafana.
+func (a *App) handleCopySharedChat(w http.ResponseWriter, r *http.Request, s chatlog.Store, scope, token string) {
+	chat, err := s.CopyShared(r.Context(), token, scope, uuid.NewString())
+	if err != nil {
+		writeChatError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, chat)
 }

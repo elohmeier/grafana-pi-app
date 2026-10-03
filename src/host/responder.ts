@@ -12,6 +12,8 @@ export type Assistant = {
     onProgress?: (progress: AssistantRunProgress) => void,
     options?: { resume?: boolean }
   ): Promise<AssistantAnswer>;
+  /** A share token for the chat; with it, answers link to a copy of the chat in Grafana. */
+  share?(chatId: string): Promise<string>;
 };
 
 export type ResponderOptions = {
@@ -28,6 +30,8 @@ export type ResponderOptions = {
   progressIntervalMs?: number;
   /** Screenshots of the panels a notification links to; posted in a new alert thread without the model. */
   alertPanels?: (payload: GrafanaWebhook) => Promise<Array<{ title: string; file: ChannelFile }>>;
+  /** The Grafana URL that copies a shared chat into the user's chats and opens it. */
+  sharedChatUrl?: (token: string) => string;
 };
 
 const WORKING = ':hourglass_flowing_sand: Looking into it…';
@@ -224,9 +228,11 @@ export class Responder {
       pending: undefined,
       ...(result.chatId ? { chatStored: true, lastAnswerAt: Date.now() } : {}),
     });
-    const text = result.error
+    const answerText = result.error
       ? `:warning: The assistant could not answer: ${result.error}${result.text ? `\n\n${result.text}` : ''}`
       : result.text || ':warning: The assistant finished without an answer.';
+    const link = result.chatId ? await this.chatLink(key, result) : '';
+    const text = link ? `${answerText}\n\n${link}` : answerText;
     const [first, ...rest] = split(text, channel.maxMessageLength);
     await channel.update(placeholder.id, first);
     for (const part of rest) {
@@ -237,6 +243,32 @@ export class Responder {
       await store.setThread(key, { lastAnswerAt: Date.now() });
     }
     return result;
+  }
+
+  /**
+   * A link to continue the chat in Grafana as oneself: it copies the chat, including staged
+   * changes, into the user's chats, where `workspace apply` reviews and writes as that user.
+   */
+  private async chatLink(key: string, result: AssistantAnswer) {
+    const { assistant, store, sharedChatUrl } = this.options;
+    if (!assistant.share || !sharedChatUrl) {
+      return '';
+    }
+    try {
+      let token = store.thread(key)?.shareToken;
+      if (!token) {
+        token = await assistant.share(result.chatId);
+        await store.setThread(key, { shareToken: token });
+      }
+      const url = sharedChatUrl(token);
+      const staged = result.stagedChanges ?? 0;
+      return staged > 0
+        ? `:pencil2: [Review and apply the ${staged === 1 ? 'staged change' : `${staged} staged changes`} in Grafana](${url})`
+        : `[Continue in Grafana](${url})`;
+    } catch (error) {
+      this.options.log?.(`sharing chat ${result.chatId} failed: ${message(error)}`);
+      return '';
+    }
   }
 
   /** Evidence the assistant presented: images as files, the rest as Markdown. */
