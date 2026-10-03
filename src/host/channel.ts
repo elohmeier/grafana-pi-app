@@ -15,6 +15,8 @@ export type ChannelMessage = {
   /** The message mentions the bot. */
   mentioned: boolean;
   createdAt: number;
+  /** The sender's email address, only when the platform verified it (Webex; Mattermost SSO or verified email). */
+  verifiedEmail?: string;
 };
 
 export type ChannelFile = { name: string; mimeType: string; data: Uint8Array<ArrayBuffer> };
@@ -30,6 +32,8 @@ export interface ChatChannel {
   resolveChannel(name: string): Promise<string>;
   post(channelId: string, text: string, threadId?: string): Promise<{ id: string }>;
   update(postId: string, text: string): Promise<void>;
+  /** Sends a direct message to a user, for example a link code that must not appear in a channel. */
+  postDirect(userId: string, text: string): Promise<void>;
   /** Posts files (images) with a message. */
   postFiles(channelId: string, text: string, files: ChannelFile[], threadId?: string): Promise<{ id: string }>;
   /** Posts of a thread, oldest first. */

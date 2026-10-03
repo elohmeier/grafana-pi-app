@@ -101,6 +101,41 @@ export interface RenameChatRequest {
 export interface ChatShare {
   token: string;
 }
+/**
+ * IdentityLink connects a chat platform account (Mattermost, Webex) to a
+ * Grafana user, for the assistant host.
+ */
+export interface IdentityLink {
+  platform: string;
+  platformUser: string;
+  /**
+   * DisplayName is the platform account's name when the link was made.
+   */
+  displayName: string;
+  orgId?: number /* int64 */;
+  userUid?: string;
+  userLogin?: string;
+  /**
+   * Source is "code" (confirmed in Grafana) or "email" (a verified address matched by the host).
+   */
+  source?: string;
+  linkedAt?: string;
+}
+/**
+ * CreateLinkCodeRequest is the body of POST /identity/link-codes.
+ */
+export interface CreateLinkCodeRequest {
+  platform: string;
+  platformUser: string;
+  displayName: string;
+}
+/**
+ * LinkCode is the response of POST /identity/link-codes.
+ */
+export interface LinkCode {
+  code: string;
+  expiresAt: string;
+}
 
 //////////
 // source: errors.go

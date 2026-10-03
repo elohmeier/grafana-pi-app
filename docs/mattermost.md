@@ -142,6 +142,9 @@ stored), and the answer replaces the placeholder.
 | `ASSISTANT_CONCURRENCY`      | Concurrent assistant runs (default 2).                                                    |
 | `HOST_PORT`, `HOST_DATA_DIR` | HTTP port (default 8080) and state directory.                                             |
 
+| `ASSISTANT_REQUIRE_LINK` | `true` to answer only users linked to a Grafana user ([identity](identity.md)). |
+| `ASSISTANT_EMAIL_MATCH` | `true` to link verified email addresses to Grafana users automatically. |
+
 Every secret can also be read from a file named by `<NAME>_FILE`.
 
 `GET /metrics` exposes Prometheus metrics: notifications by action

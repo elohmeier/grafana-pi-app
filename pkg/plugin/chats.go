@@ -34,15 +34,32 @@ const (
 //
 // The SDK's User contains a mutable login, not the stable user UID. Verify the
 // identity token Grafana forwards instead of accepting an owner from the client.
+// sessionIdentity is the verified caller of a plugin request.
+type sessionIdentity struct {
+	// Scope owns the caller's chats: deployment namespace, org, plugin, and user (or service account).
+	Scope string
+	// ServiceAccount is set for service accounts, such as the assistant host.
+	ServiceAccount bool
+	UID            string
+	Login          string
+	OrgID          int64
+}
+
 func (a *App) sessionScope(r *http.Request) (string, error) {
+	identity, err := a.sessionIdentity(r)
+	return identity.Scope, err
+}
+
+func (a *App) sessionIdentity(r *http.Request) (sessionIdentity, error) {
+	var none sessionIdentity
 	p := backend.PluginConfigFromContext(r.Context())
 	orgID := p.OrgID //nolint:staticcheck // Grafana ID token audiences use org:<numeric ID>; Namespace is not a substitute.
 	if orgID <= 0 || p.User == nil || p.PluginID == "" {
-		return "", errors.New("missing user context")
+		return none, errors.New("missing user context")
 	}
 	issuer, err := config.GrafanaConfigFromContext(r.Context()).AppURL()
 	if err != nil || issuer == "" {
-		return "", errors.New("missing Grafana URL")
+		return none, errors.New("missing Grafana URL")
 	}
 	keysURL := strings.TrimRight(issuer, "/") + "/api/signing-keys/keys"
 	if base := a.settings.SessionGrafanaURL; base != "" {
@@ -60,17 +77,17 @@ func (a *App) sessionScope(r *http.Request) (string, error) {
 	a.chatMu.Unlock()
 	claims, err := authn.NewIDTokenVerifier(authn.VerifierConfig{AllowedAudiences: []string{fmt.Sprintf("org:%d", orgID)}}, keys).Verify(r.Context(), r.Header.Get(grafanaIDHeader))
 	if err != nil {
-		return "", err
+		return none, err
 	}
 	switch {
 	case claims.Expiry == nil:
-		return "", errors.New("identity token has no expiry")
+		return none, errors.New("identity token has no expiry")
 	case claims.Issuer != issuer:
-		return "", fmt.Errorf("identity token issuer %q does not match the Grafana URL %q", claims.Issuer, issuer)
+		return none, fmt.Errorf("identity token issuer %q does not match the Grafana URL %q", claims.Issuer, issuer)
 	case claims.Rest.Type != types.TypeUser && claims.Rest.Type != types.TypeServiceAccount || claims.Rest.Identifier == "":
-		return "", fmt.Errorf("identity token is for a %s, not a user or service account", claims.Rest.Type)
+		return none, fmt.Errorf("identity token is for a %s, not a user or service account", claims.Rest.Type)
 	case p.Namespace != "" && p.Namespace != claims.Rest.Namespace:
-		return "", fmt.Errorf("identity token namespace %q does not match %q", claims.Rest.Namespace, p.Namespace)
+		return none, fmt.Errorf("identity token namespace %q does not match %q", claims.Rest.Namespace, p.Namespace)
 	}
 	owner := claims.Rest.Identifier
 	if claims.Rest.Type == types.TypeServiceAccount {
@@ -78,7 +95,13 @@ func (a *App) sessionScope(r *http.Request) (string, error) {
 		owner = string(types.TypeServiceAccount) + ":" + owner
 	}
 	scope, _ := json.Marshal([]any{a.settings.SessionNamespace, orgID, p.PluginID, owner})
-	return string(scope), nil
+	return sessionIdentity{
+		Scope:          string(scope),
+		ServiceAccount: claims.Rest.Type == types.TypeServiceAccount,
+		UID:            claims.Rest.Identifier,
+		Login:          claims.Rest.Username,
+		OrgID:          orgID,
+	}, nil
 }
 
 func (a *App) chatBackendName() string {

@@ -44,15 +44,14 @@ describes the current implementation. The original architecture review
   assistant host, a Node service that runs the same assistant as a read-only
   service account (see [Mattermost incident conversations](docs/mattermost.md)),
   and Webex through the same host, tested against a local Webex fake (see
-  [Webex](docs/webex.md)).
+  [Webex](docs/webex.md)), with chat accounts linked to Grafana users (see
+  [identity](docs/identity.md)).
 
 ## Next
 
-1. **Identity linking:** `@grafana-assistant link` sends a one-time link that
-   the user opens in Grafana to connect their chat account to their Grafana
-   user (stored in the plugin backend); verified emails (Webex, Mattermost SSO)
-   can match automatically. Mapped users with app access may ask; channels get
-   their own data policy, since an answer is read by the whole channel.
+1. **Channel data policies** on top of [identity links](docs/identity.md): a
+   service account or datasource allow-list per channel, and direct-message
+   answers narrowed to the linked user's permissions.
 2. **High availability on Kubernetes:** host state in the plugin backend, a
    `coordination.k8s.io` Lease for one active host, readiness only on the
    leader, a PodDisruptionBudget, and a Helm chart.

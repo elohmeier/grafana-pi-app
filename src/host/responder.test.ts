@@ -52,6 +52,10 @@ class FakeChannel implements ChatChannel {
     this.posts.push({ id, channelId, text, threadId, files: files.map((file) => file.name) });
     return { id };
   }
+  directs: Array<{ userId: string; text: string }> = [];
+  async postDirect(userId: string, text: string) {
+    this.directs.push({ userId, text });
+  }
   async update(postId: string, text: string) {
     this.posts.find((post) => post.id === postId)!.text = text;
   }
@@ -400,5 +404,59 @@ describe('several platforms', () => {
     };
     await expect(two.handleAlert(notification('resolved', [alert('a', 'resolved')]))).rejects.toThrow('platform down');
     expect((await one.handleAlert(notification('resolved', [alert('a', 'resolved')]))).action).toBe('resolve');
+  });
+});
+
+describe('identity', () => {
+  function identity(require: boolean) {
+    const links = new Map<string, { userLogin: string; source: string; linkedAt: string }>();
+    const service = {
+      resolve: async (platform: string, user: string) => links.get(`${platform}:${user}`) as never,
+      createCode: async () => ({ code: 'c0de', expiresAt: '2026-10-03T12:15:00Z' }),
+      unlink: async (platform: string, user: string) => {
+        links.delete(`${platform}:${user}`);
+      },
+    };
+    return {
+      links,
+      options: { identity: { service, require, linkUrl: (code: string) => `http://grafana/link?code=${code}` } },
+    };
+  }
+
+  it('sends link codes by direct message and refuses unlinked users when linking is required', async () => {
+    const { links, options } = identity(true);
+    const { channel, asks, responder } = setup(undefined, options);
+    await responder.handleMessage(message());
+    expect(asks).toEqual([]);
+    expect(channel.directs).toEqual([
+      {
+        userId: 'u1',
+        text: 'To ask me, link your account to your Grafana user first.\n[Link fake account alice in Grafana](http://grafana/link?code=c0de) (until 12:15 UTC). Open it yourself; it links whoever confirms it.',
+      },
+    ]);
+    expect(channel.posts.at(-1)?.text).toBe(
+      '@alice, please link your Grafana account first: I sent you a direct message.'
+    );
+
+    links.set('fake:u1', { userLogin: 'alice.g', source: 'code', linkedAt: '2026-10-03T12:01:00Z' });
+    await responder.handleMessage(message({ postId: 'p2' }));
+    expect(asks[0].text).toBe('@alice (Grafana user alice.g): why is checkout slow?');
+
+    await responder.handleMessage(message({ postId: 'p3', text: 'whoami' }));
+    expect(channel.posts.at(-1)?.text).toBe(
+      'Your fake account is linked to Grafana user **alice.g** (confirmed in Grafana, 2026-10-03).'
+    );
+    await responder.handleMessage(message({ postId: 'p4', text: 'unlink' }));
+    expect(links.size).toBe(0);
+  });
+
+  it('answers unlinked users when linking is optional, and links on request', async () => {
+    const { options } = identity(false);
+    const { channel, asks, responder } = setup(undefined, options);
+    await responder.handleMessage(message());
+    expect(asks[0].text).toBe('@alice: why is checkout slow?');
+    await responder.handleMessage(message({ postId: 'p2', text: 'link' }));
+    expect(channel.directs).toHaveLength(1);
+    expect(channel.posts.at(-1)?.text).toBe('I sent you a direct message with the link.');
   });
 });

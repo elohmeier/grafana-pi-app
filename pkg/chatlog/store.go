@@ -89,6 +89,7 @@ type Store interface {
 	Share(ctx context.Context, scope, id string) (string, error)
 	// CopyShared copies the shared chat, as it is now, into scope as a new chat newID.
 	CopyShared(ctx context.Context, token, scope, newID string) (Chat, error)
+	Links
 	Ping(ctx context.Context) error
 	// Backend describes the storage for health checks, e.g. "PostgreSQL".
 	Backend() string
@@ -222,6 +223,16 @@ func (s *sqlStore) migrate(ctx context.Context, tx *sql.Tx) error {
 		 token text PRIMARY KEY, scope text NOT NULL, chat_id text NOT NULL, created_at bigint NOT NULL,
 		 UNIQUE (scope, chat_id))`,
 		`INSERT INTO ` + s.d.t("chatlog_migrations") + ` (version) VALUES (2) ON CONFLICT DO NOTHING`,
+		// Version 3: chat platform accounts linked to Grafana users (assistant host).
+		`CREATE TABLE IF NOT EXISTS ` + s.d.t("identity_link_codes") + ` (
+		 code_hash text PRIMARY KEY, platform text NOT NULL, platform_user text NOT NULL,
+		 display_name text NOT NULL, expires_at bigint NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS ` + s.d.t("identity_links") + ` (
+		 platform text NOT NULL, platform_user text NOT NULL, display_name text NOT NULL,
+		 org_id bigint NOT NULL, user_uid text NOT NULL, user_login text NOT NULL,
+		 source text NOT NULL, linked_at bigint NOT NULL,
+		 PRIMARY KEY (platform, platform_user))`,
+		`INSERT INTO ` + s.d.t("chatlog_migrations") + ` (version) VALUES (3) ON CONFLICT DO NOTHING`,
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -232,7 +243,7 @@ func (s *sqlStore) migrate(ctx context.Context, tx *sql.Tx) error {
 	if err := tx.QueryRowContext(ctx, "SELECT max(version) FROM "+s.d.t("chatlog_migrations")).Scan(&version); err != nil {
 		return err
 	}
-	if version != 2 {
+	if version != 3 {
 		return fmt.Errorf("unsupported chat schema version %d", version)
 	}
 	return nil

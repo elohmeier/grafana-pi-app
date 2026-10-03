@@ -2,6 +2,7 @@ import { analysisPrompt, decideDelivery, firingFingerprints, formatAlertMessage,
 import { createSessionId } from '../pages/Chat/session/chatIdentity';
 import type { AssistantAnswer, AssistantRunProgress, ChatRef, PresentedEvidence } from './assistant';
 import type { ChannelFile, ChannelMessage, ChatChannel } from './channel';
+import type { IdentityService } from './identity';
 import type { Metrics } from './metrics';
 import type { HostStore } from './store';
 
@@ -34,6 +35,14 @@ export type ResponderOptions = {
   /** Screenshots of the panels a notification links to; posted in a new alert thread without the model. */
   alertPanels?: (payload: GrafanaWebhook) => Promise<Array<{ title: string; file: ChannelFile }>>;
   metrics?: Metrics;
+  /** Chat accounts linked to Grafana users (docs/identity.md). */
+  identity?: {
+    service: Pick<IdentityService, 'resolve' | 'createCode' | 'unlink'>;
+    /** Only linked users may ask. */
+    require: boolean;
+    /** The Grafana URL that confirms a link code. */
+    linkUrl: (code: string) => string;
+  };
   /** The Grafana URL that copies a shared chat into the user's chats and opens it. */
   sharedChatUrl?: (token: string) => string;
 };
@@ -76,6 +85,29 @@ export class Responder {
       }
       return;
     }
+    const identity = this.options.identity;
+    const command = message.text.trim().toLowerCase().replace(/[.!]$/, '');
+    if (identity && (command === 'link' || command === 'unlink' || command === 'whoami')) {
+      await this.identityCommand(command, message);
+      return;
+    }
+    let asker = `@${message.userName}`;
+    if (identity) {
+      const link = await identity.service
+        .resolve(channel.name, message.userId, message.userName, message.verifiedEmail)
+        .catch((error) => {
+          this.options.log?.(
+            `identity lookup for ${message.userName} failed: ${error instanceof Error ? error.message : error}`
+          );
+          return undefined;
+        });
+      if (link) {
+        asker = `@${message.userName} (Grafana user ${link.userLogin})`;
+      } else if (identity.require) {
+        await this.sendLinkCode(message, true);
+        return;
+      }
+    }
     const record = store.thread(key);
     // Thread posts since the last answer that did not mention the bot are context for this one.
     let context = '';
@@ -96,7 +128,52 @@ export class Responder {
         context = `Earlier in the thread:\n${earlier.map((post) => `- @${post.userName}: ${post.text}`).join('\n')}\n\n`;
       }
     }
-    await this.answer(message.channelId, message.threadId, `${context}@${message.userName}: ${message.text}`);
+    await this.answer(message.channelId, message.threadId, `${context}${asker}: ${message.text}`);
+  }
+
+  private async identityCommand(command: 'link' | 'unlink' | 'whoami', message: ChannelMessage): Promise<void> {
+    const { channel, identity } = this.options;
+    const reply = async (text: string) => {
+      await channel.post(message.channelId, text, message.threadId);
+    };
+    if (command === 'link') {
+      return this.sendLinkCode(message, false);
+    }
+    if (command === 'unlink') {
+      await identity!.service.unlink(channel.name, message.userId);
+      return reply(`Your ${platformName(channel.name)} account is no longer linked to a Grafana user.`);
+    }
+    const link = await identity!.service.resolve(channel.name, message.userId, message.userName, message.verifiedEmail);
+    return reply(
+      link
+        ? `Your ${platformName(channel.name)} account is linked to Grafana user **${link.userLogin}** (${link.source === 'email' ? 'by your verified email address' : 'confirmed in Grafana'}, ${(link.linkedAt ?? '').slice(0, 10)}).`
+        : `Your ${platformName(channel.name)} account is not linked to a Grafana user. Write \`link\` to link it.`
+    );
+  }
+
+  /** Sends a one-time link code by direct message: it must not be opened by anyone else. */
+  private async sendLinkCode(message: ChannelMessage, required: boolean) {
+    const { channel, identity } = this.options;
+    const code = await identity!.service.createCode(channel.name, message.userId, message.userName);
+    const until = new Date(code.expiresAt).toISOString().slice(11, 16);
+    await channel.postDirect(
+      message.userId,
+      [
+        required
+          ? 'To ask me, link your account to your Grafana user first.'
+          : 'Link your account to your Grafana user:',
+        `[Link ${platformName(channel.name)} account ${message.userName} in Grafana](${identity!.linkUrl(code.code)}) (until ${until} UTC). Open it yourself; it links whoever confirms it.`,
+      ].join('\n')
+    );
+    if (!message.direct) {
+      await channel.post(
+        message.channelId,
+        required
+          ? `@${message.userName}, please link your Grafana account first: I sent you a direct message.`
+          : 'I sent you a direct message with the link.',
+        message.threadId
+      );
+    }
   }
 
   /** A Grafana webhook notification; the alert message is posted before, and independent of, the model. */
@@ -432,4 +509,8 @@ function truncate(text: string, max: number) {
 
 function message(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function platformName(name: string) {
+  return name === 'webex' ? 'Webex' : name === 'mattermost' ? 'Mattermost' : name;
 }

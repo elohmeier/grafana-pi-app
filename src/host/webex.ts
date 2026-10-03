@@ -111,6 +111,8 @@ export class WebexChannel implements ChatChannel {
       direct: message.roomType === 'direct',
       mentioned,
       createdAt: Date.parse(message.created),
+      // Webex identities are verified by the user's organization.
+      verifiedEmail: message.personEmail,
     });
     return 200;
   }
@@ -136,6 +138,10 @@ export class WebexChannel implements ChatChannel {
     });
     this.rooms.set(message.id, channelId);
     return { id: message.id };
+  }
+
+  async postDirect(userId: string, text: string) {
+    await this.api('POST', '/messages', { toPersonId: userId, markdown: text });
   }
 
   async update(postId: string, text: string) {

@@ -32,7 +32,7 @@ export class MattermostChannel implements ChatChannel {
   private socket?: WebSocket;
   private stopped = false;
   private seq = 1;
-  private users = new Map<string, string>();
+  private users = new Map<string, { username: string; verifiedEmail?: string }>();
   private readonly url: string;
 
   constructor(private readonly options: MattermostOptions) {
@@ -101,6 +101,11 @@ export class MattermostChannel implements ChatChannel {
     return { id: post.id };
   }
 
+  async postDirect(userId: string, text: string) {
+    const channel = await this.api<{ id: string }>('POST', '/channels/direct', [this.botId, userId]);
+    await this.post(channel.id, text);
+  }
+
   async update(postId: string, text: string) {
     await this.api('PUT', `/posts/${postId}/patch`, { message: text });
   }
@@ -162,13 +167,15 @@ export class MattermostChannel implements ChatChannel {
       return;
     }
     const mentions: string[] = event.data.mentions ? JSON.parse(event.data.mentions) : [];
+    const sender = await this.user(post.user_id);
     const mentioned = mentions.includes(this.botId) || new RegExp(`@${this.botName}\\b`, 'i').test(post.message);
     onMessage({
       channelId: post.channel_id,
       threadId: post.root_id || post.id,
       postId: post.id,
       userId: post.user_id,
-      userName: await this.userName(post.user_id),
+      userName: sender.username,
+      ...(sender.verifiedEmail ? { verifiedEmail: sender.verifiedEmail } : {}),
       text: post.message.replace(new RegExp(`@${this.botName}\\b`, 'gi'), '').trim(),
       direct: event.data.channel_type === 'D',
       mentioned,
@@ -183,13 +190,34 @@ export class MattermostChannel implements ChatChannel {
   }
 
   private async userName(userId: string) {
-    let name = this.users.get(userId);
-    if (!name) {
-      const user = await this.api<{ username: string }>('GET', `/users/${userId}`).catch(() => ({ username: userId }));
-      name = user.username;
-      this.users.set(userId, name);
+    return (await this.user(userId)).username;
+  }
+
+  /** A user's name, and their email when Mattermost verified it (SSO sign-in or email verification). */
+  private async user(userId: string) {
+    let user = this.users.get(userId);
+    if (!user) {
+      const found = await this.api<{
+        username: string;
+        email?: string;
+        auth_service?: string;
+        email_verified?: boolean;
+      }>('GET', `/users/${userId}`).catch(
+        () =>
+          ({ username: userId }) as {
+            username: string;
+            email?: string;
+            auth_service?: string;
+            email_verified?: boolean;
+          }
+      );
+      user = {
+        username: found.username,
+        ...(found.email && (found.auth_service || found.email_verified) ? { verifiedEmail: found.email } : {}),
+      };
+      this.users.set(userId, user);
     }
-    return name;
+    return user;
   }
 
   private async api<T>(method: string, path: string, body?: unknown): Promise<T> {

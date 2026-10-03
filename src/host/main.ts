@@ -11,6 +11,7 @@ import { createGrafanaWorkspaceBroker } from '../pages/Chat/workspace/grafanaBro
 import type { WorkspaceBroker } from '../pages/Chat/workspace/broker';
 import type { PiAppJsonData } from '../types';
 import { isGrafanaWebhook } from './alerts';
+import { IdentityService, lookupGrafanaUser, pluginRequest } from './identity';
 import { AssistantHost } from './assistant';
 import { getBackendSrv, initGrafanaRuntime, refreshDatasources } from './grafanaRuntime';
 import type { ChatChannel } from './channel';
@@ -135,6 +136,11 @@ async function connect(
     allowDirect: config.allowDirect,
     alertPanels: async (payload) => renderAlertPanels(payload, createBroker(await jsonData()), log),
     metrics,
+    identity: {
+      service: identity,
+      require: setting('ASSISTANT_REQUIRE_LINK', 'false') === 'true',
+      linkUrl: (code) => `${publicUrl}/a/${PLUGIN_ID}/chat?link=${encodeURIComponent(code)}`,
+    },
     sharedChatUrl: (token) => `${publicUrl}/a/${PLUGIN_ID}/chat?share=${encodeURIComponent(token)}`,
     log,
   });
@@ -156,6 +162,12 @@ createServer((request, response) => {
     }
   });
 }).listen(port, () => log(`listening on :${port}`));
+
+// Chat accounts linked to Grafana users; verified emails match when the service account may look up users.
+const identity = new IdentityService(pluginRequest(PLUGIN_ID), {
+  emailMatch: setting('ASSISTANT_EMAIL_MATCH', 'false') === 'true',
+  lookupUser: lookupGrafanaUser,
+});
 
 const responders: Responder[] = [];
 let webex: WebexChannel | undefined;

@@ -135,7 +135,8 @@ keys: deployment namespace, organization, plugin ID, and the stable user UID.
 Service accounts (the [assistant host](mattermost.md)) store chats in a scope of
 their own; anonymous users cannot store chats.
 
-Tables (`chats`, `chat_rows`, `chat_shares`, and `chatlog_migrations`):
+Tables (`chats`, `chat_rows`, `chat_shares`, `chatlog_migrations`, and the
+[identity link](identity.md) tables `identity_link_codes` and `identity_links`):
 
 - `chats` holds each chat's title, timestamps, writer epoch, last sequence
   number and digest, stored size, and a deletion marker.

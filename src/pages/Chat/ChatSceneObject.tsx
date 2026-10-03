@@ -79,6 +79,7 @@ import { buildAssistantSidebarPageContextSnapshot } from './sidebarPageContext';
 import { createAssistantTelemetryReporter } from './telemetry';
 import { formatRunElapsed, runStatusBadgeText, runStatusText } from './streamingStatus';
 import { getChatRun, isStoredChatRun, removeChatRun, storeChatRun } from './chatRunRegistry';
+import { IdentityLinkModal } from './IdentityLinkModal';
 import { createGrafanaWorkspaceBroker } from './workspace/grafanaBroker';
 import { REPORT_PATH } from './workspace/paths';
 import { AssistantSession, type SessionEnvironment, type SessionHost } from './session/AssistantSession';
@@ -1336,6 +1337,7 @@ export function ChatApp({
         onDeny={() => settleToolConfirmation(false)}
       />
       <ChatLeaveGuardModal action={leaveGuardAction} onCancel={cancelLeaveGuard} onConfirm={confirmLeaveGuard} />
+      <IdentityLinkModal />
       <Modal
         className={styles.modelSettingsModal}
         closeOnEscape

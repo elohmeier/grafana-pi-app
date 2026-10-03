@@ -572,6 +572,48 @@ func runContract(t *testing.T, open opener) {
 			t.Fatal("copied over an existing chat")
 		}
 	})
+
+	t.Run("link codes link a platform account once", func(t *testing.T) {
+		s, ctx := open(t), t.Context()
+		code, expires, err := s.CreateLinkCode(ctx, "webex", "person-1", "Alice Doe")
+		if err != nil || len(code) != 40 || time.Until(expires) < 10*time.Minute {
+			t.Fatalf("%q %v %v", code, expires, err)
+		}
+		pending, err := s.LinkCode(ctx, code)
+		if err != nil || pending.Platform != "webex" || pending.PlatformUser != "person-1" || pending.DisplayName != "Alice Doe" {
+			t.Fatalf("%+v %v", pending, err)
+		}
+		if _, err = s.Link(ctx, "webex", "person-1"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("linked before confirmation: %v", err)
+		}
+		link, err := s.ConfirmLinkCode(ctx, code, 1, "uid-alice", "alice")
+		if err != nil || link.UserUID != "uid-alice" || link.Source != "code" {
+			t.Fatalf("%+v %v", link, err)
+		}
+		if _, err = s.ConfirmLinkCode(ctx, code, 1, "uid-mallory", "mallory"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("a code was used twice: %v", err)
+		}
+		if got, err := s.Link(ctx, "webex", "person-1"); err != nil || got.UserLogin != "alice" || got.LinkedAt.IsZero() {
+			t.Fatalf("%+v %v", got, err)
+		}
+		// A verified email links (or relinks) without a code.
+		if _, err = s.SetLink(ctx, IdentityLink{Platform: "mattermost", PlatformUser: "u-1", DisplayName: "alice", OrgID: 1, UserUID: "uid-alice", UserLogin: "alice", Source: "email"}); err != nil {
+			t.Fatal(err)
+		}
+		links, err := s.UserLinks(ctx, 1, "uid-alice")
+		if err != nil || len(links) != 2 || links[0].Platform != "mattermost" || links[1].Platform != "webex" {
+			t.Fatalf("%+v %v", links, err)
+		}
+		if err = s.Unlink(ctx, "webex", "person-1"); err != nil {
+			t.Fatal(err)
+		}
+		if links, _ = s.UserLinks(ctx, 1, "uid-alice"); len(links) != 1 {
+			t.Fatalf("%+v", links)
+		}
+		if _, err = s.LinkCode(ctx, "unknown"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("%v", err)
+		}
+	})
 }
 
 func TestSQLiteSharedAcrossInstances(t *testing.T) {

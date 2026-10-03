@@ -82,3 +82,31 @@ type RenameChatRequest struct {
 type ChatShare struct {
 	Token string `json:"token"`
 }
+
+// IdentityLink connects a chat platform account (Mattermost, Webex) to a
+// Grafana user, for the assistant host.
+type IdentityLink struct {
+	Platform     string `json:"platform"`
+	PlatformUser string `json:"platformUser"`
+	// DisplayName is the platform account's name when the link was made.
+	DisplayName string `json:"displayName"`
+	OrgID       int64  `json:"orgId,omitempty"`
+	UserUID     string `json:"userUid,omitempty"`
+	UserLogin   string `json:"userLogin,omitempty"`
+	// Source is "code" (confirmed in Grafana) or "email" (a verified address matched by the host).
+	Source   string    `json:"source,omitempty"`
+	LinkedAt time.Time `json:"linkedAt,omitempty"`
+}
+
+// CreateLinkCodeRequest is the body of POST /identity/link-codes.
+type CreateLinkCodeRequest struct {
+	Platform     string `json:"platform"`
+	PlatformUser string `json:"platformUser"`
+	DisplayName  string `json:"displayName"`
+}
+
+// LinkCode is the response of POST /identity/link-codes.
+type LinkCode struct {
+	Code      string    `json:"code"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
