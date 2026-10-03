@@ -2,7 +2,7 @@
 
 Observability Analyst is a Grafana app plugin that embeds an LLM analyst for observability work. The analyst runs in a Grafana-native React UI, uses the current Grafana user's datasource and dashboard permissions, and calls an OpenAI-compatible LLM through the plugin backend so API keys stay server-side.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for how the current implementation works, and the [architecture review and roadmap](ROADMAP.md) for the `read`/`write`/`edit`/`bash` redesign status and the remaining work: deliberate evidence presentation, a durable server host, restricted datasource access, and future chat integrations.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for how the current implementation works, and the [roadmap](ROADMAP.md) for the design principles and the next steps: restricted MSSQL access, Mattermost incident conversations on a server host, and silences.
 
 The [conversational alerting design](docs/conversational-alerting.md) covers Mattermost/Webex incident conversations, screenshots, silencing, and proactive follow-up on a Pi server host, with patterns borrowed from OpenClaw.
 

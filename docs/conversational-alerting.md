@@ -240,8 +240,8 @@ must not retrieve document hits, `_source`, highlighted snippets, or representat
 events through dashboard queries or aggregation subrequests. Apply the same policy
 to Elasticsearch-derived alert annotations before model input or channel delivery;
 an alert payload can already contain prohibited event content. Failed or partial
-shard results mean incomplete evidence, not recovery. See the
-[Elasticsearch access design](../ROADMAP.md#elasticsearch-logs).
+shard results mean incomplete evidence, not recovery. The implemented design is
+simpler than this broker: see [restricted log access](restricted-logs.md).
 
 Uploading an image copies its contents into Mattermost/Webex retention and access
 controls. An expiring Grafana URL does not expire an uploaded platform copy.

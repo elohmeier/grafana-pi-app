@@ -1,8 +1,7 @@
 # Restricted log access (Elasticsearch)
 
-Implemented 2026-10-03. This is the Elasticsearch part of the M6 item in the
-[roadmap](../ROADMAP.md#elasticsearch-logs), deliberately simpler than the
-roadmap's broker design: `grafana-logs` (`workspace/commands/logs.ts`,
+Implemented 2026-10-03, deliberately simpler than the original review's broker
+design (see the [roadmap](../ROADMAP.md)): `grafana-logs` (`workspace/commands/logs.ts`,
 `workspace/logs.ts`), the `logDatasources` setting, the screenshot guard
 (`workspace/screenshotGuard.ts`), and the [local fixture](#local-test-setup).
 
