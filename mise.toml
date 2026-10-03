@@ -61,6 +61,15 @@ run = [
   "npm run dev:check:logs",
 ]
 
+[tasks."dev:mattermost"]
+description = "Build the assistant host, start Mattermost (Compose profile `mattermost`), configure Mattermost and Grafana on port 3001, and start the host."
+run = [
+  "npm run build:host",
+  "docker compose --profile mattermost up -d mattermost",
+  "node scripts/setup-dev-mattermost.mjs",
+  "docker compose --profile mattermost up -d --force-recreate assistant-host",
+]
+
 [tasks."dev:sql"]
 description = "Start and seed the MSSQL restricted-SQL fixture (Compose profile `sql`)."
 run = ["docker compose --profile sql run --rm mssql-seed"]

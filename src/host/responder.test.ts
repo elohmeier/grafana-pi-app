@@ -1,0 +1,256 @@
+import { decideDelivery, formatAlertMessage, type GrafanaWebhook, type GrafanaWebhookAlert } from './alerts';
+import type { ChannelFile, ChannelMessage, ChatChannel, ThreadPost } from './channel';
+import { formatEvidence, Responder, split, type Assistant, type ResponderOptions } from './responder';
+import { alertPanels } from './screenshots';
+import { HostStore } from './store';
+
+function alert(fingerprint: string, status: 'firing' | 'resolved' = 'firing'): GrafanaWebhookAlert {
+  return {
+    status,
+    labels: { alertname: 'High 5xx', instance: fingerprint, severity: 'critical' },
+    annotations: { summary: 'Too many errors', __dashboardUid__: 'web', __panelId__: '2' },
+    startsAt: '2026-10-03T09:18:00.123Z',
+    fingerprint,
+    generatorURL: 'http://grafana/alerting/grafana/rule-1/view',
+    dashboardURL: 'http://grafana/d/web',
+    silenceURL: 'http://grafana/alerting/silence/new',
+    values: { A: 0.123456 },
+  };
+}
+
+function notification(status: 'firing' | 'resolved', alerts: GrafanaWebhookAlert[]): GrafanaWebhook {
+  return {
+    status,
+    groupKey: '{}:{alertname="High 5xx"}',
+    groupLabels: { alertname: 'High 5xx' },
+    commonLabels: { alertname: 'High 5xx' },
+    commonAnnotations: { summary: 'Too many errors' },
+    alerts,
+  };
+}
+
+class FakeChannel implements ChatChannel {
+  readonly name = 'fake';
+  readonly maxMessageLength = 100;
+  posts: Array<{ id: string; channelId: string; text: string; threadId?: string; files?: string[] }> = [];
+  threadPosts: ThreadPost[] = [];
+  async start() {}
+  async stop() {}
+  async resolveChannel(name: string) {
+    return name;
+  }
+  async post(channelId: string, text: string, threadId?: string) {
+    const id = `p${this.posts.length + 1}`;
+    this.posts.push({ id, channelId, text, threadId });
+    return { id };
+  }
+  async postFiles(channelId: string, text: string, files: ChannelFile[], threadId?: string) {
+    const id = `p${this.posts.length + 1}`;
+    this.posts.push({ id, channelId, text, threadId, files: files.map((file) => file.name) });
+    return { id };
+  }
+  async update(postId: string, text: string) {
+    this.posts.find((post) => post.id === postId)!.text = text;
+  }
+  async thread() {
+    return this.threadPosts;
+  }
+}
+
+function setup(
+  answer: Assistant['ask'] = async () => ({ chatId: 'chat-1', text: 'The answer.', toolCalls: 1 }),
+  options: Partial<ResponderOptions> = {}
+) {
+  const channel = new FakeChannel();
+  const asks: Array<{ conversation: string; chatId?: string; text: string }> = [];
+  const assistant: Assistant = {
+    ask: (conversation, chatId, text, onProgress) => {
+      asks.push({ conversation, chatId, text });
+      return answer(conversation, chatId, text, onProgress);
+    },
+  };
+  const store = new HostStore();
+  const responder = new Responder({
+    channel,
+    assistant,
+    store,
+    alertChannelId: 'alerts',
+    channelIds: ['ops'],
+    allowDirect: true,
+    ...options,
+  });
+  return { channel, asks, store, responder };
+}
+
+function message(overrides: Partial<ChannelMessage> = {}): ChannelMessage {
+  return {
+    channelId: 'ops',
+    threadId: 'root',
+    postId: 'root',
+    userId: 'u1',
+    userName: 'alice',
+    text: 'why is checkout slow?',
+    direct: false,
+    mentioned: true,
+    createdAt: 1000,
+    ...overrides,
+  };
+}
+
+async function settle() {
+  for (let i = 0; i < 20; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+describe('alert delivery', () => {
+  it('opens, updates on changed alerts, skips repeats, and resolves', () => {
+    const firing = notification('firing', [alert('a')]);
+    expect(decideDelivery(firing, undefined)).toEqual({ action: 'open' });
+    const episode = {
+      channelId: 'alerts',
+      threadId: 't',
+      status: 'firing' as const,
+      fingerprints: ['a'],
+      startedAt: 0,
+      updatedAt: 0,
+    };
+    expect(decideDelivery(firing, episode)).toEqual({ action: 'skip' });
+    expect(decideDelivery(notification('firing', [alert('a'), alert('b')]), episode).action).toBe('update');
+    expect(decideDelivery(notification('resolved', [alert('a', 'resolved')]), episode).action).toBe('resolve');
+    expect(decideDelivery(notification('resolved', [alert('a', 'resolved')]), undefined).action).toBe('skip');
+    // A new firing period after a resolution is a new thread.
+    expect(decideDelivery(firing, { ...episode, status: 'resolved' })).toEqual({ action: 'open' });
+  });
+
+  it('formats a message with labels, values, and links', () => {
+    expect(formatAlertMessage(notification('firing', [alert('a')]), 'open')).toBe(
+      [
+        ':rotating_light: **High 5xx** — 1 firing',
+        'Too many errors',
+        '- instance=a, severity=critical — A=0.1235 since 2026-10-03 09:18:00Z · [dashboard](http://grafana/d/web) · [rule](http://grafana/alerting/grafana/rule-1/view) · [silence](http://grafana/alerting/silence/new)',
+      ].join('\n')
+    );
+  });
+
+  it('posts the notification before the analysis and answers in its thread', async () => {
+    let finish!: () => void;
+    const { channel, asks, responder } = setup(
+      () =>
+        new Promise((resolve) => (finish = () => resolve({ chatId: 'chat-1', text: 'Cause: deploy.', toolCalls: 3 })))
+    );
+    const result = await responder.handleAlert(notification('firing', [alert('a')]));
+    expect(result).toEqual({ action: 'open', threadId: 'p1' });
+    expect(channel.posts[0].text).toContain('High 5xx');
+    await settle();
+    expect(asks[0].text).toContain('"__dashboardUid__": "web"');
+    finish();
+    await settle();
+    expect(channel.posts[1]).toEqual({ id: 'p2', channelId: 'alerts', threadId: 'p1', text: 'Cause: deploy.' });
+
+    await responder.handleAlert(notification('resolved', [alert('a', 'resolved')]));
+    expect(channel.posts[2]).toMatchObject({ threadId: 'p1', text: expect.stringContaining('Resolved: High 5xx') });
+  });
+
+  it('keeps the notification when the model fails', async () => {
+    const { channel, responder } = setup(async () => {
+      throw new Error('model server down');
+    });
+    await responder.handleAlert(notification('firing', [alert('a')]));
+    await settle();
+    expect(channel.posts.map((post) => post.text)).toEqual([
+      expect.stringContaining('High 5xx'),
+      ':warning: The assistant could not answer: model server down',
+    ]);
+  });
+});
+
+describe('messages', () => {
+  it('answers mentions in allowed channels and direct messages only', async () => {
+    const { asks, responder } = setup();
+    await responder.handleMessage(message({ mentioned: false }));
+    await responder.handleMessage(message({ channelId: 'random' }));
+    expect(asks).toEqual([]);
+    await responder.handleMessage(message({ channelId: 'dm', direct: true, mentioned: false }));
+    await responder.handleMessage(message());
+    expect(asks.map((ask) => ask.conversation)).toEqual(['fake:dm:root', 'fake:ops:root']);
+  });
+
+  it('continues the thread chat with posts since the last answer as context', async () => {
+    const { channel, asks, store, responder } = setup();
+    await store.setThread('fake:ops:root', { chatId: 'chat-1', lastAnswerAt: 2000 });
+    channel.threadPosts = [
+      { userId: 'u1', userName: 'alice', text: 'root question', createdAt: 1000, fromBot: false },
+      { userId: 'bot', userName: 'bot', text: 'an answer', createdAt: 2000, fromBot: true },
+      { userId: 'u2', userName: 'bob', text: 'it started after the deploy', createdAt: 3000, fromBot: false },
+    ];
+    await responder.handleMessage(
+      message({ postId: 'reply', userName: 'alice', text: 'check that deploy', createdAt: 4000 })
+    );
+    expect(asks[0]).toEqual({
+      conversation: 'fake:ops:root',
+      chatId: 'chat-1',
+      text: 'Earlier in the thread:\n- @bob: it started after the deploy\n\n@alice: check that deploy',
+    });
+  });
+
+  it('splits long answers into several posts', async () => {
+    const long = Array.from({ length: 6 }, (_, i) => `line ${i} ${'x'.repeat(10)}`).join('\n');
+    const { channel, responder } = setup(async () => ({ chatId: 'c', text: long, toolCalls: 0 }));
+    await responder.handleMessage(message());
+    // The placeholder post holds the first part.
+    const answer = channel.posts.map((post) => post.text);
+    expect(answer.length).toBeGreaterThan(1);
+    expect(answer.join('\n')).toBe(long);
+    expect(split('abc', 50)).toEqual(['abc']);
+  });
+
+  it('posts presented evidence below the answer: images as files, tables as Markdown', async () => {
+    const { channel, responder } = setup(async () => ({
+      chatId: 'c',
+      text: 'Errors rose after the deploy.',
+      toolCalls: 2,
+      evidence: [
+        { view: 'image', title: '5xx rate', mimeType: 'image/png', data: Buffer.from('png').toString('base64') },
+        { view: 'table', title: 'Top hosts', data: [{ host: 'vm-web-01', errors: 368 }] },
+      ],
+    }));
+    await responder.handleMessage(message());
+    expect(channel.posts.map(({ text, files }) => ({ text, files }))).toEqual([
+      { text: 'Errors rose after the deploy.', files: undefined },
+      { text: '**5xx rate**', files: ['5xx-rate.png'] },
+      { text: '**Top hosts**\n\n| host | errors |\n| --- | --- |\n| vm-web-01 | 368 |', files: undefined },
+    ]);
+  });
+});
+
+describe('evidence and screenshots', () => {
+  it('formats JSON and text as code blocks and escapes table cells', () => {
+    expect(formatEvidence({ view: 'json', title: 'Rule', data: { for: '2m' } })).toBe(
+      '**Rule**\n```json\n{\n  "for": "2m"\n}\n```'
+    );
+    expect(formatEvidence({ view: 'table', title: 'T', data: [{ a: 'x|y\nz' }] })).toContain('| x\\|y z |');
+  });
+
+  it('finds the panels firing alerts link to', () => {
+    const linked = { ...alert('a'), annotations: { __dashboardUid__: 'web', __panelId__: '2' } };
+    expect(
+      alertPanels(notification('firing', [linked, { ...linked, fingerprint: 'b' }, alert('c', 'resolved')]))
+    ).toEqual([{ dashboardUid: 'web', panelId: 2 }]);
+  });
+
+  it('posts alert panel screenshots in the new thread', async () => {
+    const { channel, responder } = setup(undefined, {
+      alertPanels: async () => [
+        { title: 'Panel 2', file: { name: 'web-panel-2.png', mimeType: 'image/png', data: new Uint8Array([1]) } },
+      ],
+    });
+    await responder.handleAlert(notification('firing', [alert('a')]));
+    await settle();
+    expect(channel.posts.find((post) => post.files)).toMatchObject({
+      threadId: 'p1',
+      text: '**Panel 2**',
+      files: ['web-panel-2.png'],
+    });
+  });
+});

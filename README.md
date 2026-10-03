@@ -24,6 +24,7 @@ The [conversational alerting design](docs/conversational-alerting.md) covers Mat
 - In the `grafana-assistant-app` variant, edits the currently open unsaved dashboard as a file: `/live/dashboard/dashboard.json` holds its v2 spec, and `live apply` replaces the browser state through Grafana's restricted dashboard mutation API (`GET_SPEC`/`APPLY_SPEC`).
 - Runs each chat on a [Pi Durable](https://github.com/earendil-works/pi/tree/main/packages/durable) harness: every step is stored before it is shown, a reload in the middle of an answer continues the answer, and long conversations are summarized in the background to fit each model's configured context window.
 - Stores chats, including the session filesystem, per Grafana user in the plugin backend: in an embedded SQLite file by default, or in PostgreSQL for HA deployments.
+- Posts Grafana alert notifications as Mattermost threads and investigates them there through the assistant host, a Node service that runs the same assistant as a read-only service account; people continue the conversation by mentioning the bot. See [Mattermost incident conversations](docs/mattermost.md).
 
 The assistant can present captured files with `evidence show PATH --view table|json|text|image`; presentation never reruns a query. `/session/context.json` exposes read-only turn context, while `/session/receipts/` exposes save outcomes. Skill packages can include `scripts/` with shell, jq, and Python programs. Run `npm run test:shell-worker` after a frontend build to check the production worker, jq, filesystem RPC, and hard termination without Grafana.
 
@@ -325,6 +326,14 @@ mise run dev:sql
 ```
 
 This starts SQL Server on port 1433 (`MSSQL_PORT`) and seeds it once; `mise run dev:sql:reseed` regenerates the data for the current Prometheus history. See [restricted SQL access](docs/restricted-sql.md).
+
+For Mattermost incident conversations, the Compose profile `mattermost` adds Mattermost on port 8065 and the assistant host on port 8080. With the sidebar variant running:
+
+```bash
+mise run dev:mattermost
+```
+
+This builds the host (`npm run build:host`), starts Mattermost, creates the admin `admin` / `Admin-dev1!`, the team `ops` with the channels `alerts` and `town-square`, the bot `@grafana-assistant`, the Grafana service account `assistant-host`, and a webhook contact point for the alerts of the `Assistant Dev Samples` folder, then starts the host. Run it again after the Grafana or Mattermost container was recreated. See [Mattermost incident conversations](docs/mattermost.md).
 
 For a full demo reset that also reseeds Prometheus history with one hour of future overlap for short-window `now` queries, run:
 

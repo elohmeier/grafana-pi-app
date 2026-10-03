@@ -68,6 +68,9 @@ The main implementation areas are:
   `SceneApp`.
 - `src/pages/Chat/`: Chat UI, session, skills, prompts, typed tools, sidebar
   integration, and tests.
+- `src/host/`: the assistant host, a Node service (bundled by
+  `scripts/build-host.mjs`, not part of the plugin) that runs the same
+  `AssistantSession` for Mattermost threads and Grafana alert notifications.
 - `src/pages/Chat/durable/`: The Pi Durable integration: chat log client and
   storage, model provider, extension, documents, harness settings, and the
   transcript projection the UI renders.
@@ -606,6 +609,21 @@ Important safety and cost controls:
   `maxDataPoints`.
 - The system prompt requires checking labels with `grafana-prom labels` or
   `series` before using them, and validating PromQL with concrete selectors.
+
+## Assistant Host And Mattermost
+
+`src/host/` runs assistant chats outside the browser. `scripts/build-host.mjs`
+bundles it for Node and aliases `@grafana/runtime` to
+`src/host/grafanaRuntime.ts`, which implements `getBackendSrv`,
+`getDataSourceSrv` (Prometheus queries through `/api/ds/query`), and `config`
+with a service account token, so the workspace broker, domain code, and chat
+log client run unchanged. `AssistantHost` (`assistant.ts`) gives each thread its
+own chat, declines approvals, and adds a channel prompt to the system prompt
+addendum. `Responder` connects a `ChatChannel` (`mattermost.ts`) to it: Grafana
+webhook notifications are posted before the model runs, one thread per firing
+episode, and mentions continue the thread's chat. The plugin backend stores
+service account chats in their own scope. See
+[Mattermost incident conversations](docs/mattermost.md).
 
 ## Alert Rules
 

@@ -248,6 +248,46 @@ services:
       prometheus-init:
         condition: service_completed_successfully
 
+  # Mattermost incident conversations (profile `mattermost`, docs/mattermost.md):
+  # Mattermost and the assistant host, which runs assistant chats outside the
+  # browser. `mise run dev:mattermost` builds the host and configures both.
+  mattermost:
+    profiles:
+      - mattermost
+    image: mattermost/mattermost-preview:${MATTERMOST_VERSION:-latest}
+    platform: linux/amd64
+    environment:
+      MM_SERVICESETTINGS_SITEURL: http://localhost:${MATTERMOST_PORT:-8065}
+      MM_SERVICESETTINGS_ENABLEBOTACCOUNTCREATION: 'true'
+      MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS: 'true'
+      MM_TEAMSETTINGS_ENABLEOPENSERVER: 'true'
+    ports:
+      - '${MATTERMOST_PORT:-8065}:8065'
+
+  assistant-host:
+    profiles:
+      - mattermost
+    image: node:24-slim
+    working_dir: /repo
+    command: ['node', '--enable-source-maps', 'dist-host/main.mjs']
+    environment:
+      GRAFANA_URL: http://grafana-assistant-variant:3000
+      GRAFANA_PLUGIN_ID: grafana-assistant-app
+      GRAFANA_TOKEN_FILE: /repo/work/host/grafana-token
+      MATTERMOST_URL: http://mattermost:8065
+      MATTERMOST_TOKEN_FILE: /repo/work/host/mattermost-token
+      MATTERMOST_ALERT_CHANNEL: ops/alerts
+      MATTERMOST_CHANNELS: ops/town-square
+      ALERT_WEBHOOK_TOKEN_FILE: /repo/work/host/alert-webhook-token
+      HOST_DATA_DIR: /data
+    ports:
+      - '${ASSISTANT_HOST_PORT:-8080}:8080'
+    volumes:
+      - .:/repo:ro
+      - assistant-host-data:/data
+    depends_on:
+      - mattermost
+
   renderer:
     image: grafana/grafana-image-renderer:${GRAFANA_IMAGE_RENDERER_VERSION:-latest}
     environment:
@@ -258,3 +298,4 @@ volumes:
   prometheus-data:
   elasticsearch-data:
   mssql-data:
+  assistant-host-data:

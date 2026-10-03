@@ -8,6 +8,7 @@ import {
 import { collectDashboardData } from '../dashboardData';
 import { applyDashboardLabelFilter } from '../dashboardLabelFilter';
 import { addPanel, setPanel, type PanelEditReport, type PanelQueryInput } from '../dashboardPanelEdit';
+import type { WorkspaceBroker } from '../broker';
 import { LIVE_DASHBOARD_PATH } from '../liveDashboard';
 import { DashboardWalkError } from '../dashboardPanels';
 import { listDashboardQueries } from '../dashboardQueries';
@@ -516,7 +517,7 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
         }
         const uid = dashboardUid(arg);
         const panelId = typeof parsed.options.panel === 'number' ? parsed.options.panel : undefined;
-        await checkScreenshotDatasources(uid, panelId, ctx);
+        await checkScreenshotDatasources(uid, panelId, ctx.broker, ctx.signal);
         const theme = stringOption(parsed, 'theme') === 'light' ? 'light' : 'dark';
         const image = await screenshot(
           {
@@ -559,15 +560,20 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
 };
 
 /** Refuses screenshots that would show data of datasources the assistant may not read (such as log messages). */
-async function checkScreenshotDatasources(uid: string, panelId: number | undefined, ctx: WorkspaceCommandContext) {
-  const snapshot = await ctx.broker.dashboards?.get(uid, ctx.signal);
+export async function checkScreenshotDatasources(
+  uid: string,
+  panelId: number | undefined,
+  broker: WorkspaceBroker,
+  signal?: AbortSignal
+) {
+  const snapshot = await broker.dashboards?.get(uid, signal);
   if (!snapshot) {
     throw new Error(`dashboard ${uid} not found; a screenshot is only possible of a saved dashboard`);
   }
   const check = checkScreenshot(JSON.parse(snapshot.content), {
     panelId,
-    datasources: ctx.broker.datasources?.() ?? [],
-    allowedPrometheusUids: (ctx.broker.prometheus?.datasources() ?? []).map((ds) => ds.uid),
+    datasources: broker.datasources?.() ?? [],
+    allowedPrometheusUids: (broker.prometheus?.datasources() ?? []).map((ds) => ds.uid),
   });
   if (panelId !== undefined && check.refused.length === 0 && check.allowed.length === 0) {
     throw new UsageError(`panel ${panelId} not found in dashboard ${uid}`);

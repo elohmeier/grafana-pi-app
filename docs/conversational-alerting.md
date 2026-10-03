@@ -5,6 +5,14 @@ roadmap](../ROADMAP.md). It proposes a product and implementation direction; no
 integrations were enabled, messages sent, or alerting configuration changed
 during this review.
 
+**Status (2026-10-03):** the first slice is implemented, smaller than proposed
+here: see [Mattermost incident conversations](mattermost.md). The host is a Node
+service running the same assistant; it acts as one read-only Grafana service
+account instead of mapping channel users, posts deterministic notifications
+before the model's analysis, and keeps its state in one file. Restricted data
+is guarded in the shell commands ([logs](restricted-logs.md),
+[SQL](restricted-sql.md)) rather than by a broker.
+
 ## Recommendation
 
 Build an **incident assistant around Grafana Alerting**: reliable alert delivery,

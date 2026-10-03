@@ -7,7 +7,7 @@ import type {
 /** Pending approvals belong to the session; views can attach/detach without losing the decision. */
 export class ApprovalChannel implements WorkspaceApprovalService {
   private pending?: WorkspaceApprovalRequest;
-  private finish?: (approved: boolean, paths?: string[]) => void;
+  private finish?: (approved: boolean, paths?: string[], reason?: string) => void;
   private listeners = new Set<() => void>();
   getSnapshot = () => this.pending;
   subscribe = (listener: () => void) => {
@@ -16,9 +16,9 @@ export class ApprovalChannel implements WorkspaceApprovalService {
       this.listeners.delete(listener);
     };
   };
-  /** `paths` lists the operations the reviewer kept; omitted, every operation is approved. */
-  settle = (approved: boolean, paths?: string[]) => {
-    this.finish?.(approved, paths);
+  /** `paths` lists the operations the reviewer kept; omitted, every operation is approved. `reason` explains a denial. */
+  settle = (approved: boolean, paths?: string[], reason?: string) => {
+    this.finish?.(approved, paths, reason);
   };
 
   request = (request: WorkspaceApprovalRequest, signal?: AbortSignal): Promise<WorkspaceApprovalDecision> => {
@@ -31,13 +31,13 @@ export class ApprovalChannel implements WorkspaceApprovalService {
     return new Promise((resolve) => {
       const abort = () => this.settle(false);
       this.pending = request;
-      this.finish = (approved, paths) => {
+      this.finish = (approved, paths, reason) => {
         this.pending = undefined;
         this.finish = undefined;
         signal?.removeEventListener('abort', abort);
         resolve({
           approved,
-          reason: approved ? undefined : 'Denied or cancelled.',
+          reason: approved ? undefined : (reason ?? 'Denied or cancelled.'),
           ...(approved && paths ? { paths } : {}),
         });
         this.notify();

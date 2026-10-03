@@ -66,12 +66,17 @@ func (a *App) sessionScope(r *http.Request) (string, error) {
 		return "", errors.New("identity token has no expiry")
 	case claims.Issuer != issuer:
 		return "", fmt.Errorf("identity token issuer %q does not match the Grafana URL %q", claims.Issuer, issuer)
-	case claims.Rest.Type != types.TypeUser || claims.Rest.Identifier == "":
-		return "", fmt.Errorf("identity token is for a %s, not a user", claims.Rest.Type)
+	case claims.Rest.Type != types.TypeUser && claims.Rest.Type != types.TypeServiceAccount || claims.Rest.Identifier == "":
+		return "", fmt.Errorf("identity token is for a %s, not a user or service account", claims.Rest.Type)
 	case p.Namespace != "" && p.Namespace != claims.Rest.Namespace:
 		return "", fmt.Errorf("identity token namespace %q does not match %q", claims.Rest.Namespace, p.Namespace)
 	}
-	scope, _ := json.Marshal([]any{a.settings.SessionNamespace, orgID, p.PluginID, claims.Rest.Identifier})
+	owner := claims.Rest.Identifier
+	if claims.Rest.Type == types.TypeServiceAccount {
+		// The assistant host (Mattermost) stores its chats as a service account.
+		owner = string(types.TypeServiceAccount) + ":" + owner
+	}
+	scope, _ := json.Marshal([]any{a.settings.SessionNamespace, orgID, p.PluginID, owner})
 	return string(scope), nil
 }
 

@@ -5,7 +5,14 @@ import { throwIfAborted } from './result';
 import type { ScreenshotParams } from './types';
 
 /** Renders a dashboard or panel through Grafana image rendering (requires the image renderer). */
-export async function renderDashboardScreenshot(args: ScreenshotParams, signal?: AbortSignal): Promise<DashboardImage> {
+/** Where the image renderer is called: the page's Grafana with its session, or (assistant host) a URL with a token. */
+export type RenderTarget = { origin: string; headers?: Record<string, string> };
+
+export async function renderDashboardScreenshot(
+  args: ScreenshotParams,
+  signal?: AbortSignal,
+  target: RenderTarget = { origin: window.location.origin }
+): Promise<DashboardImage> {
   throwIfAborted(signal);
   const dashboard = await backendFetch<{ meta: { slug: string } }>(
     `/api/dashboards/uid/${encodeURIComponent(args.uid)}`
@@ -16,10 +23,10 @@ export async function renderDashboardScreenshot(args: ScreenshotParams, signal?:
     typeof args.panelId === 'number'
       ? `/render/d-solo/${encodeURIComponent(args.uid)}/${encodeURIComponent(dashboard.meta.slug)}`
       : `/render/d/${encodeURIComponent(args.uid)}/${encodeURIComponent(dashboard.meta.slug)}`;
-  const renderUrl = new URL(renderPath, window.location.origin);
+  const renderUrl = new URL(renderPath, target.origin);
   renderUrl.searchParams.set('orgId', String(config.bootData.user.orgId || 1));
-  renderUrl.searchParams.set('from', args.from ?? 'now-1h');
-  renderUrl.searchParams.set('to', args.to ?? 'now');
+  renderUrl.searchParams.set('from', renderTime(args.from ?? 'now-1h'));
+  renderUrl.searchParams.set('to', renderTime(args.to ?? 'now'));
   renderUrl.searchParams.set('width', String(width));
   renderUrl.searchParams.set('height', String(height));
   renderUrl.searchParams.set('theme', args.theme ?? 'dark');
@@ -28,7 +35,7 @@ export async function renderDashboardScreenshot(args: ScreenshotParams, signal?:
     renderUrl.searchParams.set('panelId', String(args.panelId));
   }
 
-  const response = await fetch(renderUrl.toString(), { signal });
+  const response = await fetch(renderUrl.toString(), { signal, headers: target.headers });
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`Grafana render failed (${response.status}). Is image rendering configured? ${errorText}`);
@@ -40,6 +47,15 @@ export async function renderDashboardScreenshot(args: ScreenshotParams, signal?:
     width,
     height,
   };
+}
+
+/** Dashboard URLs take date math or epoch milliseconds; an ISO timestamp renders an empty range. */
+export function renderTime(value: string): string {
+  if (/^now/.test(value) || /^\d+$/.test(value)) {
+    return value;
+  }
+  const time = Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(value) || !value.includes(':') ? value : `${value}Z`);
+  return Number.isNaN(time) ? value : String(time);
 }
 
 function clamp(value: number, min: number, max: number): number {

@@ -61,12 +61,21 @@ func TestSessionIdentityScope(t *testing.T) {
 	if json.Unmarshal([]byte(scope), &parts) != nil || parts[3] != "stable-uid" {
 		t.Fatal(scope)
 	}
+	// The assistant host stores chats as a service account, in a scope apart from users.
+	r.Header.Set(grafanaIDHeader, token(issuer, "org:1", "stable-uid", types.TypeServiceAccount, time.Now().Add(time.Hour)))
+	scope, err = app.sessionScope(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if json.Unmarshal([]byte(scope), &parts) != nil || parts[3] != "service-account:stable-uid" {
+		t.Fatal(scope)
+	}
 	for name, bad := range map[string]string{
 		"missing": "", "forged": "not-a-token", "other org": token(issuer, "org:2", "stable-uid", types.TypeUser, time.Now().Add(time.Hour)),
-		"other issuer":    token("https://evil.example/", "org:1", "stable-uid", types.TypeUser, time.Now().Add(time.Hour)),
-		"expired":         token(issuer, "org:1", "stable-uid", types.TypeUser, time.Now().Add(-time.Hour)),
-		"missing UID":     token(issuer, "org:1", "", types.TypeUser, time.Now().Add(time.Hour)),
-		"service account": token(issuer, "org:1", "stable-uid", types.TypeServiceAccount, time.Now().Add(time.Hour)),
+		"other issuer": token("https://evil.example/", "org:1", "stable-uid", types.TypeUser, time.Now().Add(time.Hour)),
+		"expired":      token(issuer, "org:1", "stable-uid", types.TypeUser, time.Now().Add(-time.Hour)),
+		"missing UID":  token(issuer, "org:1", "", types.TypeUser, time.Now().Add(time.Hour)),
+		"anonymous":    token(issuer, "org:1", "stable-uid", types.TypeAnonymous, time.Now().Add(time.Hour)),
 	} {
 		t.Run(name, func(t *testing.T) {
 			r.Header.Set(grafanaIDHeader, bad)

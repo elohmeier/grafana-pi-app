@@ -40,24 +40,19 @@ describes the current implementation. The original architecture review
   with the screenshot guard and the Compose profile `logs`; restricted MSSQL
   access (`grafana-sql`): string columns are returned only when the admin lists
   them, with the Compose profile `sql` (see [restricted SQL
-  access](docs/restricted-sql.md)).
+  access](docs/restricted-sql.md)); Mattermost incident threads through the
+  assistant host, a Node service that runs the same assistant as a read-only
+  service account (see [Mattermost incident conversations](docs/mattermost.md)).
 
 ## Next
 
-### Mattermost
+### Webex
 
-Incident conversations in Mattermost, following the
-[conversational alerting design](docs/conversational-alerting.md) but kept as
-small as the restricted data access. Mattermost runs in Docker for development
-and evaluation.
-
-- A Node host service that runs `AssistantSession` with a server `SessionHost`
-  and the same four tools and commands, over the existing chat log storage.
-- Mattermost bot identity mapped to Grafana users; one thread per alert episode.
-- Grafana contact point ingress with deterministic alert delivery first; the
-  model's analysis follows in the thread and never blocks delivery.
-- A Compose profile with Mattermost and the host, and an e2e test with a
-  synthetic alert round trip.
+A second channel adapter for the assistant host, against the same
+`ChatChannel` interface as Mattermost: a bot token, the websocket device
+listener (no public webhook URL), threads, and mentions. It needs a Webex bot
+and a test space; the adapter is tested manually, the shared responder by unit
+tests.
 
 ## Later
 
@@ -66,12 +61,12 @@ and evaluation.
   Mattermost; a repeated create must find the earlier silence instead of
   creating a second one.
 - **Approvals from channels**, bound to the actor, the change-set digest, and an
-  expiry.
+  expiry; with them, writes from a thread and Mattermost users mapped to
+  Grafana users.
 - **Rest of alerting:** rule group operations (interval, reordering, moves),
   contact points, notification policies, and mute timings.
-- **Webex**, against the same channel interface as Mattermost.
-- **Grafana chats on the server host**, so runs continue while no browser has
-  the chat open. The live dashboard bridge stays in the browser.
+- **Grafana chats on the assistant host**, so runs continue while no browser
+  has the chat open. The live dashboard bridge stays in the browser.
 
 ## Dropped
 
