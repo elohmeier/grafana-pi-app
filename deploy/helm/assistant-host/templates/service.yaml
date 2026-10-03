@@ -1,0 +1,15 @@
+# Only the leader, which labels its pod, receives Grafana and Webex webhooks.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "assistant-host.name" . }}
+  labels: {{- include "assistant-host.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "assistant-host.labels" . | nindent 4 }}
+    assistant-host/leader: 'true'
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http

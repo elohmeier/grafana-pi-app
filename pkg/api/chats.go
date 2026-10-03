@@ -110,3 +110,12 @@ type LinkCode struct {
 	Code      string    `json:"code"`
 	ExpiresAt time.Time `json:"expiresAt"`
 }
+
+// HostStateDocument is the response of GET /host-state/{key} and the body of
+// PUT /host-state/{key}: the assistant host's state, shared by its replicas.
+// A PUT replaces the document only if it still has Version; the response
+// carries the new version.
+type HostStateDocument struct {
+	Version int64           `json:"version"`
+	Body    json.RawMessage `json:"body,omitempty"`
+}

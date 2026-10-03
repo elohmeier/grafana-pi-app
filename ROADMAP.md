@@ -45,17 +45,16 @@ describes the current implementation. The original architecture review
   service account (see [Mattermost incident conversations](docs/mattermost.md)),
   and Webex through the same host, tested against a local Webex fake (see
   [Webex](docs/webex.md)), with chat accounts linked to Grafana users (see
-  [identity](docs/identity.md)).
+  [identity](docs/identity.md)); active/standby on Kubernetes with a Lease, the
+  leader's pod label, and the host state in the plugin backend (see
+  [Kubernetes](docs/kubernetes.md)).
 
 ## Next
 
 1. **Channel data policies** on top of [identity links](docs/identity.md): a
    service account or datasource allow-list per channel, and direct-message
    answers narrowed to the linked user's permissions.
-2. **High availability on Kubernetes:** host state in the plugin backend, a
-   `coordination.k8s.io` Lease for one active host, readiness only on the
-   leader, a PodDisruptionBudget, and a Helm chart.
-3. **Webex with a real bot:** one session against Webex to confirm the fake's
+2. **Webex with a real bot:** one session against Webex to confirm the fake's
    behavior.
 
 ## Later

@@ -37,28 +37,47 @@ export type HostState = {
   analyses: Record<string, number>;
 };
 
+/** Where the state is kept: a file (one host), the plugin backend (replicas), or nowhere (tests). */
+export type StatePersistence = {
+  load(): Promise<Partial<HostState> | undefined>;
+  save(state: HostState): Promise<void>;
+};
+
+/** A JSON file, written atomically. */
+export function fileState(file: string): StatePersistence {
+  return {
+    async load() {
+      try {
+        return JSON.parse(await readFile(file, 'utf8')) as Partial<HostState>;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          return undefined;
+        }
+        throw error;
+      }
+    },
+    async save(state) {
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(`${file}.tmp`, JSON.stringify(state, null, 2));
+      await rename(`${file}.tmp`, file);
+    },
+  };
+}
+
 /**
  * The host's own state: which chat belongs to which thread, and which thread
- * belongs to which alert group. One JSON file, written atomically; chats
- * themselves live in the plugin backend.
+ * belongs to which alert group. Chats themselves live in the plugin backend.
  */
 export class HostStore {
   private state: HostState = { threads: {}, episodes: {}, analyses: {} };
   private writing: Promise<void> = Promise.resolve();
 
-  constructor(private readonly file?: string) {}
+  constructor(private readonly persistence?: StatePersistence) {}
 
   async load() {
-    if (!this.file) {
-      return;
-    }
-    try {
-      const parsed = JSON.parse(await readFile(this.file, 'utf8')) as Partial<HostState>;
+    const parsed = await this.persistence?.load();
+    if (parsed) {
       this.state = { threads: parsed.threads ?? {}, episodes: parsed.episodes ?? {}, analyses: parsed.analyses ?? {} };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw error;
-      }
     }
   }
 
@@ -94,16 +113,13 @@ export class HostStore {
   }
 
   private save() {
-    const file = this.file;
-    if (!file) {
+    const persistence = this.persistence;
+    if (!persistence) {
       return Promise.resolve();
     }
-    const content = JSON.stringify(this.state, null, 2);
-    this.writing = this.writing.then(async () => {
-      await mkdir(path.dirname(file), { recursive: true });
-      await writeFile(`${file}.tmp`, content);
-      await rename(`${file}.tmp`, file);
-    });
+    const snapshot = structuredClone(this.state);
+    // Writes go out in order; a failed one does not stop the next.
+    this.writing = this.writing.catch(() => undefined).then(() => persistence.save(snapshot));
     return this.writing;
   }
 }

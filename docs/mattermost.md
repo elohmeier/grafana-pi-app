@@ -184,7 +184,8 @@ npx playwright test tests/assistantHost.spec.ts --project=chromium --no-deps
 ## Limits and next steps
 
 - **Silences** from a thread, as reviewed changes with actor-bound approval.
-- The host keeps its state in one JSON file and runs as a single instance.
+- One instance keeps its state in a JSON file; on Kubernetes, replicas run
+  active/standby with the state in the plugin backend ([Kubernetes](kubernetes.md)).
 - Links in notifications come from Grafana's `root_url`. The local variant sets
   it to port 3001; the plugin setting `sessionGrafanaUrl` points the backend at
   Grafana inside its container for ID token signing keys.

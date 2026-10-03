@@ -614,6 +614,34 @@ func runContract(t *testing.T, open opener) {
 			t.Fatalf("%v", err)
 		}
 	})
+
+	t.Run("host state replaces only the version it read", func(t *testing.T) {
+		s, ctx := open(t), t.Context()
+		if body, version, err := s.HostState(ctx, "host", "state"); err != nil || version != 0 || body != nil {
+			t.Fatalf("%s %d %v", body, version, err)
+		}
+		version, err := s.SetHostState(ctx, "host", "state", 0, json.RawMessage(`{"threads":{}}`))
+		if err != nil || version != 1 {
+			t.Fatalf("%d %v", version, err)
+		}
+		if _, err = s.SetHostState(ctx, "host", "state", 0, json.RawMessage(`{}`)); !isConflict(err, ReasonVersion) {
+			t.Fatalf("created twice: %v", err)
+		}
+		if version, err = s.SetHostState(ctx, "host", "state", 1, json.RawMessage(`{"threads":{"a":1}}`)); err != nil || version != 2 {
+			t.Fatalf("%d %v", version, err)
+		}
+		// A replica that read version 1 cannot overwrite version 2.
+		if _, err = s.SetHostState(ctx, "host", "state", 1, json.RawMessage(`{"stale":true}`)); !isConflict(err, ReasonVersion) {
+			t.Fatalf("stale write accepted: %v", err)
+		}
+		body, version, err := s.HostState(ctx, "host", "state")
+		if err != nil || version != 2 || string(body) != `{"threads":{"a":1}}` {
+			t.Fatalf("%s %d %v", body, version, err)
+		}
+		if _, other, _ := s.HostState(ctx, "other-host", "state"); other != 0 {
+			t.Fatal("scopes share host state")
+		}
+	})
 }
 
 func TestSQLiteSharedAcrossInstances(t *testing.T) {

@@ -136,7 +136,8 @@ Service accounts (the [assistant host](mattermost.md)) store chats in a scope of
 their own; anonymous users cannot store chats.
 
 Tables (`chats`, `chat_rows`, `chat_shares`, `chatlog_migrations`, and the
-[identity link](identity.md) tables `identity_link_codes` and `identity_links`):
+[identity link](identity.md) tables `identity_link_codes` and `identity_links`, and the
+assistant host's `host_state` ([Kubernetes](kubernetes.md))):
 
 - `chats` holds each chat's title, timestamps, writer epoch, last sequence
   number and digest, stored size, and a deletion marker.

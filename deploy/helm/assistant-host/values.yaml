@@ -1,0 +1,57 @@
+image:
+  repository: grafana-assistant-host
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# Two replicas: one leader (holds the Lease, connected, ready), one standby.
+replicas: 2
+
+grafana:
+  # Grafana as the host reaches it.
+  url: http://grafana:3000
+  # Links people open; default: Grafana's appUrl.
+  publicUrl: ''
+  pluginId: grafana-assistant-app
+
+# A Secret with the tokens; keys that are not set leave their feature off.
+# grafana-token (required), alert-webhook-token, mattermost-token, webex-token, webex-webhook-secret
+existingSecret: assistant-host
+
+mattermost:
+  url: ''
+  alertChannel: ''
+  channels: ''
+  allowDirect: true
+
+webex:
+  apiUrl: https://webexapis.com/v1
+  # Public URL of this service's /webex/webhook route (an Ingress).
+  webhookUrl: ''
+  alertRoom: ''
+  rooms: ''
+  allowDirect: true
+
+assistant:
+  requireLink: false
+  emailMatch: false
+  concurrency: 2
+
+lease:
+  name: assistant-host
+
+# Extra environment variables for the host.
+env: []
+
+service:
+  type: ClusterIP
+  port: 8080
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    memory: 2Gi
+
+podDisruptionBudget:
+  minAvailable: 1

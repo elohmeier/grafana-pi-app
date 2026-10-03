@@ -1,0 +1,6 @@
+apiVersion: v2
+name: assistant-host
+description: Grafana assistant host for Mattermost and Webex incident conversations, active/standby with a Kubernetes Lease.
+type: application
+version: 0.1.0
+appVersion: '6.1.0'

@@ -11,3 +11,5 @@ playwright/.cache/
 playwright/.auth/
 research/
 pkg/plugin/jsonnet/vendor/
+# Helm templates are Go templates, not YAML.
+deploy/helm/*/templates/

@@ -136,6 +136,16 @@ export interface LinkCode {
   code: string;
   expiresAt: string;
 }
+/**
+ * HostStateDocument is the response of GET /host-state/{key} and the body of
+ * PUT /host-state/{key}: the assistant host's state, shared by its replicas.
+ * A PUT replaces the document only if it still has Version; the response
+ * carries the new version.
+ */
+export interface HostStateDocument {
+  version: number /* int64 */;
+  body?: unknown;
+}
 
 //////////
 // source: errors.go

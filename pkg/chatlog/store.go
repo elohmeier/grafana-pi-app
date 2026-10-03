@@ -60,6 +60,9 @@ func (e *ConflictError) Error() string {
 	if e.Reason == ReasonLease {
 		return "chat was opened by another writer"
 	}
+	if e.Reason == ReasonVersion {
+		return "host state changed since it was read"
+	}
 	return "chat commit sequence is not newer than the stored log"
 }
 func (e *ConflictError) Is(target error) bool { return target == ErrConflict }
@@ -90,6 +93,7 @@ type Store interface {
 	// CopyShared copies the shared chat, as it is now, into scope as a new chat newID.
 	CopyShared(ctx context.Context, token, scope, newID string) (Chat, error)
 	Links
+	HostState
 	Ping(ctx context.Context) error
 	// Backend describes the storage for health checks, e.g. "PostgreSQL".
 	Backend() string
@@ -233,6 +237,11 @@ func (s *sqlStore) migrate(ctx context.Context, tx *sql.Tx) error {
 		 source text NOT NULL, linked_at bigint NOT NULL,
 		 PRIMARY KEY (platform, platform_user))`,
 		`INSERT INTO ` + s.d.t("chatlog_migrations") + ` (version) VALUES (3) ON CONFLICT DO NOTHING`,
+		// Version 4: assistant host state (threads, alert episodes), shared by its replicas.
+		`CREATE TABLE IF NOT EXISTS ` + s.d.t("host_state") + ` (
+		 scope text NOT NULL, key text NOT NULL, version bigint NOT NULL, body text NOT NULL, updated_at bigint NOT NULL,
+		 PRIMARY KEY (scope, key))`,
+		`INSERT INTO ` + s.d.t("chatlog_migrations") + ` (version) VALUES (4) ON CONFLICT DO NOTHING`,
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -243,7 +252,7 @@ func (s *sqlStore) migrate(ctx context.Context, tx *sql.Tx) error {
 	if err := tx.QueryRowContext(ctx, "SELECT max(version) FROM "+s.d.t("chatlog_migrations")).Scan(&version); err != nil {
 		return err
 	}
-	if version != 3 {
+	if version != 4 {
 		return fmt.Errorf("unsupported chat schema version %d", version)
 	}
 	return nil

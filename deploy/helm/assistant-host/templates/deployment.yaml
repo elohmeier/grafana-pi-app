@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "assistant-host.name" . }}
+  labels: {{- include "assistant-host.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels: {{- include "assistant-host.labels" . | nindent 6 }}
+  # The standby must be up before the leader goes: one extra pod, none unavailable.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels: {{- include "assistant-host.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "assistant-host.name" . }}
+      # Gives the leader time to release the Lease.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: host
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            # The Kubernetes API's CA, for the Lease requests.
+            - name: NODE_EXTRA_CA_CERTS
+              value: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+            - name: LEASE_NAME
+              value: {{ .Values.lease.name | quote }}
+            - name: HOST_PORT
+              value: '8080'
+            - name: GRAFANA_URL
+              value: {{ .Values.grafana.url | quote }}
+            - name: GRAFANA_PLUGIN_ID
+              value: {{ .Values.grafana.pluginId | quote }}
+            {{- with .Values.grafana.publicUrl }}
+            - name: GRAFANA_PUBLIC_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- include "assistant-host.secretEnv" (dict "env" "GRAFANA_TOKEN" "secret" .Values.existingSecret "key" "grafana-token" "optional" false) | nindent 12 }}
+            {{- include "assistant-host.secretEnv" (dict "env" "ALERT_WEBHOOK_TOKEN" "secret" .Values.existingSecret "key" "alert-webhook-token" "optional" true) | nindent 12 }}
+            {{- with .Values.mattermost.url }}
+            - name: MATTERMOST_URL
+              value: {{ . | quote }}
+            - name: MATTERMOST_ALERT_CHANNEL
+              value: {{ $.Values.mattermost.alertChannel | quote }}
+            - name: MATTERMOST_CHANNELS
+              value: {{ $.Values.mattermost.channels | quote }}
+            - name: MATTERMOST_ALLOW_DIRECT
+              value: {{ $.Values.mattermost.allowDirect | quote }}
+            {{- include "assistant-host.secretEnv" (dict "env" "MATTERMOST_TOKEN" "secret" $.Values.existingSecret "key" "mattermost-token" "optional" false) | nindent 12 }}
+            {{- end }}
+            {{- with .Values.webex.webhookUrl }}
+            - name: WEBEX_API_URL
+              value: {{ $.Values.webex.apiUrl | quote }}
+            - name: WEBEX_WEBHOOK_URL
+              value: {{ . | quote }}
+            - name: WEBEX_ALERT_ROOM
+              value: {{ $.Values.webex.alertRoom | quote }}
+            - name: WEBEX_ROOMS
+              value: {{ $.Values.webex.rooms | quote }}
+            - name: WEBEX_ALLOW_DIRECT
+              value: {{ $.Values.webex.allowDirect | quote }}
+            {{- include "assistant-host.secretEnv" (dict "env" "WEBEX_TOKEN" "secret" $.Values.existingSecret "key" "webex-token" "optional" false) | nindent 12 }}
+            {{- include "assistant-host.secretEnv" (dict "env" "WEBEX_WEBHOOK_SECRET" "secret" $.Values.existingSecret "key" "webex-webhook-secret" "optional" true) | nindent 12 }}
+            {{- end }}
+            - name: ASSISTANT_REQUIRE_LINK
+              value: {{ .Values.assistant.requireLink | quote }}
+            - name: ASSISTANT_EMAIL_MATCH
+              value: {{ .Values.assistant.emailMatch | quote }}
+            - name: ASSISTANT_CONCURRENCY
+              value: {{ .Values.assistant.concurrency | quote }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # Liveness: the process runs. Readiness: initialized, as leader or standby; the Service
+          # sends traffic to the leader only (pod label assistant-host/leader).
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+          resources: {{- toYaml .Values.resources | nindent 12 }}

@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "assistant-host.name" . }}
+  labels: {{- include "assistant-host.labels" . | nindent 4 }}
+---
+# Leader election: the replicas share one Lease.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "assistant-host.name" . }}
+  labels: {{- include "assistant-host.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    resourceNames: [{{ .Values.lease.name | quote }}]
+    verbs: [get, update]
+  # The leader labels its own pod for the Service (assistant-host/leader).
+  - apiGroups: ['']
+    resources: [pods]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "assistant-host.name" . }}
+  labels: {{- include "assistant-host.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "assistant-host.name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "assistant-host.name" . }}

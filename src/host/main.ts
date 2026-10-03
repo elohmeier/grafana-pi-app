@@ -2,6 +2,7 @@ import { streamProxy } from '@earendil-works/pi-agent-core';
 import { timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { hostname } from 'node:os';
 import path from 'node:path';
 import { PLUGIN_ID } from '../constants';
 import { grafanaChatLog } from '../pages/Chat/durable/grafanaChatLog';
@@ -23,7 +24,9 @@ import { renderAlertPanels } from './screenshots';
 import { createNodePythonRunner } from './python';
 import { nodeShellWorkers } from './shellWorkers';
 import { setShellWorkerFactory } from '../pages/Chat/workspace/shell';
-import { HostStore } from './store';
+import { backendState } from './backendState';
+import { inClusterConfig, labelPod, LeaseElector } from './lease';
+import { fileState, HostStore } from './store';
 
 /**
  * The assistant host: runs assistant chats outside the browser for Mattermost
@@ -113,8 +116,28 @@ const metrics = new Metrics();
 metrics.gauge('assistant_host_runs_in_progress', 'Assistant runs using the model now.', () => assistant.load().running);
 metrics.gauge('assistant_host_runs_waiting', 'Assistant runs waiting for a turn.', () => assistant.load().waiting);
 
-const store = new HostStore(path.join(setting('HOST_DATA_DIR', './work/host'), 'state.json'));
-await store.load();
+// With several replicas (Kubernetes), one leader holds a Lease and the state lives in the plugin backend.
+const leaseName = setting('LEASE_NAME', '');
+const cluster = leaseName ? inClusterConfig() : undefined;
+const pod = setting('POD_NAME', hostname());
+const elector = cluster ? new LeaseElector({ ...cluster, name: leaseName, identity: pod, log }) : undefined;
+/** Marks this pod as the leader for the Service, or unmarks it. */
+const markLeader = (leader: boolean) => (cluster ? labelPod({ ...cluster, pod }, leader) : Promise.resolve());
+const stateBackend = setting('HOST_STATE', leaseName ? 'backend' : 'file') === 'backend';
+const store = new HostStore(
+  stateBackend
+    ? backendState(pluginRequest(PLUGIN_ID), {
+        onConflict: () => {
+          log('host state was written by another replica; stopping');
+          process.exit(1);
+        },
+      })
+    : fileState(path.join(setting('HOST_DATA_DIR', './work/host'), 'state.json'))
+);
+/** This replica serves: it holds the lease (if any) and its platforms are connected. */
+let ready = false;
+/** The process works; a standby is healthy too and can take over. */
+let initialized = false;
 
 const list = (name: string) =>
   setting(name, '')
@@ -169,6 +192,31 @@ const identity = new IdentityService(pluginRequest(PLUGIN_ID), {
   lookupUser: lookupGrafanaUser,
 });
 
+// Registered before waiting for the lease, so a standby stops cleanly too.
+process.on('SIGTERM', () => {
+  log('stopping');
+  ready = false;
+  void markLeader(false)
+    .catch(() => undefined)
+    .then(() => elector?.release())
+    .finally(() => process.exit(0));
+});
+
+if (elector) {
+  // A label left from before a restart must not draw traffic to a standby.
+  await markLeader(false);
+  initialized = true;
+  log(`lease ${leaseName}: waiting to lead as ${pod}`);
+  await elector.acquire(() => {
+    // Another replica may be the leader now: stop taking traffic and restart as a standby.
+    log('lost the lease; stopping');
+    void markLeader(false)
+      .catch(() => undefined)
+      .finally(() => process.exit(1));
+  });
+}
+await store.load();
+
 const responders: Responder[] = [];
 let webex: WebexChannel | undefined;
 if (setting('MATTERMOST_URL', '')) {
@@ -203,10 +251,22 @@ if (responders.length === 0) {
 for (const responder of responders) {
   void responder.recover();
 }
+ready = true;
+initialized = true;
+await markLeader(true);
+log('ready');
 
 async function handle(request: IncomingMessage, response: ServerResponse) {
   if (request.method === 'GET' && request.url === '/healthz') {
     return reply(response, 200, { status: 'ok' });
+  }
+  // Readiness: initialized, standby or leader. The Service selects the leader by its pod label.
+  if (request.method === 'GET' && request.url === '/readyz') {
+    return reply(response, initialized ? 200 : 503, { ready, leader: elector?.isLeader ?? true });
+  }
+  if (!ready && request.method === 'POST') {
+    // Grafana and Webex retry; the leader answers.
+    return reply(response, 503, { error: 'not ready' });
   }
   if (request.method === 'GET' && request.url === '/metrics') {
     response.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' });
