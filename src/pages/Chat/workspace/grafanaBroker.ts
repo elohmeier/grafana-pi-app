@@ -1,4 +1,11 @@
-import { config, getBackendSrv, isFetchError, locationService, type FetchResponse } from '@grafana/runtime';
+import {
+  config,
+  getBackendSrv,
+  getDataSourceSrv,
+  isFetchError,
+  locationService,
+  type FetchResponse,
+} from '@grafana/runtime';
 import { findPanelAlertRules, getAlertRule } from '../domain/alerts';
 import {
   getMetricNeighborhood,
@@ -26,6 +33,7 @@ import type {
   WorkspaceBroker,
 } from './broker';
 import { DASHBOARD_API_GROUP } from './dashboardModel';
+import { createLogsBroker, type FieldCapsResponse } from './logs';
 import { sha256Hex } from './hash';
 import type { PromqlParser } from './promqlCheck';
 import type { WorkspaceResourceMeta, WorkspaceResourceSnapshot } from './types';
@@ -66,6 +74,38 @@ export function createGrafanaWorkspaceBroker(toolConfig: GrafanaToolConfig): Wor
   return {
     dashboards: createDashboardBroker(toolConfig),
     prometheus: createPrometheusBroker(toolConfig),
+    logs: createLogsBroker(toolConfig.logDatasources, {
+      datasources: () =>
+        getDataSourceSrv()
+          .getList({ type: 'elasticsearch' })
+          .map((ds) => ({ uid: ds.uid, name: ds.name, type: ds.type, jsonData: { ...ds.jsonData } })),
+      fieldCaps: async (uid, index, signal) =>
+        responseData(
+          await request<FieldCapsResponse>(
+            'GET',
+            `/api/datasources/uid/${encodeURIComponent(uid)}/resources/${encodeURIComponent(index)}/_field_caps`,
+            undefined,
+            signal
+          )
+        ),
+      msearch: async (uid, searches, signal) => {
+        const body = searches.map(
+          (search) => `${JSON.stringify({ index: search.index })}\n${JSON.stringify(search.body)}\n`
+        );
+        const response = await request<{ responses?: unknown[] }>(
+          'POST',
+          `/api/datasources/uid/${encodeURIComponent(uid)}/resources/_msearch`,
+          body.join(''),
+          signal,
+          { 'Content-Type': 'application/x-ndjson' }
+        );
+        return responseData(response).responses ?? [];
+      },
+    }),
+    datasources: () =>
+      getDataSourceSrv()
+        .getList({ all: true })
+        .map((ds) => ({ uid: ds.uid, name: ds.name, type: ds.type, isDefault: ds.isDefault })),
     jsonnet: createJsonnetBroker(),
     promql: createPromqlParser(),
     alerts: {
@@ -609,11 +649,19 @@ function writeFailure(response: { status?: number; message: string }): Dashboard
   return { outcome: 'failed', error: response.message };
 }
 
+function responseData<T>(response: RequestResult<T>): T {
+  if (!response.ok) {
+    throw new Error(response.message);
+  }
+  return response.data;
+}
+
 async function request<T>(
   method: string,
   url: string,
   data?: unknown,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  headers?: Record<string, string>
 ): Promise<RequestResult<T>> {
   if (signal?.aborted) {
     throw new Error('request aborted');
@@ -626,6 +674,7 @@ async function request<T>(
           url,
           method,
           data,
+          headers,
           showErrorAlert: false,
           showSuccessAlert: false,
         })

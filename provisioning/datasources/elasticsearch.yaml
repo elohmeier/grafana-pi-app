@@ -1,0 +1,39 @@
+apiVersion: 1
+
+# Restricted log access fixture, seeded by the `logs` Compose profile
+# (docs/restricted-logs.md). Without that profile the datasources exist but
+# cannot connect.
+datasources:
+  # Covers every logs-* data stream, including audit logs that the assistant
+  # policy denies: the credential and index pattern are broader than the policy.
+  - name: Logs
+    uid: es-logs
+    type: elasticsearch
+    access: proxy
+    url: $__env{PI_ELASTICSEARCH_URL}
+    basicAuth: true
+    basicAuthUser: grafana
+    editable: true
+    jsonData:
+      index: 'logs-*'
+      timeField: '@timestamp'
+      logMessageField: message
+      logLevelField: log.level
+    secureJsonData:
+      basicAuthPassword: $__env{PI_ELASTICSEARCH_PASSWORD}
+  # Not in any assistant policy: every restricted operation must be denied.
+  - name: Audit logs
+    uid: es-audit
+    type: elasticsearch
+    access: proxy
+    url: $__env{PI_ELASTICSEARCH_URL}
+    basicAuth: true
+    basicAuthUser: grafana
+    editable: true
+    jsonData:
+      index: 'logs-audit-*'
+      timeField: '@timestamp'
+      logMessageField: message
+      logLevelField: log.level
+    secureJsonData:
+      basicAuthPassword: $__env{PI_ELASTICSEARCH_PASSWORD}

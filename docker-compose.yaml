@@ -7,6 +7,8 @@ services:
       - demo/prometheus/generate_openmetrics.py
       - --output
       - /demo/history.openmetrics
+      - --timeline-output
+      - /demo/timeline.json
     environment:
       HISTORY_HOURS: '${HISTORY_HOURS:-6}'
       HISTORY_STEP_SECONDS: '${HISTORY_STEP_SECONDS:-60}'
@@ -25,6 +27,8 @@ services:
           echo "Prometheus data already exists; skipping historical import."
         else
           promtool tsdb create-blocks-from openmetrics /demo/history.openmetrics /prometheus
+          # Kept with the imported history so the log fixture can align with it.
+          cp /demo/timeline.json /prometheus/demo-timeline.json
         fi
     volumes:
       - demo-data:/demo:ro
@@ -83,6 +87,8 @@ services:
       PI_CONTEXT_WINDOW: ${PI_CONTEXT_WINDOW:-131072}
       PI_MAX_OUTPUT_TOKENS: ${PI_MAX_OUTPUT_TOKENS:-16384}
       PI_PROMETHEUS_URL: ${PI_PROMETHEUS_URL:-http://prometheus:9090}
+      PI_ELASTICSEARCH_URL: ${PI_ELASTICSEARCH_URL:-http://elasticsearch:9200}
+      PI_ELASTICSEARCH_PASSWORD: ${PI_ELASTICSEARCH_PASSWORD:-grafana-dev}
 
   grafana-assistant-variant:
     profiles:
@@ -136,6 +142,61 @@ services:
       PI_CONTEXT_WINDOW: ${PI_CONTEXT_WINDOW:-131072}
       PI_MAX_OUTPUT_TOKENS: ${PI_MAX_OUTPUT_TOKENS:-16384}
       PI_PROMETHEUS_URL: ${PI_PROMETHEUS_URL:-http://prometheus:9090}
+      PI_ELASTICSEARCH_URL: ${PI_ELASTICSEARCH_URL:-http://elasticsearch:9200}
+      PI_ELASTICSEARCH_PASSWORD: ${PI_ELASTICSEARCH_PASSWORD:-grafana-dev}
+
+  # Restricted log access fixture (profile `logs`): synthetic ECS logs aligned
+  # with the Prometheus demo incident. See docs/restricted-logs.md.
+  elasticsearch:
+    profiles:
+      - logs
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTICSEARCH_VERSION:-9.5.3}
+    environment:
+      discovery.type: single-node
+      xpack.license.self_generated.type: basic
+      xpack.security.enabled: 'true'
+      xpack.security.http.ssl.enabled: 'false'
+      xpack.security.transport.ssl.enabled: 'false'
+      ingest.geoip.downloader.enabled: 'false'
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-elastic-dev}
+      ES_JAVA_OPTS: ${ES_JAVA_OPTS:--Xms1g -Xmx1g}
+    ports:
+      - '${ELASTICSEARCH_PORT:-9200}:9200'
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS -u "elastic:$$ELASTIC_PASSWORD" 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s' >/dev/null
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 20s
+
+  elasticsearch-seed:
+    profiles:
+      - logs
+    image: python:3.14-slim
+    working_dir: /repo
+    command: ['python', 'demo/elasticsearch/seed_logs.py']
+    environment:
+      ES_URL: http://elasticsearch:9200
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-elastic-dev}
+      GRAFANA_ES_PASSWORD: ${PI_ELASTICSEARCH_PASSWORD:-grafana-dev}
+      TIMELINE_FILE: /prometheus-history/demo-timeline.json
+      HISTORY_HOURS: '${HISTORY_HOURS:-6}'
+      INCIDENT_DURATION_SECONDS: '${INCIDENT_DURATION_SECONDS:-900}'
+      LOGS_SEED: '${LOGS_SEED:-42}'
+      LOGS_ACCESS_SAMPLE: '${LOGS_ACCESS_SAMPLE:-0.05}'
+      LOGS_FORCE: '${LOGS_FORCE:-0}'
+    volumes:
+      - .:/repo:ro
+      - prometheus-data:/prometheus-history:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      prometheus-init:
+        condition: service_completed_successfully
 
   renderer:
     image: grafana/grafana-image-renderer:${GRAFANA_IMAGE_RENDERER_VERSION:-latest}
@@ -145,3 +206,4 @@ services:
 volumes:
   demo-data:
   prometheus-data:
+  elasticsearch-data:

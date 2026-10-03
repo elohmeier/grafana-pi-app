@@ -316,6 +316,10 @@ export function createFakeDashboardBroker(
 
   const broker: WorkspaceBroker = {
     dashboards,
+    datasources: () => [
+      { uid: 'prometheus', name: 'Prometheus', type: 'prometheus', isDefault: true },
+      { uid: 'es-logs', name: 'Logs', type: 'elasticsearch' },
+    ],
     prometheus: {
       datasources: () => [{ uid: 'prometheus', name: 'Prometheus', isDefault: true, timeInterval: '60s' }],
       async metricNames() {

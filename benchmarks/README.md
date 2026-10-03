@@ -4,7 +4,7 @@ For simultaneous assistant sessions and endpoint capacity, use the separate opt-
 
 `npm run benchmark:run` runs the existing Grafana browser benchmarks for **one model × endpoint/hosting configuration × thinking setting**. A versioned `run.json` contains case outcomes, every captured LLM request, aggregate token counts and latency distributions. Run it again with another profile to create the inputs for a later comparison report.
 
-The initial catalog contains 12 suites and 15 cases. The batch-editing command is already covered by the dashboard-editing suite. Quality gates and prompts remain in `tests/agent*Benchmark.spec.ts`; the runner discovers individual cases through Playwright. Each case runs in its own Playwright invocation, so a failed case in a serial suite cannot skip its siblings. Cases and repetitions run sequentially with retries disabled.
+The catalog contains 13 suites and 16 cases. The batch-editing command is already covered by the dashboard-editing suite. Quality gates and prompts remain in `tests/agent*Benchmark.spec.ts`; the runner discovers individual cases through Playwright. Each case runs in its own Playwright invocation, so a failed case in a serial suite cannot skip its siblings. Cases and repetitions run sequentially with retries disabled.
 
 ## Running
 

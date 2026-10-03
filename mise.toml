@@ -43,8 +43,29 @@ run = [
 [tasks."dev:reload:variant:fresh"]
 description = "Reset Compose volumes, reseed Prometheus history, reload the sidebar variant, and seed samples."
 run = [
-  "docker compose down -v --remove-orphans",
+  "docker compose --profile logs down -v --remove-orphans",
   "HISTORY_FUTURE_SECONDS=${HISTORY_FUTURE_SECONDS:-3600} mise run dev:reload:variant:seed",
+]
+
+[tasks."dev:reload:variant:logs"]
+description = "Reload the sidebar-capable variant on port 3001 and reseed the Elasticsearch log fixture for the current Prometheus history."
+run = [
+  "mise run dev:reload:variant",
+  "docker compose --profile logs run --rm -e LOGS_FORCE=1 elasticsearch-seed",
+]
+
+[tasks."dev:logs"]
+description = "Start and seed the Elasticsearch restricted-log fixture (Compose profile `logs`) and check it through Grafana on port 3001."
+run = [
+  "docker compose --profile logs run --rm elasticsearch-seed",
+  "npm run dev:check:logs",
+]
+
+[tasks."dev:logs:reseed"]
+description = "Delete and regenerate the Elasticsearch log fixture, aligned with the current Prometheus history."
+run = [
+  "docker compose --profile logs run --rm -e LOGS_FORCE=1 elasticsearch-seed",
+  "npm run dev:check:logs",
 ]
 
 [tasks."generate:types"]

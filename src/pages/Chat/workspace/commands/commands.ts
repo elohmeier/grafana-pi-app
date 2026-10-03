@@ -2,6 +2,7 @@ import type { WorkspaceCommandSpec } from './registry';
 import { grafanaCommand } from './grafana';
 import { grafanaDashboardCommand } from './dashboards';
 import { grafanaPromCommand } from './prometheus';
+import { grafanaLogsCommand } from './logs';
 import { workspaceCommand } from './workspace';
 import { jsonnetCommand } from './jsonnet';
 import { grafanaUsageCommand } from './metricUsage';
@@ -18,6 +19,7 @@ export const WORKSPACE_COMMANDS: readonly WorkspaceCommandSpec[] = [
   grafanaCommand,
   grafanaDashboardCommand,
   grafanaPromCommand,
+  grafanaLogsCommand,
   workspaceCommand,
   jsonnetCommand,
   grafanaUsageCommand,

@@ -198,7 +198,11 @@ design rationale, but three of its proposals were superseded:
   actor or an expiry (see the decision above).
 - **Rest of M5:** rule group operations (interval, reordering, moves), silences,
   contact points, notification policies, and mute timings.
-- **Restricted MSSQL/Elasticsearch sources and the output policy (M6).**
+- **Restricted MSSQL sources (M6).** Elasticsearch is done differently than
+  proposed below: [restricted log access](docs/restricted-logs.md) is the
+  frontend command `grafana-logs` (structure, counts, and non-text fields, plus
+  complete documents matching admin-defined keyword conditions) with a
+  screenshot guard, tested against the Compose profile `logs`.
 - **Conversational alerting and channels (M7)**, including presentation events
   that channel adapters can render; `evidence show` renders only in the Grafana chat.
 - **Release.** The redesign is on the `bash` branch and not yet released.

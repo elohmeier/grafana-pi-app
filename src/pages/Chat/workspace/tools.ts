@@ -104,7 +104,7 @@ const BASH_TOOL: WorkspaceToolDefinition = {
   name: 'bash',
   label: 'Bash',
   description:
-    'Run a non-interactive bash script in the sandboxed session filesystem (no network, no host access). Includes coreutils, find, rg, grep, sed, awk, jq, yq, diff, plus Grafana commands: grafana, grafana-dashboard, grafana-prom, workspace (run `<command> --help`). Variables and cwd reset per call; files persist. All file changes of one call are committed together, or discarded on timeout/cancel/quota errors.',
+    'Run a non-interactive bash script in the sandboxed session filesystem (no network, no host access). Includes coreutils, find, rg, grep, sed, awk, jq, yq, diff, plus Grafana commands: grafana, grafana-dashboard, grafana-prom, grafana-logs, workspace (run `<command> --help`). Variables and cwd reset per call; files persist. All file changes of one call are committed together, or discarded on timeout/cancel/quota errors.',
   executionMode: 'sequential',
   parameters: Type.Object({
     command: Type.String({ description: 'Bash script to run.' }),

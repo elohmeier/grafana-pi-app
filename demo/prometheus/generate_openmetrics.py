@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import time
@@ -682,6 +683,11 @@ def main() -> None:
     parser.add_argument("--incident-duration-seconds", type=int, default=int(os.getenv("INCIDENT_DURATION_SECONDS", str(DEFAULT_INCIDENT_DURATION_SECONDS))))
     parser.add_argument("--future-seconds", type=int, default=int(os.getenv("HISTORY_FUTURE_SECONDS", str(DEFAULT_FUTURE_SECONDS))))
     parser.add_argument("--end-timestamp", type=int, default=int(os.getenv("HISTORY_END_TIMESTAMP", "0")) or None)
+    parser.add_argument(
+        "--timeline-output",
+        default=os.getenv("TIMELINE_OUTPUT", ""),
+        help="Also write the history window and incident start as JSON, so other demo data can align with it.",
+    )
     args = parser.parse_args()
 
     history_seconds = args.hours * 3600
@@ -701,6 +707,22 @@ def main() -> None:
         ),
         encoding="utf-8",
     )
+    if args.timeline_output:
+        timeline = Path(args.timeline_output)
+        timeline.parent.mkdir(parents=True, exist_ok=True)
+        timeline.write_text(
+            json.dumps(
+                {
+                    "startTimestamp": start_timestamp,
+                    "endTimestamp": end_timestamp,
+                    "futureSeconds": max(0, args.future_seconds),
+                    "incidentStartTimestamp": start_timestamp + incident_start_seconds,
+                    "incidentDurationSeconds": args.incident_duration_seconds,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     print(
         f"wrote {output} with {args.hours}h of history and {max(0, args.future_seconds)}s "
         f"of current-query overlap ending at unix timestamp {end_timestamp + max(0, args.future_seconds)}"

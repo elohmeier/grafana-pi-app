@@ -7,6 +7,7 @@ import type {
 } from '../domain/dashboardMetricContext';
 import type { ScreenshotParams } from '../domain/types';
 import type { JsonnetEvalRequest, JsonnetFixResponse, JsonnetLibFilesResponse } from '../../../generated/api';
+import type { LogsBroker } from './logs';
 import type { PromqlParser } from './promqlCheck';
 import type { WorkspaceResourceKind, WorkspaceResourceSnapshot } from './types';
 
@@ -19,6 +20,10 @@ import type { WorkspaceResourceKind, WorkspaceResourceSnapshot } from './types';
 export type WorkspaceBroker = {
   dashboards?: DashboardBroker;
   prometheus?: PrometheusBroker;
+  /** Restricted Elasticsearch log access (`grafana-logs`). */
+  logs?: LogsBroker;
+  /** Every datasource visible to the current user, to check what a screenshot would show. */
+  datasources?: () => DatasourceRef[];
   jsonnet?: JsonnetBroker;
   /** Upstream Prometheus parser in the plugin backend. */
   promql?: PromqlParser;
@@ -33,6 +38,8 @@ export type WorkspaceBroker = {
   /** The unsaved dashboard open in the browser (sidebar variant with the mutation API). */
   live?: LiveDashboardBroker;
 };
+
+export type DatasourceRef = { uid: string; name: string; type: string; isDefault?: boolean };
 
 export type LiveDashboardSnapshot = {
   uid: string;

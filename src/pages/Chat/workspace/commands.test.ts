@@ -26,8 +26,20 @@ const PANEL = {
   targets: [{ refId: 'A', expr: 'sum by (service) (rate(http_requests_total{job="api"}[5m]))' }],
 };
 
+const LOGS_PANEL = {
+  id: 2,
+  type: 'logs',
+  title: 'Error logs',
+  gridPos: { x: 12, y: 0, w: 12, h: 8 },
+  datasource: { uid: 'es-logs', type: 'elasticsearch' },
+  targets: [{ refId: 'A', query: 'log.level:ERROR' }],
+};
+
 function setup(extra: Partial<WorkspaceBroker> = {}) {
-  const fake = createFakeDashboardBroker([{ uid: 'checkout', title: 'Checkout', panels: [PANEL] }]);
+  const fake = createFakeDashboardBroker([
+    { uid: 'checkout', title: 'Checkout', panels: [PANEL] },
+    { uid: 'with-logs', title: 'With logs', panels: [PANEL, LOGS_PANEL] },
+  ]);
   const workspace = new SessionWorkspace();
   workspace.setHydrator((_kind, uid, signal) => fake.broker.dashboards!.get(uid, signal));
   const deps: WorkspaceShellDeps = { workspace, broker: { ...fake.broker, ...extra } };
@@ -124,6 +136,22 @@ describe('grafana open and screenshot', () => {
       expect.objectContaining({ uid: 'checkout', panelId: 1 }),
       expect.anything()
     );
+  });
+
+  it('refuses screenshots that would show log panels', async () => {
+    const screenshot = jest.fn(async () => ({ data: 'aW1n', mimeType: 'image/png', width: 1200, height: 700 }));
+    const { run } = setup({ ui: { navigate: jest.fn(), screenshot } });
+    const refused = await run('grafana-dashboard screenshot with-logs');
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toContain(
+      'panel 2 "Error logs": uses elasticsearch datasource Logs (es-logs), which is not available to the assistant'
+    );
+    expect(refused.stderr).toContain('Panels that can be rendered with --panel: 1.');
+    expect(screenshot).not.toHaveBeenCalled();
+
+    const allowed = await run('grafana-dashboard screenshot with-logs --panel 1');
+    expect(allowed.exitCode).toBe(0);
+    expect(screenshot).toHaveBeenCalledTimes(1);
   });
 });
 

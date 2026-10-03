@@ -11,6 +11,7 @@ import { addPanel, setPanel, type PanelEditReport, type PanelQueryInput } from '
 import { LIVE_DASHBOARD_PATH } from '../liveDashboard';
 import { DashboardWalkError } from '../dashboardPanels';
 import { listDashboardQueries } from '../dashboardQueries';
+import { checkScreenshot } from '../screenshotGuard';
 import { DASHBOARDS_ROOT, HYDRATION_CONCURRENCY } from '../workspace';
 import { dashboardUid } from './alerts';
 import { normalizeWorkspacePath } from '../paths';
@@ -515,6 +516,7 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
         }
         const uid = dashboardUid(arg);
         const panelId = typeof parsed.options.panel === 'number' ? parsed.options.panel : undefined;
+        await checkScreenshotDatasources(uid, panelId, ctx);
         const theme = stringOption(parsed, 'theme') === 'light' ? 'light' : 'dark';
         const image = await screenshot(
           {
@@ -555,6 +557,33 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
     },
   },
 };
+
+/** Refuses screenshots that would show data of datasources the assistant may not read (such as log messages). */
+async function checkScreenshotDatasources(uid: string, panelId: number | undefined, ctx: WorkspaceCommandContext) {
+  const snapshot = await ctx.broker.dashboards?.get(uid, ctx.signal);
+  if (!snapshot) {
+    throw new Error(`dashboard ${uid} not found; a screenshot is only possible of a saved dashboard`);
+  }
+  const check = checkScreenshot(JSON.parse(snapshot.content), {
+    panelId,
+    datasources: ctx.broker.datasources?.() ?? [],
+    allowedPrometheusUids: (ctx.broker.prometheus?.datasources() ?? []).map((ds) => ds.uid),
+  });
+  if (panelId !== undefined && check.refused.length === 0 && check.allowed.length === 0) {
+    throw new UsageError(`panel ${panelId} not found in dashboard ${uid}`);
+  }
+  if (check.refused.length === 0) {
+    return;
+  }
+  const refused = check.refused.map((panel) => `  panel ${panel.id} ${JSON.stringify(panel.title)}: ${panel.reason}`);
+  const hint =
+    check.allowed.length > 0
+      ? `Panels that can be rendered with --panel: ${check.allowed.join(', ')}.`
+      : 'No panel of this dashboard can be rendered.';
+  throw new Error(
+    `refused: the screenshot would show data that is not available to the assistant:\n${refused.join('\n')}\n${hint}`
+  );
+}
 
 function panelQueries(parsed: ParsedArgs): PanelQueryInput[] {
   const exprs = listOption(parsed, 'expr');

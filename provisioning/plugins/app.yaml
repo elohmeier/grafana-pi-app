@@ -20,6 +20,13 @@ apps:
       systemPromptAddendum: ''
       isOpenAIAPIKeySet: true
       allowedPrometheusDatasourceUids: ['prometheus', 'thanos-prod-db']
+      # Restricted log access to the `logs` Compose profile fixture (docs/restricted-logs.md).
+      logDatasources:
+        - uid: es-logs
+          indices: ['logs-app-prod', 'logs-nginx.access-prod']
+          unrestricted:
+            - field: log.logger
+              values: ['deployer']
       customSkills: []
     secureJsonData:
       openAIAPIKey: $__env{OPENAI_API_KEY}

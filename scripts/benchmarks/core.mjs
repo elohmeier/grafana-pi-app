@@ -13,6 +13,7 @@ export const suites = [
   ['alert-troubleshooting', 'agentAlertTroubleshootingBenchmark.spec.ts', 240_000],
   ['dashboard-metric-discovery', 'agentDashboardMetricDiscoveryBenchmark.spec.ts', 180_000],
   ['explore-metrics', 'agentExploreMetricsBenchmark.spec.ts', 150_000],
+  ['log-incident', 'agentLogIncidentBenchmark.spec.ts', 240_000],
 ].map(([id, file, timeoutMs]) => ({ id, file, timeoutMs }));
 
 export function validateConfig(value) {

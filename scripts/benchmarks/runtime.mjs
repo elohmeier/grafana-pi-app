@@ -75,6 +75,31 @@ export async function prepareStack({
       run.environment.prepared = true;
     }
   }
+  if (prepare && cases.some((entry) => entry.suite === 'log-incident')) {
+    // Fresh logs ending now (Compose profile `logs`): the log-incident prompt asks about a
+    // recent incident, and a reused Prometheus history may be hours old.
+    log('[benchmark-setup] Seeding the Elasticsearch log fixture; progress is in prepare.log.');
+    const code = await command(
+      'docker',
+      [
+        'compose',
+        '--profile',
+        'logs',
+        'run',
+        '--rm',
+        '-e',
+        'LOGS_FORCE=1',
+        '-e',
+        'TIMELINE_FILE=',
+        'elasticsearch-seed',
+      ],
+      env,
+      path.join(directory, 'prepare.log')
+    );
+    if (code !== 0) {
+      throw new Error('Elasticsearch log fixture seeding failed; see prepare.log');
+    }
+  }
   const health = await fetch(`${grafanaUrl}/api/health`, { signal: AbortSignal.timeout(10_000) });
   if (!health.ok) {
     throw new Error(`Grafana health check failed: HTTP ${health.status}`);

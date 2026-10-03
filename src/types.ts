@@ -20,6 +20,24 @@ export type PiAppCustomSkill = {
   disableModelInvocation?: boolean;
 };
 
+/** Documents with one of `values` in the keyword field `field` are returned completely. */
+export type PiAppLogCondition = {
+  field?: string;
+  values?: string[];
+};
+
+/**
+ * An Elasticsearch datasource the assistant may use for structure, counts, and
+ * non-text fields of documents. Text fields are never returned, except for
+ * documents matching an `unrestricted` condition.
+ */
+export type PiAppLogDatasource = {
+  uid?: string;
+  /** Indices, data streams, aliases, or patterns; empty means the datasource's configured index. */
+  indices?: string[];
+  unrestricted?: PiAppLogCondition[];
+};
+
 export type PiAppAccessMode = 'all' | 'admins' | 'users' | 'rbac';
 export type PiAppOpenAIProtocol = 'auto' | 'chat-completions' | 'responses';
 export type PiAppThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -49,6 +67,8 @@ export type PiAppJsonData = {
   accessMode?: PiAppAccessMode;
   allowedUsers?: string[];
   allowedPrometheusDatasourceUids?: string[];
+  /** Elasticsearch datasources for `grafana-logs`; datasources that are not listed are denied. */
+  logDatasources?: PiAppLogDatasource[];
   // Legacy name kept for existing plugin settings.
   allowedDatasourceUids?: string[];
   systemPromptAddendum?: string;

@@ -10,6 +10,7 @@ The [conversational alerting design](docs/conversational-alerting.md) covers Mat
 
 - Runs one agent with a fixed tool set: `read`, `write`, `edit`, and `bash` over a per-chat session filesystem, with typed capabilities behind the shell commands.
 - Discovers Prometheus datasources, metric names, labels, and series, and runs PromQL through Grafana datasource APIs as the current user (`grafana-prom`), returning compact min/max/last/sample summaries.
+- Investigates Elasticsearch logs without reading their text (`grafana-logs`): field structure, counts with text search, time patterns, groups, and documents with their non-text fields. Documents matching admin-defined keyword conditions, such as deployment events, are returned completely.
 - Searches dashboards and loads them lazily into the session filesystem as local working copies (`/grafana/dashboards/<uid>/dashboard.json`), so `rg`, `jq`, `yq`, `python3`, and `edit` work on real dashboard JSON.
 - Extracts Prometheus metric usage from existing dashboards, including panel co-usage, labels, grouping labels, functions, and related metric neighborhoods.
 - Creates new dashboards from model-authored Jsonnet evaluated by the backend with the vendored Grafana libraries, and edits existing dashboards as JSON.
@@ -58,6 +59,7 @@ Configure the app plugin from Grafana's plugin settings page:
 
 - `systemPromptAddendum`: Optional central instructions appended to the built-in system prompt. Do not include secrets because this is stored in `jsonData`.
 - `allowedPrometheusDatasourceUids`: Optional list of Prometheus datasource UIDs the assistant may discover, query, and reference in dashboards it validates and saves. Leave empty to allow all Prometheus datasources visible to the current Grafana user.
+- `logDatasources`: Optional list of Elasticsearch datasources for `grafana-logs`, each with a datasource `uid`, `indices` (indices, data streams, aliases, or patterns; empty means the datasource's configured index), and `unrestricted` conditions (`field`, a keyword field, and `values`). The assistant sees field structure, counts, and documents without text fields; documents matching an unrestricted condition are returned completely. Datasources that are not listed are not available, and `grafana-dashboard screenshot` refuses panels that use them. See [restricted log access](docs/restricted-logs.md).
 - `customSkills`: Optional non-secret skill definitions stored in `jsonData`. Users activate explicit custom skills with `$skill-name`; admins can also configure keyword or regex activation.
 - `openAIAPIKey`: Secret API key stored in `secureJsonData`.
 
@@ -102,7 +104,8 @@ Each tool call or bash invocation is one transaction with path checks and a stor
 
 - `grafana search|fetch|refresh|open`: dashboard discovery, parallel loading (`grafana fetch UID...|--all|--folder UID|--query TEXT|-`), and opening a dashboard, Explore query, or Grafana path in the browser.
 - `grafana-prom datasources|metrics|labels|series|query`: Prometheus discovery and bounded query summaries. `query` accepts any number of `-e EXPR` in one call, substitutes dashboard variables given with `--var NAME=VALUE`, refuses expressions with unresolved `$variables`, and marks results without series.
-- `grafana-dashboard inspect|queries|fix|validate|data|add-panel|set-panel|label-filter|screenshot`: `queries` lists panel and variable queries of every dashboard (or the given files) as NDJSON with the jq path of each query text, filtered by `--metric`, `--match`, or `--ds`; dashboard summaries (panels with row path, layout, queries, legend, transformations, units and thresholds; variables with current values), explicit layout repair, validation (structure, PromQL syntax with the upstream Prometheus parser, datasource allow-list, and with `--server` a Grafana dry-run of the save), panel data checks that run a panel's queries and apply its transformations, units, and reducers, `add-panel` and `set-panel`, which add or change panels (title, queries, unit, type, position) with schema-correct JSON for classic and v2 files, move panels that are in the way down, copy a reference panel's visualization and datasource (`add-panel --like`), and convert queries of another datasource to PromQL (`set-panel --ds`), `label-filter`, which adds a variable-bound Prometheus label matcher to every selected query of a dashboard file (and optionally the query variable), and `screenshot`, which renders a dashboard or panel with the image renderer and attaches the image to the bash result.
+- `grafana-logs sources|fields|count|search`: Elasticsearch log datasources from the `logDatasources` policy. `count` counts documents matching a time range and Lucene query (`-q`, which may search message text), as a total, a time series (`--interval`), or groups (`--by`, any non-text aggregatable field); `search` prints documents as NDJSON (`_index`, `_id`, `_restricted`, and dotted field names) with their non-text fields, or completely when they match an unrestricted condition. Without `--index`, both search every configured index, and a query that matches nothing names fields the index does not have. Text fields, including keyword subfields of text fields, are never returned otherwise.
+- `grafana-dashboard inspect|queries|fix|validate|data|add-panel|set-panel|label-filter|screenshot`: `queries` lists panel and variable queries of every dashboard (or the given files) as NDJSON with the jq path of each query text, filtered by `--metric`, `--match`, or `--ds`; dashboard summaries (panels with row path, layout, queries, legend, transformations, units and thresholds; variables with current values), explicit layout repair, validation (structure, PromQL syntax with the upstream Prometheus parser, datasource allow-list, and with `--server` a Grafana dry-run of the save), panel data checks that run a panel's queries and apply its transformations, units, and reducers, `add-panel` and `set-panel`, which add or change panels (title, queries, unit, type, position) with schema-correct JSON for classic and v2 files, move panels that are in the way down, copy a reference panel's visualization and datasource (`add-panel --like`), and convert queries of another datasource to PromQL (`set-panel --ds`), `label-filter`, which adds a variable-bound Prometheus label matcher to every selected query of a dashboard file (and optionally the query variable), and `screenshot`, which renders a dashboard or panel with the image renderer and attaches the image to the bash result; it refuses panels whose datasources the assistant may not read, such as Elasticsearch logs.
 - `grafana-usage dashboard|search|related`: Prometheus metric usage derived from every visible dashboard (or those matching a title search or tag) (metrics, labels, grouping labels, functions, panel co-usage) and metrics related to seed metrics. `dashboard` reads the local working copy, so it sees unsaved edits.
 - `grafana-alert find|get|validate`: Grafana-managed alert rules found through `panelRef` and the `__dashboardUid__`/`__panelId__` annotations, with PromQL checks to run and the path of each rule's working copy; `validate` checks changed rule working copies (expression graph, durations, PromQL, contact point and time interval references, datasource allow-list, and changes Grafana would ignore).
 - `jsonnet [eval] FILE [-o OUT] [--resource UID]`, `jsonnet fix FILE`: Jsonnet evaluation and repair in the backend. The vendored libraries are files under `/lib/jsonnet`.
@@ -301,8 +304,16 @@ The generated files are `grafana-assistant-app-<version>.zip` and `grafana-assis
 The local Compose stack also seeds Prometheus with six hours of synthetic RED/USE, Thanos, and enterprise service metrics derived from the `agentic-observability` demo. The history has one sample per minute (`HISTORY_STEP_SECONDS=60`), and the provisioned Prometheus datasources set `timeInterval: 60s` to match, so `$__rate_interval` covers at least two samples; change both together. To include future overlap for short-window `now` queries during a manual demo, start the stack with `HISTORY_FUTURE_SECONDS=3600`; the default is `0` so live Grafana and plugin scrapes can be ingested immediately. To refresh the generated history after it ages out, remove the demo volumes before starting Grafana again:
 
 ```bash
-docker compose down -v
+docker compose --profile logs down -v
 ```
+
+For restricted log access work, the Compose profile `logs` adds a single-node Elasticsearch with synthetic ECS logs that follow the Prometheus demo incident, sentinel values in every text field, deployment events that may be read completely, and an audit stream that must stay denied. Grafana gets the `es-logs` and `es-audit` datasources from `provisioning/datasources/elasticsearch.yaml`:
+
+```bash
+mise run dev:logs
+```
+
+This starts Elasticsearch on port 9200 (`ELASTICSEARCH_PORT`), seeds it once, and checks the fixture through Grafana on port 3001 with `npm run dev:check:logs`. `mise run dev:logs:reseed` regenerates the logs for the current Prometheus history. See [restricted log access](docs/restricted-logs.md) for the design and the data set.
 
 For a full demo reset that also reseeds Prometheus history with one hour of future overlap for short-window `now` queries, run:
 
@@ -310,7 +321,7 @@ For a full demo reset that also reseeds Prometheus history with one hour of futu
 mise run dev:reload:variant:fresh
 ```
 
-This task deletes Compose volumes with `docker compose down -v --remove-orphans`, rebuilds/reloads the assistant variant, regenerates the Prometheus history, and then seeds the Grafana dashboard and alert samples.
+This task deletes Compose volumes, including the Elasticsearch log fixture, with `docker compose --profile logs down -v --remove-orphans`, rebuilds/reloads the assistant variant, regenerates the Prometheus history, and then seeds the Grafana dashboard and alert samples.
 
 For the default local LLM config, run an OpenAI-compatible llama-server on the host with [Ornith-1.5-35B-A3B](https://huggingface.co/ornith-ai/Ornith-1.5-35B-A3B), a Qwen3.5-MoE derivative tuned for agentic tool use. Use the model's adjusted chat template and the card's recommended sampling for general tasks:
 
@@ -432,5 +443,13 @@ npm run benchmark:explore-metrics
 ```
 
 This benchmark requires successful `grafana-prom metrics|labels|series` discovery and `grafana-prom query` evidence, no staged or applied dashboard changes, a bounded tool-call count, and an answer that names the expected metrics and labels. It writes reports to `test-results/explore-metrics-benchmark/latest-report.txt`, `latest-answer.md`, and `latest-events.json`.
+
+To benchmark log investigation with restricted Elasticsearch access, run:
+
+```bash
+npm run benchmark:log-incident
+```
+
+This benchmark reloads the sidebar-capable variant with the `logs` Compose profile fixture and asks the assistant why report downloads started failing. It requires a successful `grafana-logs count`, no writes, a bounded tool-call count, no restricted log text (fixture sentinels) anywhere in the captured events, and an answer that names the affected service, host, error type, the preceding 3.8.0 rollout, and an onset close to it. It writes reports to `test-results/log-incident-benchmark/latest-report.txt`, `latest-answer.md`, and `latest-events.json`. To run it against an already running stack, reseed the logs for the current time with `docker compose --profile logs run --rm -e LOGS_FORCE=1 -e TIMELINE_FILE= elasticsearch-seed` and run `RUN_AGENT_BENCHMARKS=1 E2E_PLUGIN_ID=grafana-assistant-app GRAFANA_URL=http://localhost:3001 npx playwright test tests/agentLogIncidentBenchmark.spec.ts`.
 
 Open Grafana at http://localhost:3000 and navigate to the Observability Analyst app page.

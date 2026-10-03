@@ -22,6 +22,7 @@ import { lastValueFrom } from 'rxjs';
 import type {
   PiAppAccessMode,
   PiAppCustomSkill,
+  PiAppLogDatasource,
   PiAppJsonData,
   PiAppModelConfig,
   PiAppOpenAIProtocol,
@@ -38,6 +39,7 @@ import {
   parseAllowedUsersInput,
 } from '../../utils/access';
 import { CustomSkillsEditor } from './CustomSkillsEditor';
+import { LogDatasourcesEditor, serializeLogDatasources } from './LogDatasourcesEditor';
 import {
   formatCustomSkillValidationIssues,
   serializeCustomSkills,
@@ -52,6 +54,7 @@ type State = {
   accessMode: PiAppAccessMode;
   allowedUsersText: string;
   allowedPrometheusDatasourceUids: string[];
+  logDatasources: PiAppLogDatasource[];
   systemPromptAddendum: string;
   customSkills: PiAppCustomSkill[];
 };
@@ -146,6 +149,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     allowedPrometheusDatasourceUids: Array.isArray(jsonData?.allowedPrometheusDatasourceUids)
       ? jsonData.allowedPrometheusDatasourceUids
       : [],
+    logDatasources: Array.isArray(jsonData?.logDatasources) ? jsonData.logDatasources : [],
     systemPromptAddendum: typeof jsonData?.systemPromptAddendum === 'string' ? jsonData.systemPromptAddendum : '',
     customSkills: Array.isArray(jsonData?.customSkills) ? jsonData.customSkills : [],
   });
@@ -277,6 +281,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         accessMode: state.accessMode,
         allowedUsers,
         allowedPrometheusDatasourceUids: state.allowedPrometheusDatasourceUids,
+        logDatasources: serializeLogDatasources(state.logDatasources),
         systemPromptAddendum: state.systemPromptAddendum.trim(),
         customSkills,
       },
@@ -510,6 +515,17 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
             onChange={onChangeAllowedDatasourceUids}
           />
         </Field>
+      </FieldSet>
+
+      <FieldSet label="Log datasources" className={s.marginTopXl}>
+        <p className={s.colorWeak}>
+          Elasticsearch datasources the assistant may use. It sees fields, counts, and documents without text fields
+          such as messages. Datasources that are not listed are not available to the assistant.
+        </p>
+        <LogDatasourcesEditor
+          value={state.logDatasources}
+          onChange={(logDatasources) => setState({ ...state, logDatasources })}
+        />
       </FieldSet>
 
       <FieldSet label="Custom skills" className={s.marginTopXl}>

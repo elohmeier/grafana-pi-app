@@ -12,6 +12,12 @@ export const workloadPrompts = {
     'Answer with exactly four short bullets: metric coverage, labels/values, useful PromQL, caveats.',
     'Do not create or modify dashboards.',
   ].join(' '),
+  'log-incident': [
+    'Users report that report downloads started failing recently.',
+    'Investigate with the application and access logs of the last 6 hours: when did the failures start, which service, host, and error types are affected, and did a change precede them?',
+    'Answer with exactly four short bullets: onset (UTC), affected scope, error types, preceding change.',
+    'Do not create or modify dashboards.',
+  ].join(' '),
 };
 
 export const followUpPrompt =
@@ -21,6 +27,8 @@ export const followUpPrompt =
 export const workloadBudgets = {
   analysis: { maxToolCalls: 16 },
   'explore-metrics': { maxToolCalls: 14 },
+  // One count per dimension (time, error type, host, version) plus the deployment lookup; loops exceed 40.
+  'log-incident': { maxToolCalls: 20 },
 };
 
 const LIVE_DASHBOARD_WRITE_TOOL =
