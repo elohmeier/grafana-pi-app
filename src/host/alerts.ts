@@ -83,8 +83,8 @@ export function formatAlertMessage(payload: GrafanaWebhook, kind: 'open' | 'upda
     .join(', ');
   const heading =
     kind === 'resolve'
-      ? `:white_check_mark: **Resolved: ${name}**`
-      : `:rotating_light: **${kind === 'update' ? 'Update: ' : ''}${name}** — ${firing.length} firing${resolved.length ? `, ${resolved.length} resolved` : ''}`;
+      ? `✅ **Resolved: ${name}**`
+      : `🚨 **${kind === 'update' ? 'Update: ' : ''}${name}** — ${firing.length} firing${resolved.length ? `, ${resolved.length} resolved` : ''}`;
   const lines = [heading + (scope ? ` (${scope})` : '')];
   const summary = payload.commonAnnotations?.summary ?? payload.commonAnnotations?.description;
   if (summary && kind !== 'resolve') {

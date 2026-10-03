@@ -619,7 +619,7 @@ bundles it for Node and aliases `@grafana/runtime` to
 with a service account token, so the workspace broker, domain code, and chat
 log client run unchanged. `AssistantHost` (`assistant.ts`) gives each thread its
 own chat, declines approvals, and adds a channel prompt to the system prompt
-addendum. `Responder` connects a `ChatChannel` (`mattermost.ts`) to it: Grafana
+addendum. `Responder` connects a `ChatChannel` (`mattermost.ts`, `webex.ts`; one responder per platform) to it: Grafana
 webhook notifications are posted before the model runs, one thread per firing
 episode, and mentions continue the thread's chat. The plugin backend stores
 service account chats in their own scope. Answers link to a shared copy of the

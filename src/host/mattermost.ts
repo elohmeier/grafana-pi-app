@@ -26,6 +26,7 @@ type MattermostOptions = {
 export class MattermostChannel implements ChatChannel {
   readonly name = 'mattermost';
   readonly maxMessageLength = 16000;
+  readonly markdownTables = true;
   private botId = '';
   private botName = '';
   private socket?: WebSocket;
@@ -104,7 +105,7 @@ export class MattermostChannel implements ChatChannel {
     await this.api('PUT', `/posts/${postId}/patch`, { message: text });
   }
 
-  async thread(threadId: string): Promise<ThreadPost[]> {
+  async thread(_channelId: string, threadId: string): Promise<ThreadPost[]> {
     const thread = await this.api<{ order: string[]; posts: Record<string, Post> }>('GET', `/posts/${threadId}/thread`);
     const posts = Object.values(thread.posts)
       .filter((post) => !post.type)

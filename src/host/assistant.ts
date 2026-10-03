@@ -81,11 +81,14 @@ export class AssistantHost {
       .catch(() => undefined)
       .then(() => this.limited(() => this.run(conversation, chat, text, onProgress, options.resume ?? false)));
     this.queues.set(conversation, run);
-    void run.finally(() => {
-      if (this.queues.get(conversation) === run) {
-        this.queues.delete(conversation);
-      }
-    });
+    // The caller handles a rejection; the cleanup must not raise it again.
+    void run
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.queues.get(conversation) === run) {
+          this.queues.delete(conversation);
+        }
+      });
     return run;
   }
 

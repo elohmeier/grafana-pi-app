@@ -12,6 +12,8 @@ await build({
     main: path.join(root, 'src/host/main.ts'),
     'shell.worker': path.join(root, 'src/host/shell.worker.ts'),
     'python.worker': path.join(root, 'src/host/python.worker.ts'),
+    // Local Webex API for development and tests (Compose profile `webex`).
+    'webex-fake': path.join(root, 'src/host/testing/webexFakeServer.ts'),
   },
   outdir: path.join(root, 'dist-host'),
   outExtension: { '.js': '.mjs' },

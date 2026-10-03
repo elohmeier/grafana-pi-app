@@ -38,7 +38,7 @@ export type ResponderOptions = {
   sharedChatUrl?: (token: string) => string;
 };
 
-const WORKING = ':hourglass_flowing_sand: Looking into it…';
+const WORKING = '⏳ Looking into it…';
 /** Updates of an episode within this time edit the previous update post. */
 const UPDATE_COALESCE_MS = 10 * 60_000;
 /** A new episode of an alert rule investigated within this time is not investigated again automatically. */
@@ -53,6 +53,11 @@ export class Responder {
   private alertQueues = new Map<string, Promise<unknown>>();
 
   constructor(private readonly options: ResponderOptions) {}
+
+  /** Whether this responder posts alert notifications (it has an alert channel). */
+  get handlesAlerts() {
+    return Boolean(this.options.alertChannelId);
+  }
 
   /** A message from the channel; answered when it is direct or mentions the bot in an allowed channel. */
   async handleMessage(message: ChannelMessage) {
@@ -75,7 +80,7 @@ export class Responder {
     // Thread posts since the last answer that did not mention the bot are context for this one.
     let context = '';
     if (message.threadId !== message.postId) {
-      const posts = await channel.thread(message.threadId).catch(() => []);
+      const posts = await channel.thread(message.channelId, message.threadId).catch(() => []);
       const since = record?.lastAnswerAt ?? 0;
       const earlier = posts.filter(
         (post) => !post.fromBot && post.createdAt > since && post.createdAt < message.createdAt && post.text.trim()
@@ -99,11 +104,14 @@ export class Responder {
     const previous = this.alertQueues.get(payload.groupKey) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(() => this.deliverAlert(payload));
     this.alertQueues.set(payload.groupKey, next);
-    void next.finally(() => {
-      if (this.alertQueues.get(payload.groupKey) === next) {
-        this.alertQueues.delete(payload.groupKey);
-      }
-    });
+    // The caller handles a rejection; the cleanup must not raise it again.
+    void next
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.alertQueues.get(payload.groupKey) === next) {
+          this.alertQueues.delete(payload.groupKey);
+        }
+      });
     return next;
   }
 
@@ -112,7 +120,9 @@ export class Responder {
     if (!alertChannelId) {
       throw new Error('no alert channel is configured');
     }
-    const delivery = decideDelivery(payload, store.episode(payload.groupKey));
+    // Each platform has its own threads for a notification group.
+    const episodeKey = `${channel.name}:${payload.groupKey}`;
+    const delivery = decideDelivery(payload, store.episode(episodeKey));
     this.options.metrics?.inc(
       'assistant_host_alert_notifications_total',
       'Grafana notifications received, by what they did.',
@@ -126,7 +136,7 @@ export class Responder {
     const now = Date.now();
     if (delivery.action === 'open') {
       const post = await channel.post(alertChannelId, formatAlertMessage(payload, 'open'));
-      await store.setEpisode(payload.groupKey, {
+      await store.setEpisode(episodeKey, {
         channelId: alertChannelId,
         threadId: post.id,
         status: 'firing',
@@ -136,7 +146,7 @@ export class Responder {
       });
       void this.postAlertPanels(payload, alertChannelId, post.id);
       const alertname = payload.commonLabels?.alertname ?? payload.groupLabels?.alertname ?? payload.groupKey;
-      const previous = store.lastAnalysis(alertname);
+      const previous = store.lastAnalysis(`${channel.name}:${alertname}`);
       if (previous !== undefined && now - previous < ANALYSIS_COALESCE_MS) {
         // During an alert storm, one investigation per alert rule; people can ask for more.
         await channel.post(
@@ -146,7 +156,7 @@ export class Responder {
         );
         return { action: 'open' as const, threadId: post.id };
       }
-      await store.setLastAnalysis(alertname, now);
+      await store.setLastAnalysis(`${channel.name}:${alertname}`, now);
       // The analysis follows in the thread; a model failure does not affect the notification.
       void this.answer(alertChannelId, post.id, analysisPrompt(payload)).catch((error) =>
         this.options.log?.(`alert analysis failed: ${message(error)}`)
@@ -173,7 +183,7 @@ export class Responder {
         update = { updatePostId: post.id, updatePostedAt: now };
       }
     }
-    await store.setEpisode(payload.groupKey, {
+    await store.setEpisode(episodeKey, {
       ...episode,
       ...update,
       status: delivery.action === 'resolve' ? 'resolved' : 'firing',
@@ -250,8 +260,8 @@ export class Responder {
       ...(result.chatId ? { chatStored: true, lastAnswerAt: Date.now() } : {}),
     });
     const answerText = result.error
-      ? `:warning: The assistant could not answer: ${result.error}${result.text ? `\n\n${result.text}` : ''}`
-      : result.text || ':warning: The assistant finished without an answer.';
+      ? `⚠️ The assistant could not answer: ${result.error}${result.text ? `\n\n${result.text}` : ''}`
+      : result.text || '⚠️ The assistant finished without an answer.';
     const link = result.chatId ? await this.chatLink(key, result) : '';
     const text = link ? `${answerText}\n\n${link}` : answerText;
     const [first, ...rest] = split(text, channel.maxMessageLength);
@@ -284,7 +294,7 @@ export class Responder {
       const url = sharedChatUrl(token);
       const staged = result.stagedChanges ?? 0;
       return staged > 0
-        ? `:pencil2: [Review and apply the ${staged === 1 ? 'staged change' : `${staged} staged changes`} in Grafana](${url})`
+        ? `✏️ [Review and apply the ${staged === 1 ? 'staged change' : `${staged} staged changes`} in Grafana](${url})`
         : `[Continue in Grafana](${url})`;
     } catch (error) {
       this.options.log?.(`sharing chat ${result.chatId} failed: ${message(error)}`);
@@ -312,7 +322,7 @@ export class Responder {
     }
     for (const item of evidence) {
       if (item.view !== 'image') {
-        for (const part of split(formatEvidence(item), channel.maxMessageLength)) {
+        for (const part of split(formatEvidence(item, channel.markdownTables), channel.maxMessageLength)) {
           await channel.post(channelId, part, threadId);
         }
       }
@@ -348,8 +358,11 @@ export function threadKey(platform: string, channelId: string, threadId: string)
 }
 
 /** Tables as Markdown tables, JSON and text as code blocks. */
-export function formatEvidence(item: Exclude<PresentedEvidence, { view: 'image' }>) {
+export function formatEvidence(item: Exclude<PresentedEvidence, { view: 'image' }>, markdownTables = true) {
   const title = `**${item.title}**`;
+  if (item.view === 'table' && Array.isArray(item.data) && !markdownTables) {
+    return `${title}\n\`\`\`\n${alignedTable(item.data as Array<Record<string, unknown>>)}\n\`\`\``;
+  }
   if (item.view === 'table' && Array.isArray(item.data)) {
     const rows = item.data as Array<Record<string, unknown>>;
     const columns = [...new Set(rows.flatMap((row) => Object.keys(row)))];
@@ -367,6 +380,28 @@ export function formatEvidence(item: Exclude<PresentedEvidence, { view: 'image' 
   }
   const body = item.view === 'text' ? String(item.data) : JSON.stringify(item.data, null, 2);
   return `${title}\n\`\`\`${item.view === 'json' ? 'json' : ''}\n${body}\n\`\`\``;
+}
+
+/** A table as fixed-width text, for platforms without Markdown tables. */
+function alignedTable(rows: Array<Record<string, unknown>>) {
+  const columns = [...new Set(rows.flatMap((row) => Object.keys(row)))];
+  const text = (value: unknown) =>
+    (value === null || value === undefined
+      ? ''
+      : typeof value === 'object'
+        ? JSON.stringify(value)
+        : String(value)
+    ).replace(/\n/g, ' ');
+  const cells = [columns, ...rows.map((row) => columns.map((column) => text(row[column])))];
+  const widths = columns.map((_, index) => Math.max(...cells.map((line) => line[index].length)));
+  return cells
+    .map((line) =>
+      line
+        .map((cell, index) => cell.padEnd(widths[index]))
+        .join('  ')
+        .trimEnd()
+    )
+    .join('\n');
 }
 
 function slug(text: string) {

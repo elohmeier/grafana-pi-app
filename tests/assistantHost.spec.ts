@@ -64,6 +64,52 @@ test.describe('assistant host', () => {
     const messages = Object.values(thread.posts as Record<string, { message: string }>).map((post) => post.message);
     expect(messages.filter((message) => message.includes(`Resolved: ${alertname}`))).toHaveLength(1);
   });
+
+  test('posts alert notifications to Webex rooms through the fake', async ({ request }) => {
+    const webhookToken = secret('alert-webhook-token');
+    const fake = (() => {
+      try {
+        return JSON.parse(readFileSync('work/host/webex-fake.json', 'utf8')) as {
+          url: string;
+          rooms: { alerts: string };
+        };
+      } catch {
+        return undefined;
+      }
+    })();
+    const health = await request.get(`${HOST_URL}/healthz`).catch(() => undefined);
+    const fakeUp = fake ? await request.get(`${fake.url}/_test/state`).catch(() => undefined) : undefined;
+    test.skip(
+      !health?.ok() || !webhookToken || !fakeUp?.ok(),
+      'needs the assistant host with Webex (mise run dev:webex)'
+    );
+
+    const alertname = `Webex E2E ${Date.now()}`;
+    const payload = (status: 'firing' | 'resolved') => ({
+      status,
+      groupKey: `{}:{alertname="${alertname}"}`,
+      groupLabels: { alertname },
+      commonLabels: { alertname },
+      alerts: [
+        { status, labels: { alertname }, annotations: {}, startsAt: new Date().toISOString(), fingerprint: 'webex-1' },
+      ],
+    });
+    const send = (body: unknown) =>
+      request.post(`${HOST_URL}/alerts/grafana`, { data: body, headers: { Authorization: `Bearer ${webhookToken}` } });
+    expect((await send(payload('firing'))).ok()).toBe(true);
+    expect((await (await send(payload('resolved'))).json()).action).toBe('resolve');
+
+    const messages = (await (await request.get(`${fake!.url}/_test/rooms/${fake!.rooms.alerts}/messages`)).json())
+      .items as Array<{
+      id: string;
+      parentId?: string;
+      markdown?: string;
+    }>;
+    const root = messages.find((message) => !message.parentId && message.markdown?.includes(alertname));
+    expect(root).toBeDefined();
+    const replies = messages.filter((message) => message.parentId === root!.id).map((message) => message.markdown);
+    expect(replies.filter((text) => text?.includes(`Resolved: ${alertname}`))).toHaveLength(1);
+  });
 });
 
 async function mattermostSession(request: APIRequestContext) {

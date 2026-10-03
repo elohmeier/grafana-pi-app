@@ -70,6 +70,15 @@ run = [
   "docker compose --profile mattermost up -d --force-recreate assistant-host",
 ]
 
+[tasks."dev:webex"]
+description = "Start the Webex fake (Compose profile `webex`), create its bot, people, and rooms, and connect the assistant host to it next to Mattermost."
+run = [
+  "npm run build:host",
+  "docker compose --profile webex up -d --force-recreate webex-fake",
+  "node scripts/setup-dev-webex.mjs",
+  "HOST_WEBEX=1 docker compose --profile mattermost --profile webex up -d --force-recreate assistant-host",
+]
+
 [tasks."dev:sql"]
 description = "Start and seed the MSSQL restricted-SQL fixture (Compose profile `sql`)."
 run = ["docker compose --profile sql run --rm mssql-seed"]

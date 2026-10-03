@@ -282,6 +282,12 @@ services:
       MATTERMOST_CHANNELS: ops/town-square
       ALERT_WEBHOOK_TOKEN_FILE: /repo/work/host/alert-webhook-token
       HOST_DATA_DIR: /data
+      # Webex through the local fake (profile `webex`): `mise run dev:webex` sets HOST_WEBEX.
+      WEBEX_TOKEN_FILE: ${HOST_WEBEX:+/repo/work/host/webex-token}
+      WEBEX_API_URL: http://webex-fake:8099/v1
+      WEBEX_WEBHOOK_URL: http://assistant-host:8080/webex/webhook
+      WEBEX_ALERT_ROOM: Alerts
+      WEBEX_ROOMS: Ops
     ports:
       - '${ASSISTANT_HOST_PORT:-8080}:8080'
     volumes:
@@ -289,6 +295,18 @@ services:
       - assistant-host-data:/data
     depends_on:
       - mattermost
+
+  # In-memory Webex API (profile `webex`) for the assistant host's Webex adapter.
+  webex-fake:
+    profiles:
+      - webex
+    image: node:24-slim
+    working_dir: /repo
+    command: ['node', '--enable-source-maps', 'dist-host/webex-fake.mjs']
+    ports:
+      - '${WEBEX_FAKE_PORT:-8099}:8099'
+    volumes:
+      - .:/repo:ro
 
   renderer:
     image: grafana/grafana-image-renderer:${GRAFANA_IMAGE_RENDERER_VERSION:-latest}

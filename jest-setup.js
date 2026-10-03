@@ -1,5 +1,8 @@
-// Jest setup provided by Grafana scaffolding
-import './.config/jest-setup';
+// Jest setup provided by Grafana scaffolding. It patches DOM classes, so it applies to jsdom tests only;
+// tests of the Node assistant host (src/host) run with `@jest-environment node`.
+if (typeof window !== 'undefined') {
+  require('./.config/jest-setup');
+}
 
 // jsdom does not expose structuredClone, which Pi Durable uses to detach records. The clone must be
 // created in this realm: Chord rejects objects whose prototype is another realm's Object.prototype.

@@ -33,7 +33,9 @@ export interface ChatChannel {
   /** Posts files (images) with a message. */
   postFiles(channelId: string, text: string, files: ChannelFile[], threadId?: string): Promise<{ id: string }>;
   /** Posts of a thread, oldest first. */
-  thread(threadId: string): Promise<ThreadPost[]>;
+  thread(channelId: string, threadId: string): Promise<ThreadPost[]>;
+  /** Whether Markdown tables render; otherwise tables are posted as aligned text. */
+  readonly markdownTables: boolean;
   typing?(channelId: string, threadId?: string): Promise<void>;
   /** The longest message the platform accepts. */
   readonly maxMessageLength: number;

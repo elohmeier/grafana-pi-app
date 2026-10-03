@@ -32,8 +32,9 @@ function notification(status: 'firing' | 'resolved', alerts: GrafanaWebhookAlert
 }
 
 class FakeChannel implements ChatChannel {
-  readonly name = 'fake';
+  name = 'fake';
   readonly maxMessageLength = 100;
+  readonly markdownTables = true;
   posts: Array<{ id: string; channelId: string; text: string; threadId?: string; files?: string[] }> = [];
   threadPosts: ThreadPost[] = [];
   async start() {}
@@ -128,7 +129,7 @@ describe('alert delivery', () => {
   it('formats a message with labels, values, and links', () => {
     expect(formatAlertMessage(notification('firing', [alert('a')]), 'open')).toBe(
       [
-        ':rotating_light: **High 5xx** — 1 firing',
+        '🚨 **High 5xx** — 1 firing',
         'Too many errors',
         '- instance=a, severity=critical — A=0.1235 since 2026-10-03 09:18:00Z · [dashboard](http://grafana/d/web) · [rule](http://grafana/alerting/grafana/rule-1/view) · [silence](http://grafana/alerting/silence/new)',
       ].join('\n')
@@ -162,7 +163,7 @@ describe('alert delivery', () => {
     await settle();
     expect(channel.posts.map((post) => post.text)).toEqual([
       expect.stringContaining('High 5xx'),
-      ':warning: The assistant could not answer: model server down',
+      '⚠️ The assistant could not answer: model server down',
     ]);
   });
 });
@@ -329,14 +330,8 @@ describe('continuing in Grafana', () => {
     expect(channel.posts[0].text).toBe('Done.\n\n[Continue in Grafana](http://grafana/a/app/chat?share=tok)');
     staged = 2;
     await responder.handleMessage(message({ postId: 'reply', createdAt: 5000 }));
-    // The fake channel splits posts at 100 characters.
-    expect(
-      channel.posts
-        .slice(-2)
-        .map((post) => post.text)
-        .join('')
-    ).toBe(
-      'Done.\n\n:pencil2: [Review and apply the 2 staged changes in Grafana](http://grafana/a/app/chat?share=tok)'
+    expect(channel.posts.at(-1)?.text).toBe(
+      'Done.\n\n✏️ [Review and apply the 2 staged changes in Grafana](http://grafana/a/app/chat?share=tok)'
     );
     expect(shares).toHaveLength(1);
   });
@@ -368,5 +363,42 @@ describe('operations', () => {
     expect(metrics.render()).toContain('assistant_host_alert_notifications_total{action="skip"} 1');
     expect(metrics.render()).toContain('assistant_host_runs_total{outcome="answered"} 1');
     expect(metrics.render()).toContain('assistant_host_runs_waiting 3');
+  });
+});
+
+describe('several platforms', () => {
+  it('keeps threads per platform and survives a failed delivery', async () => {
+    const store = new HostStore();
+    const assistant: Assistant = { ask: async (_c, chat) => ({ chatId: chat.id, text: 'ok', toolCalls: 0 }) };
+    const first = new FakeChannel();
+    const second = Object.assign(new FakeChannel(), { name: 'other' });
+    const one = new Responder({
+      channel: first,
+      assistant,
+      store,
+      alertChannelId: 'a',
+      channelIds: [],
+      allowDirect: true,
+    });
+    const two = new Responder({
+      channel: second,
+      assistant,
+      store,
+      alertChannelId: 'b',
+      channelIds: [],
+      allowDirect: true,
+    });
+    await one.handleAlert(notification('firing', [alert('a')]));
+    expect((await two.handleAlert(notification('firing', [alert('a')]))).action).toBe('open');
+    await settle();
+    // Both platforms investigate their thread.
+    expect(first.posts.some((post) => post.text === 'ok')).toBe(true);
+    expect(second.posts.some((post) => post.text === 'ok')).toBe(true);
+
+    second.post = async () => {
+      throw new Error('platform down');
+    };
+    await expect(two.handleAlert(notification('resolved', [alert('a', 'resolved')]))).rejects.toThrow('platform down');
+    expect((await one.handleAlert(notification('resolved', [alert('a', 'resolved')]))).action).toBe('resolve');
   });
 });

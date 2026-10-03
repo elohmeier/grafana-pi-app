@@ -180,7 +180,6 @@ npx playwright test tests/assistantHost.spec.ts --project=chromium --no-deps
 
 ## Limits and next steps
 
-- **Webex:** a second `ChatChannel` (`src/host/channel.ts`) implementation.
 - **Silences** from a thread, as reviewed changes with actor-bound approval.
 - The host keeps its state in one JSON file and runs as a single instance.
 - Links in notifications come from Grafana's `root_url`. The local variant sets
