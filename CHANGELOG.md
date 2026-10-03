@@ -1,3 +1,9 @@
+## [6.1.0](https://github.com/elohmeier/grafana-pi-app/compare/v6.0.0...v6.1.0) (2026-10-03)
+
+### Features
+
+* restricted Elasticsearch log access with grafana-logs ([c8ec4fa](https://github.com/elohmeier/grafana-pi-app/commit/c8ec4fa207ba41f5bdfdbaa098be53202231377d))
+
 ## [6.0.0](https://github.com/elohmeier/grafana-pi-app/compare/v5.0.1...v6.0.0) (2026-10-03)
 
 ### ⚠ BREAKING CHANGES
