@@ -13,6 +13,7 @@ Use this skill when the user asks to investigate, diagnose, explain why somethin
 2. Create `/session/report.md` early with `write`, with a `# title` line, the initial scope, and open hypotheses. The user sees this file next to the chat.
 3. Gather evidence with metric discovery and PromQL validation in bash (`grafana-prom metrics`, `grafana-prom series`, `grafana-prom query --from ...`). Batch related queries in one bash call, and keep raw notes in /session/findings.md.
    When log datasources are configured (`grafana-logs sources`), use logs as counts next to metrics: `grafana-logs count -q 'log.level:ERROR' --interval 5m` for the time pattern, `--by error.type` or `--by host.name` for the affected scope, and `grafana-logs search` for individual events (without message text). Look for unrestricted events, such as deployments, that precede a change.
+   When SQL datasources are configured (`grafana-sql sources`), use tables such as incidents or changes the same way: `grafana-sql count TABLE --time COL --since 6h --interval 15m --by COL` for onset and scope, and `grafana-sql rows` for individual records (visible columns only).
 4. Update the report after each material finding. Add evidence only when it came from a tool result or user-provided context.
 5. Keep hypotheses separate from evidence. Move invalidated ideas to ruled-out causes.
 6. End with current finding, confidence, remaining gaps, and next checks or remediation.

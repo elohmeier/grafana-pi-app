@@ -37,36 +37,18 @@ describes the current implementation. The original architecture review
   reloads continue interrupted answers, background compaction, takeover between
   tabs.
 - **6.1 (unreleased):** restricted Elasticsearch log access (`grafana-logs`)
-  with the screenshot guard and the Compose profile `logs`.
+  with the screenshot guard and the Compose profile `logs`; restricted MSSQL
+  access (`grafana-sql`): string columns are returned only when the admin lists
+  them, with the Compose profile `sql` (see [restricted SQL
+  access](docs/restricted-sql.md)).
 
 ## Next
 
-### 1. Restricted MSSQL access (`grafana-sql`)
-
-The Elasticsearch design applied to MSSQL, kept minimal:
-
-- A `sqlDatasources` policy in `jsonData` next to `logDatasources`: datasource
-  UID and the tables the assistant may use. Unlisted datasources are denied.
-- A frontend command, `grafana-sql tables|schema|count|rows`, that builds every
-  query itself and runs it through `/api/ds/query` as the current user. The
-  model supplies only values (table, column, filter values, time range,
-  grouping column), checked against the schema read from `INFORMATION_SCHEMA`.
-  No raw SQL from the model. Identifiers and literals are quoted by the command,
-  because the datasource has no bind parameters.
-- String columns (`char`, `varchar`, `nchar`, `nvarchar`, `text`, `ntext`,
-  `xml`, binary types) are sensitive unless the admin lists them as visible per
-  table; numeric, date, bit, and `uniqueidentifier` columns are visible. This
-  replaces Elasticsearch's text/keyword rule.
-- The screenshot guard refuses panels that use restricted MSSQL datasources.
-- A Compose profile with an MSSQL container and seeded fixture data, with
-  sentinel values in sensitive columns; an e2e test and a benchmark like
-  `benchmark:log-incident` check that no sentinel reaches the captured events.
-
-### 2. Mattermost
+### Mattermost
 
 Incident conversations in Mattermost, following the
 [conversational alerting design](docs/conversational-alerting.md) but kept as
-small as the restricted access work. Mattermost runs in Docker for development
+small as the restricted data access. Mattermost runs in Docker for development
 and evaluation.
 
 - A Node host service that runs `AssistantSession` with a server `SessionHost`

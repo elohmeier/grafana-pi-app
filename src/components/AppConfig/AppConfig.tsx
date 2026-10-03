@@ -23,6 +23,7 @@ import type {
   PiAppAccessMode,
   PiAppCustomSkill,
   PiAppLogDatasource,
+  PiAppSqlDatasource,
   PiAppJsonData,
   PiAppModelConfig,
   PiAppOpenAIProtocol,
@@ -40,6 +41,7 @@ import {
 } from '../../utils/access';
 import { CustomSkillsEditor } from './CustomSkillsEditor';
 import { LogDatasourcesEditor, serializeLogDatasources } from './LogDatasourcesEditor';
+import { SqlDatasourcesEditor, serializeSqlDatasources } from './SqlDatasourcesEditor';
 import {
   formatCustomSkillValidationIssues,
   serializeCustomSkills,
@@ -55,6 +57,7 @@ type State = {
   allowedUsersText: string;
   allowedPrometheusDatasourceUids: string[];
   logDatasources: PiAppLogDatasource[];
+  sqlDatasources: PiAppSqlDatasource[];
   systemPromptAddendum: string;
   customSkills: PiAppCustomSkill[];
 };
@@ -150,6 +153,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
       ? jsonData.allowedPrometheusDatasourceUids
       : [],
     logDatasources: Array.isArray(jsonData?.logDatasources) ? jsonData.logDatasources : [],
+    sqlDatasources: Array.isArray(jsonData?.sqlDatasources) ? jsonData.sqlDatasources : [],
     systemPromptAddendum: typeof jsonData?.systemPromptAddendum === 'string' ? jsonData.systemPromptAddendum : '',
     customSkills: Array.isArray(jsonData?.customSkills) ? jsonData.customSkills : [],
   });
@@ -282,6 +286,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         allowedUsers,
         allowedPrometheusDatasourceUids: state.allowedPrometheusDatasourceUids,
         logDatasources: serializeLogDatasources(state.logDatasources),
+        sqlDatasources: serializeSqlDatasources(state.sqlDatasources),
         systemPromptAddendum: state.systemPromptAddendum.trim(),
         customSkills,
       },
@@ -525,6 +530,18 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         <LogDatasourcesEditor
           value={state.logDatasources}
           onChange={(logDatasources) => setState({ ...state, logDatasources })}
+        />
+      </FieldSet>
+
+      <FieldSet label="SQL datasources" className={s.marginTopXl}>
+        <p className={s.colorWeak}>
+          Microsoft SQL Server datasources the assistant may use. It sees the schema, counts, and rows without string
+          columns, except the string columns listed as visible. Datasources that are not listed are not available to the
+          assistant.
+        </p>
+        <SqlDatasourcesEditor
+          value={state.sqlDatasources}
+          onChange={(sqlDatasources) => setState({ ...state, sqlDatasources })}
         />
       </FieldSet>
 

@@ -43,7 +43,7 @@ run = [
 [tasks."dev:reload:variant:fresh"]
 description = "Reset Compose volumes, reseed Prometheus history, reload the sidebar variant, and seed samples."
 run = [
-  "docker compose --profile logs down -v --remove-orphans",
+  "docker compose --profile logs --profile sql down -v --remove-orphans",
   "HISTORY_FUTURE_SECONDS=${HISTORY_FUTURE_SECONDS:-3600} mise run dev:reload:variant:seed",
 ]
 
@@ -60,6 +60,14 @@ run = [
   "docker compose --profile logs run --rm elasticsearch-seed",
   "npm run dev:check:logs",
 ]
+
+[tasks."dev:sql"]
+description = "Start and seed the MSSQL restricted-SQL fixture (Compose profile `sql`)."
+run = ["docker compose --profile sql run --rm mssql-seed"]
+
+[tasks."dev:sql:reseed"]
+description = "Delete and regenerate the MSSQL fixture, aligned with the current Prometheus history."
+run = ["docker compose --profile sql run --rm -e SQL_FORCE=1 mssql-seed"]
 
 [tasks."dev:logs:reseed"]
 description = "Delete and regenerate the Elasticsearch log fixture, aligned with the current Prometheus history."

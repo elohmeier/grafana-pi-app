@@ -169,7 +169,7 @@ function documentLine(document: LogDocument) {
 }
 
 /** JSON with top-level fields on their own lines and each array item (a bucket or group) on one line. */
-function compactJson(value: Record<string, unknown>) {
+export function compactJson(value: Record<string, unknown>) {
   const lines = Object.entries(value).map(([key, item]) => {
     const name = JSON.stringify(key);
     if (Array.isArray(item) && item.length > 0) {

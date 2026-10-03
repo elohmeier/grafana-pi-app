@@ -414,29 +414,32 @@ Workspace commands are declared in `workspace/commands/commands.ts` and
 declared effect (`local-read`, `local-stage`, `remote-read`, `remote-write`).
 The system prompt lists them from the same registry.
 
-| Command                                             | Purpose                                                                                                                                                                                                 |
-| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `grafana search [QUERY] [--tag] [--folder]`         | Bounded remote dashboard search that reports coverage.                                                                                                                                                  |
-| `grafana fetch UID...`, `grafana refresh [UID...]`  | Hydrate dashboards into working copies, or re-fetch their base.                                                                                                                                         |
-| `grafana-prom datasources`                          | Allowed Prometheus datasources.                                                                                                                                                                         |
-| `grafana-prom metrics\|labels\|series`              | Metric names, label names or values, and series label sets.                                                                                                                                             |
-| `grafana-prom query EXPR \| -e EXPR... [--range]`   | Instant or range PromQL with compact summaries; several `-e` expressions run in one call. Results are also stored as artifacts.                                                                         |
-| `grafana-logs sources\|fields`                      | Log datasources from the policy; fields of an index and which are visible (non-text).                                                                                                                   |
-| `grafana-logs count [-q Q] [--by F] [--interval I]` | Elasticsearch document counts, time series, and groups on visible fields, with exactness and shard coverage.                                                                                            |
-| `grafana-logs search [-q Q] [--limit N]`            | Documents as NDJSON: visible fields only, or complete when they match an unrestricted condition.                                                                                                        |
-| `grafana-dashboard inspect PATH`                    | Panels, queries, variables, and datasources of a dashboard file.                                                                                                                                        |
-| `grafana-dashboard fix PATH`                        | Explicit classic layout repair (panel IDs, `gridPos`, overlaps), reviewable with `workspace diff`.                                                                                                      |
-| `grafana-dashboard validate PATH... [--server]`     | JSON, envelope, structure, PromQL syntax (upstream parser), and allow-list checks; `--server` dry-runs the save in Grafana.                                                                             |
-| `grafana-dashboard data PATH [--panel ID]...`       | Runs panel queries as the user and applies transformations, overrides, units, and reducers; bounded per-panel status and rows.                                                                          |
-| `jsonnet [eval] FILE [-o OUT] [--resource UID]`     | Evaluate workspace Jsonnet in the backend. `--resource` wraps the result in a dashboard resource envelope.                                                                                              |
-| `jsonnet fix FILE`                                  | Structural Grafonnet repair in place. The vendored libraries are read-only files under `/lib/jsonnet/<import path>`.                                                                                    |
-| `workspace status\|diff\|discard`                   | Staged resource changes, usage, and limits.                                                                                                                                                             |
-| `workspace apply\|receipts`                         | Validate, approve, apply changes, and inspect receipts (see [Dashboard Changes](#dashboard-changes-direct-apply)).                                                                                      |
-| `grafana open dashboard UID\|explore EXPR\|/PATH`   | Open a dashboard, a Prometheus Explore query, or a Grafana-relative path in the browser.                                                                                                                |
-| `grafana-dashboard screenshot UID\|PATH`            | Render the saved dashboard or one panel with the image renderer; the image is attached to the bash result. Refused for panels of datasources other than allowed Prometheus, expressions, and test data. |
-| `grafana-dashboard add-panel\|set-panel PATH`       | Typed panel edits on any dashboard file (working copy or live): title, queries by refId, unit, type, position; classic and v2.                                                                          |
-| `grafana-usage dashboard\|search\|related`          | Dashboard-derived Prometheus metric usage and related metrics (see [Metrics](#metrics-and-prometheus)).                                                                                                 |
-| `grafana-alert find\|get\|validate`                 | Alert rules linked to a panel with PromQL checks, and validation of rule working copies (see [Alert Rules](#alert-rules)).                                                                              |
+| Command                                                 | Purpose                                                                                                                                                                                                 |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `grafana search [QUERY] [--tag] [--folder]`             | Bounded remote dashboard search that reports coverage.                                                                                                                                                  |
+| `grafana fetch UID...`, `grafana refresh [UID...]`      | Hydrate dashboards into working copies, or re-fetch their base.                                                                                                                                         |
+| `grafana-prom datasources`                              | Allowed Prometheus datasources.                                                                                                                                                                         |
+| `grafana-prom metrics\|labels\|series`                  | Metric names, label names or values, and series label sets.                                                                                                                                             |
+| `grafana-prom query EXPR \| -e EXPR... [--range]`       | Instant or range PromQL with compact summaries; several `-e` expressions run in one call. Results are also stored as artifacts.                                                                         |
+| `grafana-logs sources\|fields`                          | Log datasources from the policy; fields of an index and which are visible (non-text).                                                                                                                   |
+| `grafana-logs count [-q Q] [--by F] [--interval I]`     | Elasticsearch document counts, time series, and groups on visible fields, with exactness and shard coverage.                                                                                            |
+| `grafana-logs search [-q Q] [--limit N]`                | Documents as NDJSON: visible fields only, or complete when they match an unrestricted condition.                                                                                                        |
+| `grafana-sql sources\|tables\|columns`                  | SQL datasources and tables from the policy; columns of a table and which are visible.                                                                                                                   |
+| `grafana-sql count TABLE [--where] [--by] [--interval]` | MSSQL row counts, time buckets, and groups on visible columns, filtered by any column.                                                                                                                  |
+| `grafana-sql rows TABLE [--where] [--limit N]`          | Rows as NDJSON with visible columns only.                                                                                                                                                               |
+| `grafana-dashboard inspect PATH`                        | Panels, queries, variables, and datasources of a dashboard file.                                                                                                                                        |
+| `grafana-dashboard fix PATH`                            | Explicit classic layout repair (panel IDs, `gridPos`, overlaps), reviewable with `workspace diff`.                                                                                                      |
+| `grafana-dashboard validate PATH... [--server]`         | JSON, envelope, structure, PromQL syntax (upstream parser), and allow-list checks; `--server` dry-runs the save in Grafana.                                                                             |
+| `grafana-dashboard data PATH [--panel ID]...`           | Runs panel queries as the user and applies transformations, overrides, units, and reducers; bounded per-panel status and rows.                                                                          |
+| `jsonnet [eval] FILE [-o OUT] [--resource UID]`         | Evaluate workspace Jsonnet in the backend. `--resource` wraps the result in a dashboard resource envelope.                                                                                              |
+| `jsonnet fix FILE`                                      | Structural Grafonnet repair in place. The vendored libraries are read-only files under `/lib/jsonnet/<import path>`.                                                                                    |
+| `workspace status\|diff\|discard`                       | Staged resource changes, usage, and limits.                                                                                                                                                             |
+| `workspace apply\|receipts`                             | Validate, approve, apply changes, and inspect receipts (see [Dashboard Changes](#dashboard-changes-direct-apply)).                                                                                      |
+| `grafana open dashboard UID\|explore EXPR\|/PATH`       | Open a dashboard, a Prometheus Explore query, or a Grafana-relative path in the browser.                                                                                                                |
+| `grafana-dashboard screenshot UID\|PATH`                | Render the saved dashboard or one panel with the image renderer; the image is attached to the bash result. Refused for panels of datasources other than allowed Prometheus, expressions, and test data. |
+| `grafana-dashboard add-panel\|set-panel PATH`           | Typed panel edits on any dashboard file (working copy or live): title, queries by refId, unit, type, position; classic and v2.                                                                          |
+| `grafana-usage dashboard\|search\|related`              | Dashboard-derived Prometheus metric usage and related metrics (see [Metrics](#metrics-and-prometheus)).                                                                                                 |
+| `grafana-alert find\|get\|validate`                     | Alert rules linked to a panel with PromQL checks, and validation of rule working copies (see [Alert Rules](#alert-rules)).                                                                              |
 
 Commands reach Grafana through the `WorkspaceBroker` in
 `workspace/grafanaBroker.ts`: dashboards through `getBackendSrv()` and the
@@ -569,6 +572,17 @@ which a second search in the same `_msearch` returns completely. A keyword
 subfield of a text field counts as text. `grafana-dashboard screenshot`
 refuses panels whose datasources the assistant may not read
 (`workspace/screenshotGuard.ts`). See [restricted log access](docs/restricted-logs.md).
+
+## SQL And Microsoft SQL Server
+
+SQL access is the `grafana-sql` command (`workspace/commands/sql.ts`), backed by
+`workspace/sql.ts`. It runs queries it builds itself through `/api/ds/query` as
+the current Grafana user, only for the datasources and tables in
+`jsonData.sqlDatasources`. String and binary columns hold the sensitive
+content: they are never selected unless the admin lists a string column as
+visible, but every column can be filtered on. Names are checked against
+`INFORMATION_SCHEMA` and bracketed; values are checked against the column type
+and written as `N'...'` literals. See [restricted SQL access](docs/restricted-sql.md).
 
 Dashboard-derived metric context is in
 `src/pages/Chat/domain/dashboardMetricContext.ts`, exposed as `grafana-usage`:

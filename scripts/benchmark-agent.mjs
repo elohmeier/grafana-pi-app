@@ -53,9 +53,9 @@ installCleanupHandlers();
 
 try {
   log('Resetting Docker Compose demo volumes.');
-  // The `logs` profile includes the log seeder, which mounts the Prometheus volume; without the
-  // profile, its stopped container keeps that volume from being removed.
-  await runCommand('docker', ['compose', '--profile', 'logs', 'down', '-v', '--remove-orphans']);
+  // The `logs` and `sql` profiles include seeders, which mount the Prometheus volume; without the
+  // profiles, their stopped containers keep that volume from being removed.
+  await runCommand('docker', ['compose', '--profile', 'logs', '--profile', 'sql', 'down', '-v', '--remove-orphans']);
 
   log(`Rebuilding plugin artifacts and starting the local stack with mise run ${BENCH_DEV_RELOAD_TASK}.`);
   await runCommand('mise', ['run', BENCH_DEV_RELOAD_TASK], {

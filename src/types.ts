@@ -38,6 +38,19 @@ export type PiAppLogDatasource = {
   unrestricted?: PiAppLogCondition[];
 };
 
+/**
+ * A Microsoft SQL Server datasource the assistant may use for schema, counts,
+ * and visible columns of rows. Numeric, date/time, bit, and uniqueidentifier
+ * columns are visible; string and binary columns only when listed.
+ */
+export type PiAppSqlDatasource = {
+  uid?: string;
+  /** `schema.table` or `table`; empty means every table and view of the database. */
+  tables?: string[];
+  /** String columns that may be returned, as `schema.table.column` or `table.column`. */
+  visibleColumns?: string[];
+};
+
 export type PiAppAccessMode = 'all' | 'admins' | 'users' | 'rbac';
 export type PiAppOpenAIProtocol = 'auto' | 'chat-completions' | 'responses';
 export type PiAppThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -69,6 +82,8 @@ export type PiAppJsonData = {
   allowedPrometheusDatasourceUids?: string[];
   /** Elasticsearch datasources for `grafana-logs`; datasources that are not listed are denied. */
   logDatasources?: PiAppLogDatasource[];
+  /** MSSQL datasources for `grafana-sql`; datasources that are not listed are denied. */
+  sqlDatasources?: PiAppSqlDatasource[];
   // Legacy name kept for existing plugin settings.
   allowedDatasourceUids?: string[];
   systemPromptAddendum?: string;

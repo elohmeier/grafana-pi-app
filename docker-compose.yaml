@@ -89,6 +89,8 @@ services:
       PI_PROMETHEUS_URL: ${PI_PROMETHEUS_URL:-http://prometheus:9090}
       PI_ELASTICSEARCH_URL: ${PI_ELASTICSEARCH_URL:-http://elasticsearch:9200}
       PI_ELASTICSEARCH_PASSWORD: ${PI_ELASTICSEARCH_PASSWORD:-grafana-dev}
+      PI_MSSQL_URL: ${PI_MSSQL_URL:-mssql:1433}
+      PI_MSSQL_PASSWORD: ${PI_MSSQL_PASSWORD:-Grafana-dev1}
 
   grafana-assistant-variant:
     profiles:
@@ -144,6 +146,8 @@ services:
       PI_PROMETHEUS_URL: ${PI_PROMETHEUS_URL:-http://prometheus:9090}
       PI_ELASTICSEARCH_URL: ${PI_ELASTICSEARCH_URL:-http://elasticsearch:9200}
       PI_ELASTICSEARCH_PASSWORD: ${PI_ELASTICSEARCH_PASSWORD:-grafana-dev}
+      PI_MSSQL_URL: ${PI_MSSQL_URL:-mssql:1433}
+      PI_MSSQL_PASSWORD: ${PI_MSSQL_PASSWORD:-Grafana-dev1}
 
   # Restricted log access fixture (profile `logs`): synthetic ECS logs aligned
   # with the Prometheus demo incident. See docs/restricted-logs.md.
@@ -198,6 +202,52 @@ services:
       prometheus-init:
         condition: service_completed_successfully
 
+  # Restricted SQL access fixture (profile `sql`): an ITSM database whose
+  # incidents and changes follow the Prometheus demo incident. See
+  # docs/restricted-sql.md. The image is amd64 only (Rosetta on Apple silicon).
+  mssql:
+    profiles:
+      - sql
+    image: mcr.microsoft.com/mssql/server:${MSSQL_VERSION:-2022-latest}
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: 'Y'
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-Mssql-dev1!}
+    ports:
+      - '${MSSQL_PORT:-1433}:1433'
+    volumes:
+      - mssql-data:/var/opt/mssql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -Q 'SELECT 1' -b >/dev/null
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 20s
+
+  mssql-seed:
+    profiles:
+      - sql
+    image: mcr.microsoft.com/mssql/server:${MSSQL_VERSION:-2022-latest}
+    platform: linux/amd64
+    entrypoint: ['/repo/demo/mssql/seed.sh']
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD:-Mssql-dev1!}
+      GRAFANA_MSSQL_PASSWORD: ${PI_MSSQL_PASSWORD:-Grafana-dev1}
+      TIMELINE_FILE: /prometheus-history/demo-timeline.json
+      INCIDENT_DURATION_SECONDS: '${INCIDENT_DURATION_SECONDS:-900}'
+      SQL_FORCE: '${SQL_FORCE:-0}'
+    volumes:
+      - .:/repo:ro
+      - prometheus-data:/prometheus-history:ro
+    depends_on:
+      mssql:
+        condition: service_healthy
+      prometheus-init:
+        condition: service_completed_successfully
+
   renderer:
     image: grafana/grafana-image-renderer:${GRAFANA_IMAGE_RENDERER_VERSION:-latest}
     environment:
@@ -207,3 +257,4 @@ volumes:
   demo-data:
   prometheus-data:
   elasticsearch-data:
+  mssql-data:

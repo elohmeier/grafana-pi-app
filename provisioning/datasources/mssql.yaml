@@ -1,0 +1,19 @@
+apiVersion: 1
+
+# Restricted SQL access fixture, seeded by the `sql` Compose profile
+# (docs/restricted-sql.md). Without that profile the datasource exists but
+# cannot connect. The login reads every table of the database, including
+# dbo.Employees, which the assistant policy does not list.
+datasources:
+  - name: ITSM
+    uid: mssql-itsm
+    type: mssql
+    access: proxy
+    url: $__env{PI_MSSQL_URL}
+    user: grafana
+    editable: true
+    jsonData:
+      database: itsm
+      encrypt: 'false'
+    secureJsonData:
+      password: $__env{PI_MSSQL_PASSWORD}

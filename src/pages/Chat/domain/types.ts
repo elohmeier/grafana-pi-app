@@ -1,7 +1,10 @@
 import type { DataSourceApi } from '@grafana/data';
 import type { PiAppJsonData } from '../../../types';
 
-export type GrafanaToolConfig = Pick<PiAppJsonData, 'allowedPrometheusDatasourceUids' | 'logDatasources'>;
+export type GrafanaToolConfig = Pick<
+  PiAppJsonData,
+  'allowedPrometheusDatasourceUids' | 'logDatasources' | 'sqlDatasources'
+>;
 
 export type ResourceCapableDataSource = DataSourceApi & {
   getResource?: <T = unknown>(path: string, params?: Record<string, unknown>) => Promise<T>;

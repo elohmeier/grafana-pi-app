@@ -34,6 +34,7 @@ import type {
 } from './broker';
 import { DASHBOARD_API_GROUP } from './dashboardModel';
 import { createLogsBroker, type FieldCapsResponse } from './logs';
+import { createSqlBroker } from './sql';
 import { sha256Hex } from './hash';
 import type { PromqlParser } from './promqlCheck';
 import type { WorkspaceResourceMeta, WorkspaceResourceSnapshot } from './types';
@@ -101,6 +102,32 @@ export function createGrafanaWorkspaceBroker(toolConfig: GrafanaToolConfig): Wor
         );
         return responseData(response).responses ?? [];
       },
+    }),
+    sql: createSqlBroker(toolConfig.sqlDatasources, {
+      datasources: () =>
+        getDataSourceSrv()
+          .getList({ type: 'mssql' })
+          .map((ds) => ({ uid: ds.uid, name: ds.name, type: ds.type, jsonData: { ...ds.jsonData } })),
+      query: async (uid, queries, range, signal) =>
+        responseData(
+          await request<unknown>(
+            'POST',
+            '/api/ds/query',
+            {
+              from: range.from,
+              to: range.to,
+              queries: queries.map((query) => ({
+                refId: query.refId,
+                datasource: { uid, type: 'mssql' },
+                rawSql: query.rawSql,
+                rawQuery: true,
+                editorMode: 'code',
+                format: 'table',
+              })),
+            },
+            signal
+          )
+        ),
     }),
     datasources: () =>
       getDataSourceSrv()

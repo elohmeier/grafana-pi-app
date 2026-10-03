@@ -9,6 +9,7 @@ import type { ScreenshotParams } from '../domain/types';
 import type { JsonnetEvalRequest, JsonnetFixResponse, JsonnetLibFilesResponse } from '../../../generated/api';
 import type { LogsBroker } from './logs';
 import type { PromqlParser } from './promqlCheck';
+import type { SqlBroker } from './sql';
 import type { WorkspaceResourceKind, WorkspaceResourceSnapshot } from './types';
 
 /**
@@ -22,6 +23,8 @@ export type WorkspaceBroker = {
   prometheus?: PrometheusBroker;
   /** Restricted Elasticsearch log access (`grafana-logs`). */
   logs?: LogsBroker;
+  /** Restricted Microsoft SQL Server access (`grafana-sql`). */
+  sql?: SqlBroker;
   /** Every datasource visible to the current user, to check what a screenshot would show. */
   datasources?: () => DatasourceRef[];
   jsonnet?: JsonnetBroker;

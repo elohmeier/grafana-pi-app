@@ -27,6 +27,23 @@ apps:
           unrestricted:
             - field: log.logger
               values: ['deployer']
+      # Restricted SQL access to the `sql` Compose profile fixture (docs/restricted-sql.md).
+      sqlDatasources:
+        - uid: mssql-itsm
+          tables: ['dbo.Incidents', 'dbo.Changes']
+          visibleColumns:
+            - dbo.Incidents.Number
+            - dbo.Incidents.State
+            - dbo.Incidents.Service
+            - dbo.Incidents.Host
+            - dbo.Incidents.Category
+            - dbo.Incidents.AssignmentGroup
+            - dbo.Changes.Number
+            - dbo.Changes.Type
+            - dbo.Changes.State
+            - dbo.Changes.Service
+            - dbo.Changes.Host
+            - dbo.Changes.Version
       customSkills: []
     secureJsonData:
       openAIAPIKey: $__env{OPENAI_API_KEY}
