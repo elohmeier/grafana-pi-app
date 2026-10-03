@@ -12,6 +12,8 @@ import (
 	"github.com/grafana/authlib/authz"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/config"
+
+	"github.com/elohmeier/grafana-pi-app/pkg/api"
 )
 
 type mockCallResourceResponseSender struct {
@@ -102,7 +104,7 @@ func TestJsonnetLibFilesEndpointListsAndLoadsPackages(t *testing.T) {
 		return sender.responses[0].Status, sender.responses[0].Body
 	}
 	type response struct {
-		Files []jsonnetLibFile `json:"files"`
+		Files []api.JsonnetLibFile `json:"files"`
 	}
 
 	status, body := call(`{}`)
@@ -126,7 +128,7 @@ func TestJsonnetLibFilesEndpointListsAndLoadsPackages(t *testing.T) {
 	if status != http.StatusOK || json.Unmarshal(body, &pkg) != nil {
 		t.Fatalf("package load failed: %d", status)
 	}
-	var helper *jsonnetLibFile
+	var helper *api.JsonnetLibFile
 	for index := range pkg.Files {
 		if !strings.HasPrefix(pkg.Files[index].Path, "github.com/g42/pi-dashboard/") {
 			t.Fatalf("file outside the requested package: %s", pkg.Files[index].Path)
@@ -730,12 +732,7 @@ func TestTelemetryEndpointAcceptsAggregateEvents(t *testing.T) {
 				"status": "completed",
 				"durationMs": 1234,
 				"argsBytes": 51,
-				"resultBytes": 4096,
-				"nestedToolCallCount": 2,
-				"nestedToolCalls": [
-					{"name": "list_metrics", "status": "completed"},
-					{"name": "query_prometheus", "status": "completed"}
-				]
+				"resultBytes": 4096
 			},
 			{
 				"type": "qol_timing",

@@ -30,6 +30,13 @@ repos:
         language: system
         files: \.(css|html|json|jsx?|md|mdx|scss|tsx?|ya?ml)$
 
+      - id: tygo
+        name: tygo (src/generated/api.ts)
+        entry: bash -c 'go tool tygo generate && npm exec -- prettier --write src/generated/api.ts >/dev/null'
+        language: system
+        files: ^(pkg/api/.*\.go|tygo\.yaml)$
+        pass_filenames: false
+
       - id: gofmt
         name: gofmt
         entry: gofmt -w

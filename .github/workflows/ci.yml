@@ -60,6 +60,16 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Check generated API types
+        if: steps.check-for-backend.outputs.has-backend == 'true'
+        run: |
+          go tool tygo generate
+          npx prettier --write src/generated/api.ts
+          git diff --exit-code -- src/generated/api.ts || {
+            echo "::error::src/generated/api.ts is out of date with pkg/api; run 'mise run generate:types'."
+            exit 1
+          }
+
       - name: Lint backend
         if: steps.check-for-backend.outputs.has-backend == 'true'
         uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1

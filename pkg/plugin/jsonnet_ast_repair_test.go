@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/elohmeier/grafana-pi-app/pkg/api"
 )
 
 func repairAndEvaluateDashboard(t *testing.T, source string) (string, []string, map[string]any) {
@@ -13,7 +15,7 @@ func repairAndEvaluateDashboard(t *testing.T, source string) (string, []string, 
 	if err != nil {
 		t.Fatalf("repair: %s", err)
 	}
-	output, err := evaluateWorkspaceJsonnet(context.Background(), jsonnetEvalRequest{
+	output, err := evaluateWorkspaceJsonnet(context.Background(), api.JsonnetEvalRequest{
 		Entrypoint: "/dashboard.jsonnet",
 		Files:      map[string]string{"/dashboard.jsonnet": repaired},
 	})

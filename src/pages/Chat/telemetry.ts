@@ -1,3 +1,10 @@
+import type {
+  TelemetryEvent,
+  TelemetryRequest,
+  TelemetryResponse,
+  TelemetrySkill,
+  TelemetryUsage,
+} from '../../generated/api';
 import type { ChatAgentEvent } from './agentEvents';
 import type { ChatMessage } from './chatMessages';
 import type { GrafanaSkill } from './skills';
@@ -7,42 +14,10 @@ const TELEMETRY_BATCH_SIZE = 50;
 const TELEMETRY_FLUSH_MS = 1000;
 const CUSTOM_SKILL_FILE_PREFIX = 'plugin-config/customSkills/';
 
-export type AssistantTelemetryEvent = {
-  type: string;
-  toolName?: string;
-  status?: string;
-  reason?: string;
-  messageRole?: string;
-  stopReason?: string;
-  durationMs?: number;
-  resultBytes?: number;
-  argsBytes?: number;
-  contentBytes?: number;
-  promptBytes?: number;
-  contextBytes?: number;
-  contextMessageCount?: number;
-  toolCount?: number;
-  messageCount?: number;
-  toolResultCount?: number;
-  phase?: string;
-  skills?: AssistantTelemetrySkill[];
-  usage?: AssistantTelemetryUsage;
-};
-
-export type AssistantTelemetrySkill = {
-  id: string;
-  name: string;
-  source: 'bundled' | 'custom';
-  activation: 'explicit' | 'auto';
-};
-
-export type AssistantTelemetryUsage = {
-  input?: number;
-  output?: number;
-  cacheRead?: number;
-  cacheWrite?: number;
-  totalTokens?: number;
-};
+// The wire types are generated from the backend's pkg/api.
+export type AssistantTelemetryEvent = TelemetryEvent;
+export type AssistantTelemetrySkill = TelemetrySkill;
+export type AssistantTelemetryUsage = TelemetryUsage;
 
 export type PromptTelemetryContext = {
   prompt: string;
@@ -360,9 +335,9 @@ export async function sendAssistantTelemetryEvents(events: AssistantTelemetryEve
   if (events.length === 0) {
     return;
   }
-  await pluginResourceFetch('/telemetry/events', {
+  await pluginResourceFetch<TelemetryResponse>('/telemetry/events', {
     method: 'POST',
-    data: { events },
+    data: { events } satisfies TelemetryRequest,
   });
 }
 

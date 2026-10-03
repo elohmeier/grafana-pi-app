@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+
+	"github.com/elohmeier/grafana-pi-app/pkg/api"
 )
 
 // Vendored library packages exposed to the assistant. The session filesystem
@@ -18,24 +20,12 @@ var jsonnetLibPackages = []string{
 	"github.com/jsonnet-libs/xtd",
 }
 
-type jsonnetLibFilesRequest struct {
-	// Package selects one entry of jsonnetLibPackages and returns its file
-	// contents. Without it, the response lists every file without contents.
-	Package string `json:"package,omitempty"`
-}
-
-type jsonnetLibFile struct {
-	Path    string  `json:"path"`
-	Size    int     `json:"size"`
-	Content *string `json:"content,omitempty"`
-}
-
 func (a *App) handleJsonnetLibFiles(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	var body jsonnetLibFilesRequest
+	var body api.JsonnetLibFilesRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 4<<10)).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %s", err))
 		return
@@ -45,12 +35,12 @@ func (a *App) handleJsonnetLibFiles(w http.ResponseWriter, req *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"packages": jsonnetLibPackages, "files": files})
+	writeJSON(w, http.StatusOK, api.JsonnetLibFilesResponse{Packages: jsonnetLibPackages, Files: files})
 }
 
 // jsonnetLibFiles lists the files of all packages, or returns the files of one
 // package with their contents. Paths are import paths relative to the vendor root.
-func jsonnetLibFiles(pkg string) ([]jsonnetLibFile, error) {
+func jsonnetLibFiles(pkg string) ([]api.JsonnetLibFile, error) {
 	packages := jsonnetLibPackages
 	withContent := pkg != ""
 	if withContent {
@@ -63,7 +53,7 @@ func jsonnetLibFiles(pkg string) ([]jsonnetLibFile, error) {
 		}
 		packages = []string{pkg}
 	}
-	files := []jsonnetLibFile{}
+	files := []api.JsonnetLibFile{}
 	for _, name := range packages {
 		root := jsonnetVendorRoot + "/" + name
 		err := fs.WalkDir(jsonnetAssets, root, func(filePath string, entry fs.DirEntry, err error) error {
@@ -74,7 +64,7 @@ func jsonnetLibFiles(pkg string) ([]jsonnetLibFile, error) {
 			if err != nil {
 				return err
 			}
-			file := jsonnetLibFile{Path: strings.TrimPrefix(filePath, jsonnetVendorRoot+"/"), Size: len(content)}
+			file := api.JsonnetLibFile{Path: strings.TrimPrefix(filePath, jsonnetVendorRoot+"/"), Size: len(content)}
 			if withContent {
 				text := string(content)
 				file.Content = &text

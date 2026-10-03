@@ -6,6 +6,7 @@ import type {
   MetricNeighborhoodParams,
 } from '../domain/dashboardMetricContext';
 import type { ScreenshotParams } from '../domain/types';
+import type { JsonnetEvalRequest, JsonnetFixResponse, JsonnetLibFilesResponse } from '../../../generated/api';
 import type { PromqlParser } from './promqlCheck';
 import type { WorkspaceResourceKind, WorkspaceResourceSnapshot } from './types';
 
@@ -76,22 +77,11 @@ export type UiBroker = {
 
 /** Stateless Jsonnet evaluation with the plugin's vendored libraries (grafonnet, pi-dashboard helpers). */
 export type JsonnetBroker = {
-  evaluate: (
-    request: {
-      entrypoint: string;
-      files: Record<string, string>;
-      extStr?: Record<string, string>;
-      tlaStr?: Record<string, string>;
-      string?: boolean;
-    },
-    signal?: AbortSignal
-  ) => Promise<string>;
+  evaluate: (request: JsonnetEvalRequest, signal?: AbortSignal) => Promise<string>;
   /** Structural repair of common invalid dashboard constructors; returns the repaired source. */
-  fix: (source: string, signal?: AbortSignal) => Promise<{ source: string; repairs: string[] }>;
+  fix: (source: string, signal?: AbortSignal) => Promise<JsonnetFixResponse>;
   /** Import paths and sizes of the vendored library files, and the packages they belong to. */
-  listLibraryFiles: (
-    signal?: AbortSignal
-  ) => Promise<{ packages: string[]; files: Array<{ path: string; size: number }> }>;
+  listLibraryFiles: (signal?: AbortSignal) => Promise<JsonnetLibFilesResponse>;
   /** Contents of every file in one vendored package, keyed by import path. */
   loadLibraryPackage: (pkg: string, signal?: AbortSignal) => Promise<Record<string, string>>;
 };

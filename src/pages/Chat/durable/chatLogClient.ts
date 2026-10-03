@@ -1,53 +1,20 @@
+import type {
+  Chat,
+  ChatCommit,
+  ChatCommitResult,
+  ChatCommitRow,
+  ChatLogPage,
+  ChatLogRow,
+  ChatPage,
+  ErrorResponse,
+  OpenedChat,
+} from '../../../generated/api';
+
+// The wire types are generated from the backend's pkg/api.
+export type { ChatCommit, ChatCommitResult, ChatCommitRow, ChatLogPage, ChatLogRow, ChatPage, OpenedChat };
+
 /** Chat metadata as listed by the backend. */
-export type ChatSummary = {
-  id: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type ChatPage = {
-  items: ChatSummary[];
-  nextCursor?: string;
-};
-
-/** The result of opening a chat: the caller is now its only writer, identified by `epoch`. */
-export type OpenedChat = ChatSummary & {
-  epoch: number;
-  lastSeq: number;
-};
-
-/** One stored row of a commit. `body` is one serialized storage write. */
-export type ChatLogRow = {
-  seq: number;
-  idx: number;
-  body: unknown;
-};
-
-export type ChatLogPage = {
-  rows: ChatLogRow[];
-  nextCursor?: string;
-};
-
-/**
- * A row to append. A row with `replace` deletes the stored rows with the same
- * `key` from earlier commits, which drops superseded task records and document
- * content before a new base.
- */
-export type ChatCommitRow = {
-  body: unknown;
-  key?: string;
-  replace?: boolean;
-};
-
-export type ChatCommit = {
-  epoch: number;
-  seq: number;
-  /** Identifies the commit body, so a retry after a lost response is recognized. */
-  digest: string;
-  rows: ChatCommitRow[];
-  title?: string;
-};
+export type ChatSummary = Chat;
 
 /** Why the backend refused a commit or an open. */
 export type ChatLogFailure = 'lease' | 'sequence' | 'deleted' | 'not-found' | 'invalid' | 'unavailable';
@@ -74,7 +41,7 @@ export interface ChatLogClient {
   /** Takes over the chat; `create: false` opens only an existing chat. */
   open(id: string, options?: { title?: string; create?: boolean }): Promise<OpenedChat>;
   log(id: string, options: { cursor?: string; limit?: number }): Promise<ChatLogPage>;
-  commit(id: string, commit: ChatCommit): Promise<{ seq: number; updatedAt: string }>;
+  commit(id: string, commit: ChatCommit): Promise<ChatCommitResult>;
   rename(id: string, title: string): Promise<ChatSummary>;
   delete(id: string): Promise<void>;
 }
@@ -122,8 +89,8 @@ export function createChatLogClient(request: ChatLogRequest): ChatLogClient {
 }
 
 function toChatLogError(status: number, data: unknown) {
-  const body =
-    data && typeof data === 'object' ? (data as { error?: unknown; message?: unknown; reason?: unknown }) : {};
+  // Grafana's own errors carry `message` instead of the plugin's `error`.
+  const body = data && typeof data === 'object' ? (data as Partial<ErrorResponse> & { message?: unknown }) : {};
   const message = String(body.error ?? body.message ?? `Chat storage request failed with status ${status}`);
   if (status === 409) {
     return new ChatLogError(message, body.reason === 'sequence' ? 'sequence' : 'lease', status);

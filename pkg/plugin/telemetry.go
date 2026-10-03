@@ -8,61 +8,14 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/elohmeier/grafana-pi-app/pkg/api"
 )
 
 const (
 	maxTelemetryRequestBytes = 512 * 1024
 	maxTelemetryEvents       = 100
-	maxNestedTelemetryTools  = 100
 )
-
-type assistantTelemetryRequest struct {
-	Events []assistantTelemetryEvent `json:"events"`
-}
-
-type assistantTelemetryEvent struct {
-	Type                string                         `json:"type"`
-	ToolName            string                         `json:"toolName,omitempty"`
-	Status              string                         `json:"status,omitempty"`
-	Reason              string                         `json:"reason,omitempty"`
-	MessageRole         string                         `json:"messageRole,omitempty"`
-	StopReason          string                         `json:"stopReason,omitempty"`
-	DurationMs          float64                        `json:"durationMs,omitempty"`
-	ResultBytes         int                            `json:"resultBytes,omitempty"`
-	ArgsBytes           int                            `json:"argsBytes,omitempty"`
-	ContentBytes        int                            `json:"contentBytes,omitempty"`
-	PromptBytes         int                            `json:"promptBytes,omitempty"`
-	ContextBytes        int                            `json:"contextBytes,omitempty"`
-	ContextMessageCount int                            `json:"contextMessageCount,omitempty"`
-	ToolCount           int                            `json:"toolCount,omitempty"`
-	MessageCount        int                            `json:"messageCount,omitempty"`
-	ToolResultCount     int                            `json:"toolResultCount,omitempty"`
-	NestedToolCallCount int                            `json:"nestedToolCallCount,omitempty"`
-	NestedToolCalls     []assistantNestedToolCallEvent `json:"nestedToolCalls,omitempty"`
-	Phase               string                         `json:"phase,omitempty"`
-	Skills              []assistantSkillTelemetry      `json:"skills,omitempty"`
-	Usage               assistantTelemetryUsage        `json:"usage,omitempty"`
-}
-
-type assistantNestedToolCallEvent struct {
-	Name   string `json:"name"`
-	Status string `json:"status,omitempty"`
-}
-
-type assistantTelemetryUsage struct {
-	Input       int `json:"input,omitempty"`
-	Output      int `json:"output,omitempty"`
-	CacheRead   int `json:"cacheRead,omitempty"`
-	CacheWrite  int `json:"cacheWrite,omitempty"`
-	TotalTokens int `json:"totalTokens,omitempty"`
-}
-
-type assistantSkillTelemetry struct {
-	ID         string `json:"id,omitempty"`
-	Name       string `json:"name,omitempty"`
-	Source     string `json:"source,omitempty"`
-	Activation string `json:"activation,omitempty"`
-}
 
 func (a *App) handleTelemetryEvents(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
@@ -70,7 +23,7 @@ func (a *App) handleTelemetryEvents(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	var body assistantTelemetryRequest
+	var body api.TelemetryRequest
 	decoder := json.NewDecoder(io.LimitReader(req.Body, maxTelemetryRequestBytes))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&body); err != nil {
@@ -86,12 +39,10 @@ func (a *App) handleTelemetryEvents(w http.ResponseWriter, req *http.Request) {
 		recordAssistantTelemetryEvent(event)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"accepted": len(body.Events),
-	})
+	writeJSON(w, http.StatusOK, api.TelemetryResponse{Accepted: len(body.Events)})
 }
 
-func recordAssistantTelemetryEvent(event assistantTelemetryEvent) {
+func recordAssistantTelemetryEvent(event api.TelemetryEvent) {
 	eventType := metricLabel(event.Type, metricUnknownLabel)
 	assistantTelemetryEventsTotal.WithLabelValues(eventType).Inc()
 
@@ -138,11 +89,10 @@ func recordAssistantTelemetryEvent(event assistantTelemetryEvent) {
 		observeDuration(assistantToolCallDuration, []string{toolName, status}, event.DurationMs)
 		observePositive(assistantToolCallArgsBytes.WithLabelValues(toolName), event.ArgsBytes)
 		observePositive(assistantToolCallResultBytes.WithLabelValues(toolName, status), event.ResultBytes)
-		recordNestedToolCalls(toolName, status, event)
 	}
 }
 
-func recordSkillUsage(skills []assistantSkillTelemetry) {
+func recordSkillUsage(skills []api.TelemetrySkill) {
 	for _, skill := range skills {
 		id := metricLabel(skill.ID, skill.Name)
 		name := metricLabel(skill.Name, metricUnknownLabel)
@@ -152,25 +102,7 @@ func recordSkillUsage(skills []assistantSkillTelemetry) {
 	}
 }
 
-func recordNestedToolCalls(parentToolName string, parentStatus string, event assistantTelemetryEvent) {
-	count := event.NestedToolCallCount
-	if count == 0 {
-		count = len(event.NestedToolCalls)
-	}
-	assistantNestedToolCallsPerParent.WithLabelValues(parentToolName, parentStatus).Observe(float64(maxInt(count, 0)))
-
-	nested := event.NestedToolCalls
-	if len(nested) > maxNestedTelemetryTools {
-		nested = nested[:maxNestedTelemetryTools]
-	}
-	for _, call := range nested {
-		nestedName := metricLabel(call.Name, metricUnknownLabel)
-		status := metricStatus(call.Status, "completed")
-		assistantNestedToolCallsTotal.WithLabelValues(parentToolName, nestedName, status).Inc()
-	}
-}
-
-func recordAssistantUsage(counter *prometheus.CounterVec, usage assistantTelemetryUsage) {
+func recordAssistantUsage(counter *prometheus.CounterVec, usage api.TelemetryUsage) {
 	addTokenCounter(counter, "input", usage.Input)
 	addTokenCounter(counter, "output", usage.Output)
 	addTokenCounter(counter, "cache_read", usage.CacheRead)

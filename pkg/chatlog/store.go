@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/elohmeier/grafana-pi-app/pkg/api"
 )
 
 var (
@@ -60,58 +62,17 @@ func (e *ConflictError) Error() string {
 }
 func (e *ConflictError) Is(target error) bool { return target == ErrConflict }
 
-// Chat is the metadata shown in chat lists.
-type Chat struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
-}
-
-// OpenedChat is returned to the writer that opened a chat.
-type OpenedChat struct {
-	Chat
-	Epoch   int64 `json:"epoch"`
-	LastSeq int64 `json:"lastSeq"`
-}
-
-type Page struct {
-	Items      []Chat `json:"items"`
-	NextCursor string `json:"nextCursor,omitempty"`
-}
-
-// Row is one stored log row. Body is the exact JSON text that was committed.
-type Row struct {
-	Seq  int64
-	Idx  int
-	Body json.RawMessage
-}
-
-type LogPage struct {
-	Rows       []Row
-	NextCursor string
-}
-
-type CommitRow struct {
-	Body json.RawMessage `json:"body"`
-	// Key identifies rows that later commits may replace.
-	Key string `json:"key,omitempty"`
-	// Replace deletes earlier rows with the same key.
-	Replace bool `json:"replace,omitempty"`
-}
-
-type Commit struct {
-	Epoch  int64       `json:"epoch"`
-	Seq    int64       `json:"seq"`
-	Digest string      `json:"digest"`
-	Rows   []CommitRow `json:"rows"`
-	Title  string      `json:"title,omitempty"`
-}
-
-type CommitResult struct {
-	Seq       int64     `json:"seq"`
-	UpdatedAt time.Time `json:"updatedAt"`
-}
+// The wire types live in pkg/api, from which the frontend's types are generated.
+type (
+	Chat         = api.Chat
+	OpenedChat   = api.OpenedChat
+	Page         = api.ChatPage
+	Row          = api.ChatLogRow
+	LogPage      = api.ChatLogPage
+	CommitRow    = api.ChatCommitRow
+	Commit       = api.ChatCommit
+	CommitResult = api.ChatCommitResult
+)
 
 // Store is the chat log storage contract shared by both backends.
 type Store interface {

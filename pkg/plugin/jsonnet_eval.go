@@ -11,6 +11,8 @@ import (
 	"time"
 
 	jsonnet "github.com/google/go-jsonnet"
+
+	"github.com/elohmeier/grafana-pi-app/pkg/api"
 )
 
 // Stateless Jsonnet evaluation for the session workspace `jsonnet` shell
@@ -24,28 +26,6 @@ const (
 	jsonnetEvalTimeout        = 20 * time.Second
 	jsonnetEvalMaxStack       = 500
 )
-
-type jsonnetEvalRequest struct {
-	Entrypoint string            `json:"entrypoint"`
-	Files      map[string]string `json:"files"`
-	ExtStr     map[string]string `json:"extStr,omitempty"`
-	TLAStr     map[string]string `json:"tlaStr,omitempty"`
-	// String evaluates to a raw string (jsonnet -S).
-	String bool `json:"string,omitempty"`
-}
-
-type jsonnetEvalResponse struct {
-	Output string `json:"output"`
-}
-
-type jsonnetFixRequest struct {
-	Source string `json:"source"`
-}
-
-type jsonnetFixResponse struct {
-	Source  string   `json:"source"`
-	Repairs []string `json:"repairs"`
-}
 
 // workspaceJsonnetImporter resolves relative imports against the provided
 // workspace files first, then the embedded vendor tree.
@@ -78,7 +58,7 @@ func (a *App) handleJsonnetEval(w http.ResponseWriter, req *http.Request) {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	var body jsonnetEvalRequest
+	var body api.JsonnetEvalRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, jsonnetEvalMaxInputBytes+64<<10)).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %s", err))
 		return
@@ -88,7 +68,7 @@ func (a *App) handleJsonnetEval(w http.ResponseWriter, req *http.Request) {
 		writeJSONError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, jsonnetEvalResponse{Output: output})
+	writeJSON(w, http.StatusOK, api.JsonnetEvalResponse{Output: output})
 }
 
 func (a *App) handleJsonnetFix(w http.ResponseWriter, req *http.Request) {
@@ -96,7 +76,7 @@ func (a *App) handleJsonnetFix(w http.ResponseWriter, req *http.Request) {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	var body jsonnetFixRequest
+	var body api.JsonnetFixRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, jsonnetEvalMaxInputBytes)).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %s", err))
 		return
@@ -109,10 +89,10 @@ func (a *App) handleJsonnetFix(w http.ResponseWriter, req *http.Request) {
 	if repairs == nil {
 		repairs = []string{}
 	}
-	writeJSON(w, http.StatusOK, jsonnetFixResponse{Source: source, Repairs: repairs})
+	writeJSON(w, http.StatusOK, api.JsonnetFixResponse{Source: source, Repairs: repairs})
 }
 
-func evaluateWorkspaceJsonnet(ctx context.Context, request jsonnetEvalRequest) (string, error) {
+func evaluateWorkspaceJsonnet(ctx context.Context, request api.JsonnetEvalRequest) (string, error) {
 	if len(request.Files) > jsonnetEvalMaxFiles {
 		return "", fmt.Errorf("too many files (%d > %d)", len(request.Files), jsonnetEvalMaxFiles)
 	}

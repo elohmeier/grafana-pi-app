@@ -46,3 +46,10 @@ run = [
   "docker compose down -v --remove-orphans",
   "HISTORY_FUTURE_SECONDS=${HISTORY_FUTURE_SECONDS:-3600} mise run dev:reload:variant:seed",
 ]
+
+[tasks."generate:types"]
+description = "Generate src/generated/api.ts from the Go resource route types in pkg/api."
+run = [
+  "go tool tygo generate",
+  "npx prettier --write src/generated/api.ts",
+]

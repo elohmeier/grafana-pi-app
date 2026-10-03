@@ -7,6 +7,8 @@ import (
 	"net/http"
 
 	"github.com/prometheus/prometheus/promql/parser"
+
+	"github.com/elohmeier/grafana-pi-app/pkg/api"
 )
 
 const (
@@ -14,27 +16,6 @@ const (
 	promQLParseMaxExprBytes  = 64 << 10
 	promQLParseMaxInputBytes = 4 << 20
 )
-
-type promQLParseRequest struct {
-	Queries []promQLParseQuery `json:"queries"`
-}
-
-type promQLParseQuery struct {
-	ID   string `json:"id"`
-	Expr string `json:"expr"`
-}
-
-type promQLParseResult struct {
-	ID    string `json:"id"`
-	Error string `json:"error,omitempty"`
-	// Start and End are byte offsets of the first error in the expression.
-	Start *int `json:"start,omitempty"`
-	End   *int `json:"end,omitempty"`
-}
-
-type promQLParseResponse struct {
-	Results []promQLParseResult `json:"results"`
-}
 
 // handlePromQLParse checks PromQL syntax with the upstream Prometheus parser.
 // It accepts experimental syntax so that it never rejects a query a newer
@@ -44,7 +25,7 @@ func (a *App) handlePromQLParse(w http.ResponseWriter, req *http.Request) {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	var body promQLParseRequest
+	var body api.PromQLParseRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, promQLParseMaxInputBytes)).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %s", err))
 		return
@@ -54,10 +35,10 @@ func (a *App) handlePromQLParse(w http.ResponseWriter, req *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, promQLParseResponse{Results: results})
+	writeJSON(w, http.StatusOK, api.PromQLParseResponse{Results: results})
 }
 
-func parsePromQLQueries(queries []promQLParseQuery) ([]promQLParseResult, error) {
+func parsePromQLQueries(queries []api.PromQLParseQuery) ([]api.PromQLParseResult, error) {
 	if len(queries) > promQLParseMaxQueries {
 		return nil, fmt.Errorf("too many queries (%d > %d)", len(queries), promQLParseMaxQueries)
 	}
@@ -67,9 +48,9 @@ func parsePromQLQueries(queries []promQLParseQuery) ([]promQLParseResult, error)
 		EnableExtendedRangeSelectors: true,
 		EnableBinopFillModifiers:     true,
 	})
-	results := make([]promQLParseResult, 0, len(queries))
+	results := make([]api.PromQLParseResult, 0, len(queries))
 	for _, query := range queries {
-		result := promQLParseResult{ID: query.ID}
+		result := api.PromQLParseResult{ID: query.ID}
 		if len(query.Expr) > promQLParseMaxExprBytes {
 			result.Error = fmt.Sprintf("expression too large (%d bytes)", len(query.Expr))
 		} else if _, err := p.ParseExpr(query.Expr); err != nil {

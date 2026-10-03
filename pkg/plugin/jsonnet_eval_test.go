@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/elohmeier/grafana-pi-app/pkg/api"
 )
 
 func TestEvaluateWorkspaceJsonnetResolvesWorkspaceAndVendorImports(t *testing.T) {
-	output, err := evaluateWorkspaceJsonnet(context.Background(), jsonnetEvalRequest{
+	output, err := evaluateWorkspaceJsonnet(context.Background(), api.JsonnetEvalRequest{
 		Entrypoint: "/workspace/main.jsonnet",
 		Files: map[string]string{
 			"/workspace/main.jsonnet":         `local lib = import 'lib/panels.libsonnet'; local d = import 'github.com/g42/pi-dashboard/main.libsonnet'; { title: std.extVar('title'), n: lib.n, hasHelper: std.objectHas(d, 'dashboard') }`,
@@ -29,7 +31,7 @@ func TestEvaluateWorkspaceJsonnetResolvesWorkspaceAndVendorImports(t *testing.T)
 }
 
 func TestEvaluateWorkspaceJsonnetRejectsUnsafeInput(t *testing.T) {
-	cases := []jsonnetEvalRequest{
+	cases := []api.JsonnetEvalRequest{
 		{Entrypoint: "/workspace/a.jsonnet", Files: map[string]string{"relative.jsonnet": "{}"}},
 		{Entrypoint: "/workspace/a.jsonnet", Files: map[string]string{"/workspace/../a.jsonnet": "{}"}},
 		{Entrypoint: "/workspace/missing.jsonnet", Files: map[string]string{"/workspace/a.jsonnet": "{}"}},
@@ -44,7 +46,7 @@ func TestEvaluateWorkspaceJsonnetRejectsUnsafeInput(t *testing.T) {
 }
 
 func TestEvaluateWorkspaceJsonnetStringOutput(t *testing.T) {
-	output, err := evaluateWorkspaceJsonnet(context.Background(), jsonnetEvalRequest{
+	output, err := evaluateWorkspaceJsonnet(context.Background(), api.JsonnetEvalRequest{
 		Entrypoint: "/tmp/a.jsonnet",
 		Files:      map[string]string{"/tmp/a.jsonnet": `"hello " + std.extVar('who')`},
 		ExtStr:     map[string]string{"who": "world"},
@@ -56,7 +58,7 @@ func TestEvaluateWorkspaceJsonnetStringOutput(t *testing.T) {
 }
 
 func TestPiDashboardHelperVariables(t *testing.T) {
-	output, err := evaluateWorkspaceJsonnet(context.Background(), jsonnetEvalRequest{
+	output, err := evaluateWorkspaceJsonnet(context.Background(), api.JsonnetEvalRequest{
 		Entrypoint: "/workspace/dash.jsonnet",
 		Files: map[string]string{"/workspace/dash.jsonnet": `
 local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
@@ -134,7 +136,7 @@ local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
 }
 
 func TestPiDashboardHelperPanelKinds(t *testing.T) {
-	output, err := evaluateWorkspaceJsonnet(context.Background(), jsonnetEvalRequest{
+	output, err := evaluateWorkspaceJsonnet(context.Background(), api.JsonnetEvalRequest{
 		Entrypoint: "/workspace/dash.jsonnet",
 		Files: map[string]string{"/workspace/dash.jsonnet": `
 local d = import 'github.com/g42/pi-dashboard/main.libsonnet';
@@ -195,7 +197,7 @@ d.dashboard.new(
 }
 
 func TestPiDashboardHelperForgivesCommonMistakes(t *testing.T) {
-	output, err := evaluateWorkspaceJsonnet(context.Background(), jsonnetEvalRequest{
+	output, err := evaluateWorkspaceJsonnet(context.Background(), api.JsonnetEvalRequest{
 		Entrypoint: "/workspace/dash.jsonnet",
 		Files: map[string]string{"/workspace/dash.jsonnet": `
 local d = import 'github.com/g42/pi-dashboard/main.libsonnet';

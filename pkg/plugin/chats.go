@@ -13,11 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/elohmeier/grafana-pi-app/pkg/chatlog"
 	"github.com/grafana/authlib/authn"
 	"github.com/grafana/authlib/types"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/config"
+
+	"github.com/elohmeier/grafana-pi-app/pkg/api"
+	"github.com/elohmeier/grafana-pi-app/pkg/chatlog"
 )
 
 const (
@@ -159,7 +161,7 @@ func writeChatError(w http.ResponseWriter, err error) {
 	case errors.As(err, &conflict):
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": conflict.Error(), "reason": conflict.Reason})
+		_ = json.NewEncoder(w).Encode(api.ErrorResponse{Error: conflict.Error(), Reason: conflict.Reason})
 	case errors.As(err, &tooLarge):
 		writeJSONError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("chat request exceeds %d bytes", tooLarge.Limit))
 	case errors.Is(err, chatlog.ErrInvalid):
@@ -224,11 +226,7 @@ func (a *App) handleListChats(w http.ResponseWriter, r *http.Request, s chatlog.
 }
 
 func (a *App) handleOpenChat(w http.ResponseWriter, r *http.Request, s chatlog.Store, scope, id string) {
-	var body struct {
-		Title string `json:"title"`
-		// Create defaults to true; false opens only an existing chat.
-		Create *bool `json:"create"`
-	}
+	var body api.OpenChatRequest
 	err := decodeChatBody(w, r, maxSmallBodyBytes, true, &body)
 	if err == nil {
 		var chat chatlog.OpenedChat

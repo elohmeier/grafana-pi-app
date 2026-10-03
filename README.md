@@ -201,6 +201,12 @@ Build the backend after Go changes:
 mage -v build:linux
 ```
 
+The JSON types of the plugin's resource routes are defined once in `pkg/api`, and [tygo](https://github.com/gzuidhof/tygo) generates their TypeScript counterparts in `src/generated/api.ts`. After changing `pkg/api`, regenerate them (the pre-commit hook does this too, and CI fails when the file is out of date):
+
+```bash
+mise run generate:types
+```
+
 Run checks:
 
 ```bash

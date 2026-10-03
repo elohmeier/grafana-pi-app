@@ -1,0 +1,10 @@
+# TypeScript types of the plugin's resource routes, generated from pkg/api.
+# Regenerate with `mise run generate:types`.
+packages:
+  - path: github.com/elohmeier/grafana-pi-app/pkg/api
+    output_path: src/generated/api.ts
+    exclude_files:
+      - doc.go
+    type_mappings:
+      time.Time: string
+      json.RawMessage: unknown

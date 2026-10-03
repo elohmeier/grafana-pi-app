@@ -209,25 +209,6 @@ var (
 		},
 		[]string{"tool_name", "status"},
 	)
-	assistantNestedToolCallsTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "grafana_plugin",
-			Subsystem: "assistant",
-			Name:      "nested_tool_calls_total",
-			Help:      "Total nested tool calls reported by subagent-style tool results.",
-		},
-		[]string{"parent_tool_name", "nested_tool_name", "status"},
-	)
-	assistantNestedToolCallsPerParent = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: "grafana_plugin",
-			Subsystem: "assistant",
-			Name:      "nested_tool_calls_per_parent",
-			Help:      "Nested tool call count reported by one parent tool result.",
-			Buckets:   []float64{0, 1, 2, 4, 8, 16, 32, 64},
-		},
-		[]string{"parent_tool_name", "status"},
-	)
 	assistantLLMRequestsInFlight = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: "grafana_plugin",

@@ -29,6 +29,15 @@ import { DASHBOARD_API_GROUP } from './dashboardModel';
 import { sha256Hex } from './hash';
 import type { PromqlParser } from './promqlCheck';
 import type { WorkspaceResourceMeta, WorkspaceResourceSnapshot } from './types';
+import type {
+  JsonnetEvalResponse,
+  JsonnetFixRequest,
+  JsonnetFixResponse,
+  JsonnetLibFilesRequest,
+  JsonnetLibFilesResponse,
+  PromQLParseRequest,
+  PromQLParseResponse,
+} from '../../../generated/api';
 
 const FOLDER_ANNOTATION = 'grafana.app/folder';
 const MANAGED_BY_ANNOTATION = 'grafana.app/managedBy';
@@ -80,10 +89,10 @@ function createPromqlParser(): PromqlParser {
   return {
     name: 'prometheus',
     async parse(queries, signal) {
-      const response = await request<{ results: Array<{ id: string; error?: string; start?: number; end?: number }> }>(
+      const response = await request<PromQLParseResponse>(
         'POST',
         `/api/plugins/${PLUGIN_ID}/resources/promql/parse`,
-        { queries },
+        { queries } satisfies PromQLParseRequest,
         signal
       );
       if (!response.ok) {
@@ -94,7 +103,7 @@ function createPromqlParser(): PromqlParser {
   };
 }
 
-let libraryListing: Promise<{ packages: string[]; files: Array<{ path: string; size: number }> }> | undefined;
+let libraryListing: Promise<JsonnetLibFilesResponse> | undefined;
 const libraryPackages = new Map<string, Promise<Record<string, string>>>();
 
 function createJsonnetBroker(): JsonnetBroker {
@@ -107,14 +116,15 @@ function createJsonnetBroker(): JsonnetBroker {
   };
   return {
     async evaluate(evalRequest, signal) {
-      return (await resource<{ output: string }>('/jsonnet/eval', evalRequest, signal)).output;
+      return (await resource<JsonnetEvalResponse>('/jsonnet/eval', evalRequest, signal)).output;
     },
-    fix: (source, signal) => resource<{ source: string; repairs: string[] }>('/jsonnet/fix', { source }, signal),
+    fix: (source, signal) =>
+      resource<JsonnetFixResponse>('/jsonnet/fix', { source } satisfies JsonnetFixRequest, signal),
     async listLibraryFiles(signal) {
       // The vendored libraries are static for a plugin build; share one listing.
-      libraryListing ??= resource<{ packages: string[]; files: Array<{ path: string; size: number }> }>(
+      libraryListing ??= resource<JsonnetLibFilesResponse>(
         '/jsonnet-libs/files',
-        {},
+        {} satisfies JsonnetLibFilesRequest,
         signal
       ).catch((error) => {
         libraryListing = undefined;
@@ -125,9 +135,9 @@ function createJsonnetBroker(): JsonnetBroker {
     loadLibraryPackage(pkg, signal) {
       let loaded = libraryPackages.get(pkg);
       if (!loaded) {
-        loaded = resource<{ files: Array<{ path: string; content?: string }> }>(
+        loaded = resource<JsonnetLibFilesResponse>(
           '/jsonnet-libs/files',
-          { package: pkg },
+          { package: pkg } satisfies JsonnetLibFilesRequest,
           signal
         ).then((data) => Object.fromEntries(data.files.map((file) => [file.path, file.content ?? ''])));
         loaded.catch(() => libraryPackages.delete(pkg));

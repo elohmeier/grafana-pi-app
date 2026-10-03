@@ -3,10 +3,12 @@ package plugin
 import (
 	"strings"
 	"testing"
+
+	"github.com/elohmeier/grafana-pi-app/pkg/api"
 )
 
 func TestParsePromQLQueries(t *testing.T) {
-	results, err := parsePromQLQueries([]promQLParseQuery{
+	results, err := parsePromQLQueries([]api.PromQLParseQuery{
 		{ID: "ok", Expr: `sum by (route) (rate(http_requests_total{job="api"}[5m]))`},
 		{ID: "unclosed", Expr: `sum(rate(http_requests_total[5m])`},
 		{ID: "escape", Expr: `up{job=~"api\.v1"}`},
@@ -16,7 +18,7 @@ func TestParsePromQLQueries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	byID := map[string]promQLParseResult{}
+	byID := map[string]api.PromQLParseResult{}
 	for _, result := range results {
 		byID[result.ID] = result
 	}
@@ -32,10 +34,10 @@ func TestParsePromQLQueries(t *testing.T) {
 }
 
 func TestParsePromQLQueriesLimits(t *testing.T) {
-	if _, err := parsePromQLQueries(make([]promQLParseQuery, promQLParseMaxQueries+1)); err == nil {
+	if _, err := parsePromQLQueries(make([]api.PromQLParseQuery, promQLParseMaxQueries+1)); err == nil {
 		t.Fatal("expected an error for too many queries")
 	}
-	results, err := parsePromQLQueries([]promQLParseQuery{{ID: "big", Expr: strings.Repeat("a", promQLParseMaxExprBytes+1)}})
+	results, err := parsePromQLQueries([]api.PromQLParseQuery{{ID: "big", Expr: strings.Repeat("a", promQLParseMaxExprBytes+1)}})
 	if err != nil || !strings.Contains(results[0].Error, "too large") {
 		t.Fatalf("expected size error, got %+v %v", results, err)
 	}

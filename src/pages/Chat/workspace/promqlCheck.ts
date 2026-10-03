@@ -1,4 +1,5 @@
 import { parser as lezerPromqlParser } from '@prometheus-io/lezer-promql';
+import type { PromQLParseQuery, PromQLParseResult } from '../../../generated/api';
 import {
   collectPanels,
   collectVariables,
@@ -9,12 +10,12 @@ import {
   asText,
 } from './dashboardPanels';
 
-export type PromqlParseResult = { id: string; error?: string; start?: number; end?: number };
+export type PromqlParseResult = PromQLParseResult;
 
 /** Parses expressions in one batch; results are returned in request order. */
 export type PromqlParser = {
   name: 'prometheus' | 'lezer';
-  parse: (queries: Array<{ id: string; expr: string }>, signal?: AbortSignal) => Promise<PromqlParseResult[]>;
+  parse: (queries: PromQLParseQuery[], signal?: AbortSignal) => Promise<PromqlParseResult[]>;
 };
 
 export type PromqlQueryRecord = {

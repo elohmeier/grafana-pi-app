@@ -991,6 +991,11 @@ Benchmarks and e2e tests:
 
 Use these patterns when extending the app:
 
+- Define the JSON types of a new or changed resource route in `pkg/api` and
+  regenerate `src/generated/api.ts` (`mise run generate:types`); the frontend
+  imports the generated types instead of declaring its own. The LLM proxy's
+  types are the exception: they follow pi-ai's message types.
+
 - Add new Grafana capabilities as workspace commands (with `--help`, a declared
   effect, bounded output, and artifacts for large results) or as files in the
   session filesystem. Add a typed tool only when the shell cannot express the
