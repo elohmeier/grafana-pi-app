@@ -2,6 +2,7 @@ import { test, expect } from './fixtures';
 import type { AppConfigPage, Page } from '@grafana/plugin-e2e';
 import type { Locator } from '@playwright/test';
 import { testIds } from '../src/components/testIds';
+import pluginJson from '../src/plugin.json';
 import type { PiAppCustomSkill, PiAppOpenAIProtocol, PiAppThinkingFormat, PiAppThinkingLevel } from '../src/types';
 
 type ModelRowSettings = {
@@ -37,6 +38,10 @@ const localLLMSettings = {
 };
 
 test('should be possible to save app configuration', async ({ appConfigPage, page }) => {
+  const settingsUrl = `/api/plugins/${process.env.E2E_PLUGIN_ID ?? pluginJson.id}/settings`;
+  const logDatasources = async () =>
+    (await (await page.request.get(settingsUrl)).json()).jsonData?.logDatasources ?? [];
+  const logDatasourcesBefore = await logDatasources();
   await saveLLMSettings(appConfigPage, page, {
     apiKey: 'secret-api-key',
     baseURL: 'https://api.openai.example/v1',
@@ -52,6 +57,8 @@ test('should be possible to save app configuration', async ({ appConfigPage, pag
     },
   });
   await saveLLMSettings(appConfigPage, page, localLLMSettings);
+  // Saving the form keeps settings it does not change, such as the log datasource policy.
+  expect(await logDatasources()).toEqual(logDatasourcesBefore);
 });
 
 async function saveLLMSettings(

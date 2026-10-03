@@ -15,10 +15,13 @@ export const test = base.extend<AppTestFixture>({
     async ({ page }, use, testInfo) => captureBenchmark(page, testInfo, use),
     { auto: Boolean(process.env.BENCH_CASE_DIR) },
   ],
-  appConfigPage: async ({ gotoAppConfigPage }, use) => {
+  appConfigPage: async ({ gotoAppConfigPage, page }, use) => {
     const configPage = await gotoAppConfigPage({
       pluginId,
     });
+    // Grafana opens the Overview tab for the grafana-assistant-app plugin ID and the
+    // first config page for other app plugins; select the config page explicitly.
+    await page.goto(`/plugins/${pluginId}?page=configuration`);
     await use(configPage);
   },
   gotoPage: async ({ gotoAppPage }, use) => {
