@@ -1,6 +1,7 @@
 import { test, expect } from './fixtures';
 import { ROUTES } from '../src/constants';
 import { testIds } from '../src/components/testIds';
+import { requestToolNames } from './llmRequest';
 
 const LLM_ROUTE = '**/resources/llm/api/stream';
 
@@ -39,7 +40,7 @@ test.describe('assistant safety workflows', () => {
 
       const confirmation = page.getByTestId(testIds.chat.toolConfirmation);
       await expect(confirmation).toBeVisible();
-      await expect(confirmation).toContainText('workspace apply');
+      await expect(confirmation).toContainText('Persistent Grafana write');
       await expect(confirmation).toContainText(deniedUid);
       await expect(confirmation.getByTestId('workspace-apply-diff')).toContainText('Denied E2E');
       await page.getByTestId(testIds.chat.toolConfirmationDeny).click();
@@ -61,7 +62,7 @@ test.describe('assistant safety workflows', () => {
       expect((await saved.json()).dashboard).toMatchObject({ uid: approvedUid, title: 'Approved E2E' });
       expect((await page.request.get(`/api/dashboards/uid/${deniedUid}`)).status()).toBe(404);
 
-      const toolNames = llmRequests[0].context.tools.map((tool: any) => tool.name);
+      const toolNames = requestToolNames(llmRequests[0].context);
       expect(toolNames).toEqual(expect.arrayContaining(['read', 'write', 'edit', 'bash']));
       expect(toolNames).not.toContain('save_dashboard');
     } finally {
@@ -123,7 +124,7 @@ test.describe('assistant safety workflows', () => {
       await expect(report.getByText('Validate node_load1 and CPU idle for vm-web-01')).toBeVisible();
       await expect(page.getByText('Investigation report updated.')).toBeVisible();
 
-      expect(llmRequests[0].context.tools.map((tool: any) => tool.name)).not.toContain('update_report');
+      expect(requestToolNames(llmRequests[0].context)).not.toContain('update_report');
     } finally {
       await page.unroute(LLM_ROUTE).catch(() => undefined);
     }

@@ -937,8 +937,7 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 
 // registerRoutes takes a *http.ServeMux and registers HTTP handlers.
 func (a *App) registerRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/sessions", a.withAppAccess(a.handleSessions))
-	mux.HandleFunc("/sessions/", a.withAppAccess(a.handleSessions))
+	a.registerChatRoutes(mux)
 	mux.HandleFunc("/llm/stream", a.withAppAccess(a.handleLLMStream))
 	// streamProxy appends /api/stream to proxyUrl; keep this alias so the frontend
 	// can use Pi's client-side proxy stream implementation unchanged.

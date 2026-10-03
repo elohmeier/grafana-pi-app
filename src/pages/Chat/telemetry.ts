@@ -1,4 +1,5 @@
-import type { AgentEvent, AgentMessage } from '@earendil-works/pi-agent-core';
+import type { ChatAgentEvent } from './agentEvents';
+import type { ChatMessage } from './chatMessages';
 import type { GrafanaSkill } from './skills';
 import { pluginResourceFetch } from './domain/client';
 
@@ -46,7 +47,7 @@ export type AssistantTelemetryUsage = {
 export type PromptTelemetryContext = {
   prompt: string;
   systemPrompt: string;
-  messages: readonly AgentMessage[];
+  messages: readonly ChatMessage[];
   toolCount: number;
   activeSkills: readonly GrafanaSkill[];
   explicitSkillNames: readonly string[];
@@ -166,7 +167,7 @@ export function createAssistantTelemetryReporter(send: TelemetrySender = sendAss
       });
     },
 
-    recordAgentEvent(event: AgentEvent) {
+    recordAgentEvent(event: ChatAgentEvent) {
       const timestamp = Date.now();
 
       if (event.type === 'agent_start') {
@@ -282,7 +283,7 @@ export function createAssistantTelemetryReporter(send: TelemetrySender = sendAss
       }
     },
 
-    recordTranscriptSnapshot(messages: readonly AgentMessage[]) {
+    recordTranscriptSnapshot(messages: readonly ChatMessage[]) {
       const timestamp = Date.now();
       const toolCalls = toolCallsFromTranscript(messages);
       let syntheticToolResults = 0;
@@ -365,11 +366,11 @@ export async function sendAssistantTelemetryEvents(events: AssistantTelemetryEve
   });
 }
 
-function finalAssistantMessage(messages: readonly AgentMessage[]) {
+function finalAssistantMessage(messages: readonly ChatMessage[]) {
   return [...messages].reverse().find((message) => messageRecord(message)?.role === 'assistant');
 }
 
-function toolCallsFromTranscript(messages: readonly AgentMessage[]) {
+function toolCallsFromTranscript(messages: readonly ChatMessage[]) {
   const toolCalls = new Map<string, { name: string; args: unknown }>();
   for (const message of messages) {
     const record = messageRecord(message);
@@ -391,7 +392,7 @@ function toolCallsFromTranscript(messages: readonly AgentMessage[]) {
   return toolCalls;
 }
 
-function agentStatus(finalMessage: AgentMessage | undefined) {
+function agentStatus(finalMessage: ChatMessage | undefined) {
   const stopReason = stringField(messageRecord(finalMessage), 'stopReason');
   if (stopReason === 'aborted') {
     return 'aborted';
@@ -448,7 +449,7 @@ function hasAssistantThinkingContent(message: Record<string, unknown>) {
   });
 }
 
-function messageRecord(message: AgentMessage | undefined): Record<string, unknown> | undefined {
+function messageRecord(message: ChatMessage | undefined): Record<string, unknown> | undefined {
   return recordValue(message);
 }
 

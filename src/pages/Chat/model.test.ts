@@ -6,7 +6,7 @@ import {
   normalizeThinkingLevel,
   resolveConfiguredModel,
 } from './model';
-import { parseStoredThinkingLevel } from './session/sessionRecord';
+import { parseStoredThinkingLevel } from './session/chatIdentity';
 
 describe('thinking levels', () => {
   it('accepts the extended xhigh and max levels', () => {

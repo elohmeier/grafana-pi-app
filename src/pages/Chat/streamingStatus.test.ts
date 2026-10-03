@@ -1,173 +1,52 @@
-import {
-  createInitialRunStatus,
-  formatRunElapsed,
-  reduceChatRunStatus,
-  resolveChatRunStatusFromStreamingMessage,
-  runStatusBadgeText,
-  runStatusText,
-  type ChatRunStatus,
-} from './streamingStatus';
+import type { LiveState } from '@earendil-works/pi-durable';
+import { deriveRunStatus, formatRunElapsed, runStatusBadgeText, runStatusText } from './streamingStatus';
+
+const assistant = (content: unknown[]) => ({ role: 'assistant', content }) as never;
 
 describe('streaming status', () => {
-  it('tracks user-visible run phases from agent events', () => {
-    let status: ChatRunStatus | undefined = createInitialRunStatus(1000);
-    expect(runStatusText(status)).toBe('Waiting for model');
-    expect(runStatusBadgeText(status)).toBe('Waiting');
+  it('derives user-visible run phases from the live state', () => {
+    const run = { taskId: 1, inputs: [] } as unknown as LiveState['run'];
+    const status = (live: LiveState) => deriveRunStatus({ run, ...live }, 1000);
 
-    status = reduceChatRunStatus(
-      status,
-      {
-        type: 'message_update',
-        message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'checking' }] },
-        assistantMessageEvent: { type: 'thinking_delta' },
-      } as any,
-      1200
-    );
-    expect(status).toMatchObject({ phase: 'thinking', startedAt: 1000 });
-    expect(runStatusText(status)).toBe('Thinking');
-
-    status = reduceChatRunStatus(
-      status,
-      {
-        type: 'message_update',
-        message: { role: 'assistant', content: [{ type: 'text', text: 'answer' }] },
-        assistantMessageEvent: { type: 'text_start' },
-      } as any,
-      1600
-    );
-    expect(status).toMatchObject({ phase: 'generating', startedAt: 1000 });
-    expect(runStatusText(status)).toBe('Generating answer');
-
-    expect(reduceChatRunStatus(status, { type: 'agent_end' } as any, 2000)).toBeUndefined();
-  });
-
-  it('infers phase from assistant content when stream markers are unavailable', () => {
-    let status: ChatRunStatus | undefined = createInitialRunStatus(1000);
-
-    status = reduceChatRunStatus(
-      status,
-      {
-        type: 'message_update',
-        message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'checking' }] },
-      } as any,
-      1200
-    );
-    expect(status).toMatchObject({ phase: 'thinking', startedAt: 1000 });
-
-    status = reduceChatRunStatus(
-      status,
-      {
-        type: 'message_update',
-        message: {
-          role: 'assistant',
-          content: [
-            { type: 'thinking', thinking: 'checking' },
-            { type: 'text', text: 'answer' },
-          ],
-        },
-      } as any,
-      1600
-    );
-    expect(status).toMatchObject({ phase: 'generating', startedAt: 1000 });
-
-    status = reduceChatRunStatus(
-      status,
-      {
-        type: 'message_update',
-        message: {
-          role: 'assistant',
-          content: [
-            { type: 'thinking', thinking: 'checking' },
-            { type: 'text', text: 'answer' },
-            { type: 'toolCall', name: 'inspect_dashboard_metric_usage', arguments: {} },
-          ],
-        },
-      } as any,
-      1800
-    );
-    expect(status).toMatchObject({
-      phase: 'preparing_tool',
-      detail: 'inspect_dashboard_metric_usage',
-      startedAt: 1000,
+    expect(status({})).toEqual({ phase: 'waiting_model', startedAt: 1000 });
+    expect(status({ generation: { attempt: 1 } })).toMatchObject({ phase: 'waiting_model' });
+    expect(
+      status({ generation: { attempt: 1, message: assistant([{ type: 'thinking', thinking: 'Hm' }]) } })
+    ).toMatchObject({
+      phase: 'thinking',
     });
+    expect(
+      status({ generation: { attempt: 1, message: assistant([{ type: 'text', text: 'Answer' }]) } })
+    ).toMatchObject({ phase: 'generating' });
+    expect(
+      runStatusText(
+        status({
+          generation: { attempt: 1, message: assistant([{ type: 'toolCall', name: 'bash', arguments: {}, id: 'a' }]) },
+        })
+      )
+    ).toBe('Preparing bash');
+    expect(runStatusText(status({ generation: { attempt: 2, retry: { at: 2000, error: 'rate limited' } } }))).toBe(
+      'Retrying after an error: rate limited'
+    );
   });
 
-  it('resolves display status from the live streaming assistant message', () => {
-    const status = resolveChatRunStatusFromStreamingMessage(
-      createInitialRunStatus(1000),
-      {
-        role: 'assistant',
-        content: [
-          { type: 'thinking', thinking: 'checking' },
-          { type: 'text', text: 'answer' },
-        ],
-      } as any,
-      1800
-    );
+  it('surfaces tool execution, tool result processing, compaction, and approval labels', () => {
+    const run = { taskId: 1, inputs: [] } as unknown as LiveState['run'];
+    const running = deriveRunStatus({ run, tools: [{ callId: 'a', name: 'bash', status: 'running' }] }, 1000);
+    expect(runStatusText(running)).toBe('Running bash');
+    expect(runStatusBadgeText(running)).toBe('Running tool');
+    expect(runStatusText(running, 'workspace_apply')).toBe('Waiting for approval: workspace apply');
+    expect(runStatusBadgeText(running, 'workspace_apply')).toBe('Approval');
 
-    expect(status).toMatchObject({ phase: 'generating', startedAt: 1000 });
-    expect(runStatusText(status)).toBe('Generating answer');
-  });
+    const processing = deriveRunStatus({ run, tools: [{ callId: 'a', name: 'bash', status: 'done' }] }, 1000);
+    expect(runStatusText(processing)).toBe('Processing tool result');
 
-  it('surfaces tool preparation, tool execution, and approval labels', () => {
-    let status = reduceChatRunStatus(
-      createInitialRunStatus(1000),
-      {
-        type: 'message_update',
-        message: {
-          role: 'assistant',
-          content: [{ type: 'toolCall', name: 'inspect_dashboard_metric_usage', arguments: {} }],
-        },
-        assistantMessageEvent: { type: 'toolcall_start' },
-      } as any,
-      1500
+    const compacting = deriveRunStatus(
+      { run, compactions: [{ taskId: 2, reason: 'threshold', blocking: true, attempt: 1 }] } as unknown as LiveState,
+      1000
     );
-    expect(runStatusText(status)).toBe('Preparing inspect dashboard metric usage');
-    expect(runStatusBadgeText(status)).toBe('Tool call');
-
-    status = reduceChatRunStatus(
-      status,
-      {
-        type: 'tool_execution_start',
-        toolName: 'inspect_dashboard_metric_usage',
-        toolCallId: 'call-1',
-        args: {},
-      } as any,
-      1800
-    );
-    expect(runStatusText(status)).toBe('Running inspect dashboard metric usage');
-    expect(runStatusBadgeText(status)).toBe('Running tool');
-    expect(runStatusText(status, 'workspace_apply')).toBe('Waiting for approval: workspace apply');
-    expect(runStatusBadgeText(status, 'workspace_apply')).toBe('Approval');
-  });
-
-  it('treats terminal partial updates as tool result processing', () => {
-    let status = reduceChatRunStatus(
-      createInitialRunStatus(1000),
-      {
-        type: 'tool_execution_update',
-        toolName: 'bash',
-        toolCallId: 'call-1',
-        args: {},
-        partialResult: {
-          content: [{ type: 'text', text: 'done' }],
-          details: { status: 'completed' },
-        },
-      } as any,
-      1500
-    );
-    expect(runStatusText(status)).toBe('Processing tool result');
-    expect(runStatusBadgeText(status)).toBe('Waiting');
-
-    status = resolveChatRunStatusFromStreamingMessage(
-      status,
-      {
-        role: 'assistant',
-        content: [{ type: 'text', text: 'final answer' }],
-      } as any,
-      1800
-    );
-    expect(runStatusText(status)).toBe('Generating answer');
+    expect(runStatusText(compacting)).toBe('Summarizing earlier conversation to fit the context window');
+    expect(runStatusBadgeText(compacting)).toBe('Compacting');
   });
 
   it('formats elapsed run time compactly', () => {

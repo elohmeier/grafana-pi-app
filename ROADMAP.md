@@ -31,19 +31,18 @@ design rationale, but three of its proposals were superseded:
   - Per-model `contextWindow` and `maxOutputTokens` flow through the settings UI,
     provisioning, the Pi importer, benchmark profiles, the frontend model, and
     the backend, which clamps request `maxTokens`.
-  - `transformContext` compaction elides old tool output, keeps a persisted
-    rolling summary, and falls back to truncation. The chat shows it: a
-    "Summarizing earlier conversation" run status, a transcript divider that
-    expands to the summary, and a warning when messages were dropped without a
-    summary. `npm run benchmark:compaction` measures summary fidelity (see
-    [Evidence](#evidence-from-live-testing)).
+  - Context compaction, first an own `transformContext` compactor, is now Pi
+    Durable's background compaction (see the Pi Durable entry below). The chat
+    shows a "Summarizing earlier conversation" run status and a transcript
+    divider that expands to the summary. `npm run benchmark:compaction`
+    measures summary fidelity (see [Evidence](#evidence-from-live-testing)).
   - One agent with a fixed tool set replaces the specialist subagents.
   - `AssistantSession` is the UI-independent session controller. It owns identity
-    and title, launch context, model choice, the agent and the system prompt and
-    tools of each turn, prompts and user shell commands, run and tool-run state,
-    compaction state, restore/import/export records, and the save queue. Views
-    attach as a `SessionHost` that supplies the environment (model stream,
-    Grafana broker, skills, page context) and storage. A test keeps React,
+    and title, launch context, model choice, the chat's harness and the system
+    prompt of each turn, prompts and user shell commands, and the projected
+    transcript and run state. Views attach as a `SessionHost` that supplies the
+    environment (model stream, Grafana broker, skills, page context) and the
+    chat log client. A test keeps React,
     Scenes, and `@grafana/runtime` out of its import graph. Page/sidebar handoffs
     re-attach the running session to the new view.
 - **M2, four-tool shell:**
@@ -81,9 +80,17 @@ design rationale, but three of its proposals were superseded:
     and `live diff|apply|discard|status` (`APPLY_SPEC`, with a spec-hash
     precondition against browser changes). `add-panel`, `set-panel`, and
     `label-filter` write schema-correct panels into working copies and the live file.
-- **Session storage:** chat sessions, including the session filesystem, are
-  stored per Grafana user in PostgreSQL for HA deployments, with plugin user
-  storage kept for existing installations.
+- **Pi Durable chats (2026-10-03):** every chat runs on a
+  `@earendil-works/pi-durable` 1.0 harness in the browser (pi-ai 1.0). It
+  replaces the `pi-agent-core` agent loop, the own compactor, the session
+  snapshot store (Grafana user storage and PostgreSQL snapshots, no migration),
+  and the save queue. Every step is committed to the chat's log in the plugin
+  backend before it is shown (`pkg/chatlog`: embedded SQLite by default,
+  PostgreSQL for HA), so a reload continues an interrupted answer, tools that may
+  have written report an interruption instead of rerunning, opening a chat
+  elsewhere takes it over with a fenced writer epoch, and summaries are written
+  in the background. The session filesystem and the turn's prompt are durable
+  documents. See [chat storage](docs/chat-storage.md).
 - **Pi 0.87.1 and protocol parity (2026-09-29):** `pi-agent-core`/`pi-ai` are
   upgraded from 0.75.5. The backend speaks Pi 0.87's proxy protocol (system
   prompt and tools arrive as system messages with sections and tool deltas;
@@ -181,8 +188,11 @@ design rationale, but three of its proposals were superseded:
 ### Not yet implemented
 
 - **Durable Pi server host (M4)** and the Mattermost host and identity spike
-  (A0). Sessions run in the browser; a run survives page/sidebar handoffs but
-  not closing Grafana.
+  (A0). Chats run in the browser on a Pi Durable harness whose state the backend
+  stores: a run survives page/sidebar handoffs and continues when the chat is
+  reopened after a reload, but makes no progress while no browser has it open.
+  The same harness and extension can later run in a server host over the same
+  storage contract.
 - **Server-side policy:** the datasource allow-list and dashboard validation run
   in the browser, and approval is bound to the change-set digest but not to the
   actor or an expiry (see the decision above).
@@ -195,8 +205,8 @@ design rationale, but three of its proposals were superseded:
 
 ### Next steps
 
-1. Run the compaction benchmark for each model profile in use and tune the
-   summarizer prompt or trigger ratios where recall drops.
+1. Run the compaction benchmark for each model profile in use on Pi Durable
+   compaction and tune the thresholds in `durable/settings.ts` where recall drops.
 2. Run the alert troubleshooting and dashboard benchmarks against the Pi 0.87
    build and the default local model, and add a benchmark for a model-driven
    alert rule edit through `workspace apply`.

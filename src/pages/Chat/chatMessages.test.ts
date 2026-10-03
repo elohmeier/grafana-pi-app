@@ -1,13 +1,12 @@
-import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, ToolResultMessage, Usage, UserMessage } from '@earendil-works/pi-ai';
 import {
-  convertChatMessagesToLlm,
   createUserShellMessage,
   finishedTurnSteps,
-  hasPersistableMessages,
   isStoppedToolResult,
   pairToolResults,
   parseUserShellInput,
+  userShellModelMessage,
+  type ChatMessage,
 } from './chatMessages';
 
 const usage: Usage = {
@@ -58,79 +57,12 @@ function toolResult(toolCallId: string): ToolResultMessage {
   };
 }
 
-describe('convertChatMessagesToLlm', () => {
-  it('drops aborted assistant notices from future LLM context', () => {
-    const messages: AgentMessage[] = [
-      user('original request'),
-      assistant({ content: [], stopReason: 'aborted', errorMessage: 'Request aborted by user' }),
-      user('follow-up'),
-    ];
-
-    expect(convertChatMessagesToLlm(messages)).toEqual([messages[0], messages[2]]);
-  });
-
-  it('drops failed assistant notices from future LLM context', () => {
-    const messages: AgentMessage[] = [
-      user('original request'),
-      assistant({ content: [], stopReason: 'error', errorMessage: 'Invalid value for content' }),
-      user('follow-up'),
-    ];
-
-    expect(convertChatMessagesToLlm(messages)).toEqual([messages[0], messages[2]]);
-  });
-
-  it('keeps valid assistant tool calls with their tool results', () => {
-    const toolCallingAssistant = assistant({
-      content: [{ type: 'toolCall', id: 'call_1', name: 'list_datasources', arguments: {} }],
-      stopReason: 'toolUse',
-    });
-    const result = toolResult('call_1');
-
-    expect(convertChatMessagesToLlm([user('list datasources'), toolCallingAssistant, result])).toEqual([
-      user('list datasources'),
-      toolCallingAssistant,
-      result,
-    ]);
-  });
-
-  it('drops orphan tool results when their assistant call is not retained', () => {
-    const blockedAssistant = assistant({
-      content: [{ type: 'toolCall', id: 'call_1', name: 'list_datasources', arguments: {} }],
-      stopReason: 'aborted',
-    });
-
-    expect(convertChatMessagesToLlm([user('list datasources'), blockedAssistant, toolResult('call_1')])).toEqual([
-      user('list datasources'),
-    ]);
-  });
-
-  it('normalizes legacy assistant messages with null content', () => {
-    const legacyAssistant = assistant({ content: null as unknown as AssistantMessage['content'] });
-
-    expect(convertChatMessagesToLlm([legacyAssistant])).toEqual([{ ...legacyAssistant, content: [] }]);
-  });
-
-  it('normalizes legacy assistant messages with string content', () => {
-    const legacyAssistant = assistant({ content: 'legacy text' as unknown as AssistantMessage['content'] });
-
-    expect(convertChatMessagesToLlm([legacyAssistant])).toEqual([
-      { ...legacyAssistant, content: [{ type: 'text', text: 'legacy text' }] },
-    ]);
-  });
-});
-
-describe('hasPersistableMessages', () => {
-  it('keeps aborted assistant notices persistable for the visible chat history', () => {
-    expect(hasPersistableMessages([assistant({ content: [], stopReason: 'aborted' })])).toBe(true);
-  });
-});
-
 describe('pairToolResults', () => {
   it('pairs results with calls from earlier assistant messages only', () => {
     const paired = toolResult('call_1');
     const orphan = toolResult('call_2');
     const early = toolResult('call_3');
-    const messages: AgentMessage[] = [
+    const messages: ChatMessage[] = [
       early,
       assistant({
         content: [
@@ -151,7 +83,11 @@ describe('pairToolResults', () => {
 describe('isStoppedToolResult', () => {
   it('recognizes tool calls the user stopped before or while they ran', () => {
     expect(
-      isStoppedToolResult({ ...toolResult('a'), isError: true, content: [{ type: 'text', text: 'Operation aborted' }] })
+      isStoppedToolResult({
+        ...toolResult('a'),
+        isError: true,
+        content: [{ type: 'text', text: '<harness>\n[error] Tool bash was aborted\n</harness>' }],
+      })
     ).toBe(true);
     expect(
       isStoppedToolResult({
@@ -178,7 +114,7 @@ describe('finishedTurnSteps', () => {
   });
 
   it('summarizes the steps of turns that ended with an answer', () => {
-    const messages: AgentMessage[] = [
+    const messages: ChatMessage[] = [
       user('q1'),
       step('a', 1000),
       step('b', 4000),
@@ -197,9 +133,9 @@ describe('finishedTurnSteps', () => {
   });
 
   it('leaves turns in progress, aborted, or still calling tools expanded', () => {
-    const aborted: AgentMessage[] = [user('q'), step('a', 1), assistant({ stopReason: 'aborted', content: [] })];
-    const calling: AgentMessage[] = [user('q'), step('a', 1), step('b', 2)];
-    const answering: AgentMessage[] = [user('q'), step('a', 1), assistant({ timestamp: 5 })];
+    const aborted: ChatMessage[] = [user('q'), step('a', 1), assistant({ stopReason: 'aborted', content: [] })];
+    const calling: ChatMessage[] = [user('q'), step('a', 1), step('b', 2)];
+    const answering: ChatMessage[] = [user('q'), step('a', 1), assistant({ timestamp: 5 })];
 
     expect(finishedTurnSteps(aborted, new Map())).toEqual([]);
     expect(finishedTurnSteps(calling, new Map())).toEqual([]);
@@ -232,9 +168,9 @@ describe('user shell messages', () => {
   it('shows the command and output to the model as user context, without image data', () => {
     const message = createUserShellMessage(result);
     expect(message.result).not.toHaveProperty('images');
-    expect(hasPersistableMessages([message])).toBe(true);
-    const [converted] = convertChatMessagesToLlm([message]);
+    const converted = userShellModelMessage(result);
     expect(converted.role).toBe('user');
+    expect(JSON.stringify(converted)).not.toContain('aW1n');
     const text = (converted as UserMessage).content as Array<{ type: string; text: string }>;
     expect(text[0].text).toContain('$ ls /session');
     expect(text[0].text).toContain('report.md');

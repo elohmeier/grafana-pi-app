@@ -1,4 +1,4 @@
-import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import type { ChatMessage } from './chatMessages';
 import {
   navigatePromptHistory,
   promptHistory,
@@ -7,14 +7,14 @@ import {
   type PromptHistoryState,
 } from './promptHistory';
 
-const user = (text: string) => ({ role: 'user', content: text, timestamp: 0 }) as AgentMessage;
+const user = (text: string) => ({ role: 'user', content: text, timestamp: 0 }) as ChatMessage;
 const shell = (command: string) =>
-  ({ role: 'userShell', content: [], result: { command }, timestamp: 0 }) as unknown as AgentMessage;
+  ({ role: 'userShell', content: [], result: { command }, timestamp: 0 }) as unknown as ChatMessage;
 const assistant = {
   role: 'assistant',
   content: [{ type: 'text', text: 'answer' }],
   timestamp: 0,
-} as unknown as AgentMessage;
+} as unknown as ChatMessage;
 
 describe('promptHistory', () => {
   it('lists prompts and shell commands newest first, without consecutive duplicates', () => {

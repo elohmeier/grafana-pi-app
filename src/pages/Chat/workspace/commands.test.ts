@@ -3,7 +3,6 @@ import { runWorkspaceBash, type WorkspaceShellDeps } from './shell';
 import { createFakeDashboardBroker } from './testUtils';
 import { formatBashResult } from './tools';
 import { createLiveDashboardMount, LIVE_DASHBOARD_PATH, liveRevision } from './liveDashboard';
-import { migrateLegacyInvestigationReport, REPORT_PATH } from './migration';
 import { SessionWorkspace } from './workspace';
 
 jest.mock('@grafana/runtime', () => ({ config: { bootData: { user: { orgId: 1 } } } }));
@@ -125,24 +124,6 @@ describe('grafana open and screenshot', () => {
       expect.objectContaining({ uid: 'checkout', panelId: 1 }),
       expect.anything()
     );
-  });
-});
-
-describe('legacy investigation report migration', () => {
-  it('converts a structured report into /session/report.md once', () => {
-    const workspace = new SessionWorkspace();
-    const legacy = {
-      title: 'Checkout 5xx',
-      status: 'complete',
-      scope: ['checkout-api'],
-      evidence: ['error ratio 4%'],
-      hypotheses: [],
-    };
-    expect(migrateLegacyInvestigationReport(workspace, legacy)).toBe(true);
-    expect(workspace.getScratchFile(REPORT_PATH)?.content).toBe(
-      '# Checkout 5xx\n\nStatus: complete\n\n## Scope\n\n- checkout-api\n\n## Evidence\n\n- error ratio 4%\n'
-    );
-    expect(migrateLegacyInvestigationReport(workspace, { title: 'Other' })).toBe(false);
   });
 });
 

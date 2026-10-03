@@ -5,6 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { test, expect } from './fixtures';
 import { LoadBrowserSession, type LoadSession } from './loadBrowserSession';
 import { runLoadStage, validateLoadConfig } from '../scripts/benchmarks/load.mjs';
+import { requestToolNames } from './llmRequest';
 
 // Exercises real chat/agent/tool wiring, with every model call intercepted.
 // This is an ordinary regression test and never generates endpoint load.
@@ -27,7 +28,15 @@ test('load driver isolates conversations, captures shell tool calls, resets and 
   const promptLengths: number[] = [];
   let missingShellTool = false;
   let mode: 'normal' | 'rate-limit' | 'hang' = 'normal';
-  const usage = { reported: true, input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: {} };
+  const usage = {
+    reported: true,
+    input: 10,
+    output: 5,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 15,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  };
   const sse = (events: unknown[]) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join('');
   const textEvents = [
     { type: 'text_start', contentIndex: 0 },
@@ -54,7 +63,7 @@ test('load driver isolates conversations, captures shell tool calls, resets and 
           return;
         }
         const { context: chat } = route.request().postDataJSON();
-        if (!chat.tools.some((t: { name: string }) => t.name === 'bash')) missingShellTool = true;
+        if (!requestToolNames(chat).includes('bash')) missingShellTool = true;
         const hasResult = chat.messages.some((m: { role: string }) => m.role === 'toolResult');
         if (!hasResult) promptLengths.push(chat.messages.length);
         await delay(50);

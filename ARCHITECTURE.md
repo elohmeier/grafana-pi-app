@@ -10,8 +10,8 @@ The app is easiest to understand as four layers:
 ```text
 Grafana plugin shell
   -> React and Grafana Scenes chat UI
-  -> Pi agent runtime and session filesystem in the browser
-  -> Go backend resources for secrets, the LLM proxy, and Jsonnet evaluation
+  -> Pi Durable harness and session filesystem in the browser, one per chat
+  -> Go backend resources for secrets, the LLM proxy, Jsonnet evaluation, and chat logs
 ```
 
 ## What An Agent Is
@@ -28,23 +28,25 @@ three more pieces:
   the tool, appends the result to the conversation, and asks the model to
   continue.
 
-In this app the loop is provided by `@earendil-works/pi-agent-core` (0.87). The
-central class is `Agent`, created by `AssistantSession.attach` in
-`src/pages/Chat/session/AssistantSession.ts`. The important inputs are:
+In this app the loop is the Pi Durable harness (`@earendil-works/pi-durable`).
+Each chat is one harness, opened by `AssistantSession`
+(`src/pages/Chat/session/AssistantSession.ts`) over the chat's commit log. The
+harness runs every model request, tool call, and compaction as a durable task
+that stores a checkpoint before it moves on. Its inputs are:
 
-- `systemPrompt`: built from `src/pages/Chat/systemPrompt.ts`, the skill
-  catalog, active skills, and the session filesystem section. Pi keeps the
-  prompt and tool declarations as a system message at the start of the agent
-  transcript; the session replaces that message with the prompt and tools of
-  each turn, and the chat shows, stores, and compacts only the conversation
-  after it (`conversationMessages`).
-- `model`: an OpenAI-compatible model object from `src/pages/Chat/model.ts`,
-  carrying the configured `contextWindow` and `maxTokens`.
-- `tools`: the fixed tool list (see [Tool System](#tool-system)).
-- `streamFn`: a Pi `streamProxy` call that posts to the plugin backend.
-- `transformContext`: the context compactor from
-  `src/pages/Chat/compaction.ts`.
-- `beforeToolCall`: a hook that can block tool execution before it happens.
+- an extension (`src/pages/Chat/durable/extension.ts`) with the fixed tools and
+  the system prompt sections of the current turn, read from the `app.turn`
+  document (base prompt with active skills from `systemPrompt.ts`, the session
+  filesystem section, launch and page context). The harness stores prompt and
+  tool changes as positional system entries and sends only what changed.
+- `models`: a pi-ai model collection with one provider, `grafana`
+  (`src/pages/Chat/durable/models.ts`), whose catalog is the configured model
+  list with each model's `contextWindow` and `maxTokens`, and whose stream is
+  a Pi `streamProxy` call to the plugin backend.
+- `settings`: compaction thresholds scaled to the chat's model
+  (`src/pages/Chat/durable/settings.ts`).
+- storage: `LogStorage` (`src/pages/Chat/durable/logStorage.ts`), see
+  [Chat Storage](#chat-storage).
 
 The model never directly touches Grafana, Prometheus, files, or dashboards. It
 only emits tool-call JSON. The app decides which tools exist, validates their
@@ -64,8 +66,11 @@ The main implementation areas are:
   `grafana-assistant-app` variant — the extension sidebar component and link.
 - `src/components/App/App.tsx`: App shell. It checks app access and mounts a
   `SceneApp`.
-- `src/pages/Chat/`: Chat UI, agent setup, compaction, skills, prompts, typed
-  tools, sidebar integration, and tests.
+- `src/pages/Chat/`: Chat UI, session, skills, prompts, typed tools, sidebar
+  integration, and tests.
+- `src/pages/Chat/durable/`: The Pi Durable integration: chat log client and
+  storage, model provider, extension, documents, harness settings, and the
+  transcript projection the UI renders.
 - `src/pages/Chat/workspace/`: The session filesystem, its mounts and
   transactions, the `read`/`write`/`edit`/`bash` tools, shell commands
   (`commands/`), direct apply (`apply.ts`), the Grafana broker
@@ -75,7 +80,8 @@ The main implementation areas are:
   artifacts) and shared Prometheus helpers.
 - `pkg/main.go`: Go backend entry point. Grafana starts this binary as the
   plugin backend process.
-- `pkg/plugin/`: Backend resource routes, LLM proxy, access checks, stateless
+- `pkg/chatlog/`: Chat log store on SQLite (default) or PostgreSQL.
+- `pkg/plugin/`: Backend resource routes, LLM proxy, chat routes, access checks, stateless
   Jsonnet evaluation and structural repair (`jsonnet_eval.go`,
   `jsonnet_assets.go`, `jsonnet_ast_repair.go`), Jsonnet library browsing
   (`jsonnet_libs.go`), and telemetry metrics.
@@ -167,49 +173,64 @@ view, so a chat can move between the full page and the sidebar mid-run.
 
 ## Chat And Agent Lifecycle
 
-`session/AssistantSession.ts` is one conversation, independent of React. It owns:
+`session/AssistantSession.ts` is one chat, independent of React. It owns:
 
 - identity and title (a new chat is titled from its first prompt or `!` command),
 - the launch context (dashboard panel action or `@grafana/assistant` launch),
   which reaches the model with the first prompt only,
-- the model and thinking-level choice of the chat,
-- the Pi Agent, the system prompt and tools of each turn (skill selection,
-  launch and page context blocks, workspace toolkit),
-- `prompt()` and `runUserShell()` (`!command` in the composer),
+- the chat's harness: opened with the first prompt or command of a new chat, or
+  when a stored chat is shown; its conversation, view, and event stream,
+- `prompt()` (stores the turn's prompt in `app.turn`, the model choice in
+  `pi.agent`, and submits the input), `runUserShell()` (`!command` in the
+  composer, appended as an `app.shell` entry), `abort()`, and `stop()`,
 - the session filesystem, artifacts, approval channel, and catalog cache,
-- run progress (`runStatus`, per-call `toolRuns`), compaction state, and the
-  truncation notice,
-- restore from stored or imported records (`AssistantSession.restore`, with
-  legacy migrations), the stored record, and the serialized save queue with
-  its save status.
+- the projected transcript (`durable/transcript.ts`): messages from the
+  transcript entries, including those before a compaction, the streamed
+  partial, tool progress from `pi.live`, the run status, and compaction
+  summaries,
+- the storage state: new, opening, open, or lost (the chat was opened
+  elsewhere, deleted, or could not be stored).
 
-Views read this through `getState()`/`subscribeState()` and agent events through
-`subscribe()`. A view attaches as the session's `SessionHost`
-(`attach(host)`): the host supplies the environment for each prompt and shell
-command (stream function, resolved model, Grafana broker, skills, Python runner,
-live dashboard API, page context) and the storage adapter, and receives
-telemetry and benchmark hooks. The core has no imports from React, Scenes, or
-`@grafana/runtime`; `session/sessionRecord.ts` holds the stored and export
-formats. React (`ChatSceneObject.tsx`) owns navigation, the session list,
-scrolling, the composer, the leave guard, and rendering.
+Views read this through `getState()`/`subscribeState()` and run events (shaped
+like the Pi coding agent's, from `watchEvents()`, see `agentEvents.ts`) through
+`subscribe()`. A view attaches as the session's `SessionHost` (`attach(host)`):
+the host supplies the environment for each prompt, tool call, and shell command
+(stream function, model, Grafana broker, skills, Python runner, live dashboard
+API, page context), the chat log client, and telemetry hooks. The core has no
+imports from React, Scenes, or `@grafana/runtime`. React (`ChatSceneObject.tsx`)
+owns navigation, the chat list, scrolling, the composer, the leave guard, and
+rendering.
 
-Page/sidebar handoffs share the same session instance through `chatRunRegistry.ts`;
-the receiving view attaches as the new host. Artifacts, pending approvals, and
-run progress stay with the session. The agent persists its captured state at
-completion even when no view is attached. Page and sidebar share one
-`SessionRepository`, so storage revisions survive a handoff.
+The run belongs to the harness, not to the view: a reload or closed tab
+interrupts it, and opening the chat again continues it. Page/sidebar handoffs
+share the same session instance through `chatRunRegistry.ts`, so a run keeps
+going while the view changes. Leaving a chat through the leave guard aborts its
+run.
 
-Each turn refreshes model settings, skill instructions, and the context snapshot.
 Tools are always `read`, `write`, `edit`, and `bash`. The catalog mount survives
-these refreshes and retains its TTL cache. `/session/context.json` contains the
+toolkit rebuilds and retains its TTL cache. `/session/context.json` contains the
 captured route, dashboard launch, capabilities, and visible Prometheus datasources.
 It is read-only, as are `/session/receipts/` and the other generated mounts.
 
-Storage remains per Grafana user through plugin user storage, capped at 50 sessions.
-A session stores messages, model settings, artifacts, workspace files and overlays,
-apply receipts, and compaction state. No plans are stored. Older plan records are
-ignored on restore. Imported sessions discard the apply journal. Legacy Jsonnet
-sources and investigation reports still migrate into ordinary workspace files.
+## Chat Storage
+
+Each chat is stored as its commit log in the plugin backend (`pkg/chatlog`,
+routes in `pkg/plugin/chats.go`), per Grafana user (identity token verified
+against Grafana's signing keys), in an embedded SQLite file by default or in a
+PostgreSQL schema for HA deployments. See [chat storage](docs/chat-storage.md).
+
+- `LogStorage` keeps the chat in a Pi Durable `MemoryStorage` and sends every
+  commit to `POST /chats/{id}/commits` before applying it. Opening a chat
+  replays `GET /chats/{id}/log`.
+- `POST /chats/{id}/open` makes the caller the chat's only writer (a new
+  epoch); commits from an earlier writer are refused, which stops that view's
+  harness. Commits carry the next sequence number and a digest, so a retry after
+  a lost response is recognized.
+- Rows that supersede earlier ones (task records, submissions, the content of
+  latest-only documents such as the streamed partial) carry a replacement key,
+  and the backend deletes their predecessors.
+- The session filesystem, artifacts, and apply journal are the `app.workspace`
+  document, committed after every tool call and shell command.
 
 ## LLM Streaming Boundary
 
@@ -273,16 +294,23 @@ put into frontend `jsonData`.
 
 ## Tool System
 
-Tools are defined as Pi `AgentTool` objects. Each tool has:
+Tools are defined in `workspace/tools.ts` (`WORKSPACE_TOOL_DEFINITIONS`). Each
+tool has:
 
 - `name`: what the model calls.
 - `label`: human-readable UI label.
 - `description`: model-facing instructions for when to call it.
 - `parameters`: TypeBox schema used to validate arguments.
+- `replay`: whether a call a reload interrupted may run again. Only `read` is
+  `safe`; for `write`, `edit`, and `bash` the model is told the call was
+  interrupted, because the call may already have changed files or Grafana.
 - `execute`: code that runs after validation.
 
-The factory is `createWorkspaceTools` in `workspace/tools.ts`. It returns the
-same list on every turn:
+The extension registers them with the harness, which runs each call as a
+durable task; the registered tool resolves the session's current toolkit
+(`createWorkspaceTools`, bound to the attached view's Grafana capabilities) at
+each call and commits the session filesystem after it. The list is the same on
+every turn:
 
 - `read`, `write`, `edit`, `bash`: the session filesystem tools from
   `src/pages/Chat/workspace/tools.ts`. Discovery, PromQL queries, dashboard
@@ -360,10 +388,9 @@ Invariants:
 The user can use the same shell: composer input that starts with `!` runs
 through `runShell` from `createSessionWorkspaceToolkit`, with the same commands,
 transaction, and approvals, but without a model call. The result is appended
-to the transcript as a custom `userShell` agent message (`chatMessages.ts`),
-rendered like a bash result, persisted with the session, and converted into a
-user message for the model, so the agent sees the command and its output on
-the next prompt.
+to the transcript as an `app.shell` entry that carries the result for the view
+(rendered like a bash result) and a user message for the model, so the agent
+sees the command and its output on the next prompt.
 
 `runWorkspaceBash` (`src/pages/Chat/workspace/shell.ts`) runs the just-bash
 browser bundle (`just-bash/browser`) against the transaction through
@@ -687,59 +714,40 @@ Each configured model carries `contextWindow` (default 131072) and
 in `src/pages/Chat/model.ts`) and the backend (`normalizeModelLimits` in
 `pkg/plugin/app.go`) clamp them the same way: the window to 4096–10,000,000
 tokens and the output to at least 256 tokens and at most half the window. The
-Pi model object receives them as `contextWindow` and `maxTokens`, and the LLM
-proxy clamps every request's output budget to the model's `maxOutputTokens`
-(`clampRequestMaxTokens`).
+model catalog receives them as `contextWindow` and `maxTokens`; the stream
+requests `maxTokens` explicitly, and the LLM proxy clamps every request's output
+budget to the model's `maxOutputTokens` (`clampRequestMaxTokens`).
 
 The limits are configurable in the plugin settings UI, in provisioning
 (`PI_CONTEXT_WINDOW` and `PI_MAX_OUTPUT_TOKENS` in `docker-compose.yaml`), and
-through `scripts/configure-pi-model.mjs` and benchmark profiles, which import
-Pi's `contextWindow`/`maxTokens` or take `--context-window` and
-`--max-output-tokens`.
+through `scripts/configure-pi-model.mjs` and benchmark profiles.
 
-`ContextCompactor` (`src/pages/Chat/compaction.ts`) is the agent's
-`transformContext` hook. It shapes only what is sent to the model; the agent
-state and the UI transcript stay complete.
+Compaction is Pi Durable's. Before each request the harness estimates the
+context from the newest reported usage plus the messages after it. With the
+thresholds from `durable/settings.ts`:
 
-1. The history budget is `contextWindow − maxOutputTokens − fixed tokens
-(system prompt and tool schemas) − a 2048-token margin`. Tokens are
-   estimated at about four characters per token.
-2. Under 80% of the budget, the transcript is sent unchanged, after any
-   earlier summary.
-3. Over it, large tool results outside the recent window (the last 35% of the
-   budget) are elided, and if that is not enough, those of every step except
-   the latest, whose results the model acts on next. Elided output can be read
-   or run again, so this comes before summarizing, which loses detail for good.
-   Without it, a turn that prints several large files summarized again on
-   every step.
-4. Output of the latest step that alone exceeds the budget is clipped (head and
-   tail, with a note to read the file in parts or filter it). Summarizing
-   cannot make room for it: before this stage, every step summarized again,
-   truncation dropped the tool call, and the model repeated the command.
-5. If that is still too much, older messages are summarized by the current
-   model into a rolling `<conversation_summary>`, extended incrementally. The
-   summarizer is told to keep identifiers, paths, queries, and receipt IDs
-   verbatim, and to stay under about a quarter of the history budget, so the
-   summary and the recent window leave room for several steps before the next
-   compaction. Transcript chunks per summarizer request are sized from the
-   window, since that request does not carry the agent's system prompt and tools. Cuts are placed at message boundaries that do not separate tool
-   calls from their results, and the latest message is never summarized.
-6. If summarization fails or the result is still too large, the oldest
-   messages are dropped.
+- `reserveTokens` is the model's `maxOutputTokens`; a request above
+  `contextWindow − reserveTokens` waits for a summary.
+- `backgroundTokens` (15% of the window, at most 32k tokens) before that
+  point, a summary starts in the background while the chat keeps working, and
+  it is placed at the next turn boundary.
+- `keepRecentTokens` (20% of the window, at most 20k tokens) stay verbatim.
+  Cuts never separate a tool call from its result.
+- A request the provider rejects as too long is compacted and retried once.
+- The model provider adds an observability focus to the harness's summarizer
+  request (`withSummaryFocus` in `durable/models.ts`): user-stated facts,
+  dashboard UIDs and panel titles, datasource UIDs, metrics, labels, PromQL,
+  paths, and receipt IDs are listed verbatim. The harness's own prompt targets
+  coding sessions, and without the focus the compaction benchmark lost the
+  panel titles of the first turn.
 
-The compaction state (summary, covered message count, and an anchor
-fingerprint that invalidates it when the history changes) is cached per
-session, shared across page/sidebar handoff, and persisted with the session.
-
-The chat shows compaction: while the summarizer runs, the run status reads
-"Summarizing earlier conversation", and the transcript shows a divider before
-the first turn the model still sees verbatim. The divider expands to the
-summary. When messages were dropped without a summary, a warning follows the
-latest reply. Compaction events are also recorded for benchmarks, and
-`npm run benchmark:compaction` checks that facts from early turns survive
-summarization (see `tests/agentCompactionBenchmark.spec.ts`). The system prompt asks the model
-to keep `/session/findings.md` for long tasks because
-those files survive compaction.
+The summary is a `pi.compaction` entry that starts the model's context; older
+entries stay in storage. The transcript shows every message, with a divider
+before the first message the model still sees verbatim that expands to the
+summary, and the run status reads "Summarizing earlier conversation" while a
+request waits for one. `npm run benchmark:compaction` checks that facts from
+early turns survive summarization (see `tests/agentCompactionBenchmark.spec.ts`).
+The system prompt asks the model to keep `/session/findings.md` for long tasks.
 
 ## Guardrails
 
@@ -901,6 +909,7 @@ Routes are registered in `pkg/plugin/resources.go`:
 /jsonnet/fix
 /jsonnet-libs/files
 /promql/parse
+/chats, /chats/{id}, /chats/{id}/open, /chats/{id}/log, /chats/{id}/commits
 ```
 
 `/jsonnet-libs/files` lists the vendored library files, or returns one
@@ -1009,9 +1018,11 @@ For a quick onboarding path:
 3. `src/module.tsx`: how the frontend enters Grafana, extension points, and the
    variant gate.
 4. `src/components/App/App.tsx`: access check and Scenes app shell.
-5. `src/pages/Chat/session/AssistantSession.ts`: one conversation (agent,
-   turns, shell, run state, persistence); `src/pages/Chat/ChatSceneObject.tsx`:
-   the chat view that hosts it, session list, approvals.
+5. `src/pages/Chat/session/AssistantSession.ts`: one chat on its Pi Durable
+   harness (turns, shell, run state, storage); `src/pages/Chat/durable/`: the
+   storage, model provider, extension, and transcript projection;
+   `src/pages/Chat/ChatSceneObject.tsx`: the chat view that hosts it, chat
+   list, approvals.
 6. `src/pages/Chat/systemPrompt.ts` and `src/pages/Chat/workspace/prompt.ts`:
    top-level behavior rules and the filesystem contract.
 7. `src/pages/Chat/domain/index.ts`: the fixed tool list.
@@ -1019,8 +1030,8 @@ For a quick onboarding path:
    session filesystem, transactions, and bash.
 9. `src/pages/Chat/workspace/commands/commands.ts` and `workspace/apply.ts`:
    commands and direct apply.
-10. `src/pages/Chat/compaction.ts`: context budgeting.
-11. `pkg/plugin/resources.go`: LLM proxy and resource routes.
+10. `pkg/plugin/resources.go`: LLM proxy and resource routes.
+11. `pkg/plugin/chats.go` and `pkg/chatlog/`: chat storage routes and store.
 12. `pkg/plugin/jsonnet_eval.go`: stateless Jsonnet eval and repair routes.
 13. `pkg/plugin/access.go`: backend access guard.
 

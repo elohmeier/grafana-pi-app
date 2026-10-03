@@ -1,13 +1,15 @@
-import { type ProxyStreamOptions, type StreamFn, streamProxy } from '@earendil-works/pi-agent-core';
+import { type ProxyStreamOptions, streamProxy } from '@earendil-works/pi-agent-core';
+import type { AssistantStreamFn } from './durable/models';
 import {
   type AssistantMessageEvent,
   type AssistantMessageEventStream,
+  type Usage,
   createAssistantMessageEventStream,
 } from '@earendil-works/pi-ai';
 
 type ProxyStream = (
-  model: Parameters<StreamFn>[0],
-  context: Parameters<StreamFn>[1],
+  model: Parameters<AssistantStreamFn>[0],
+  context: Parameters<AssistantStreamFn>[1],
   options: ProxyStreamOptions
 ) => AssistantMessageEventStream;
 
@@ -27,7 +29,7 @@ const UNAUTHORIZED = /^Proxy error: 401\b/;
  * expires. A 401 before any streamed event is retried once after refreshing the session.
  */
 export function createGrafanaStreamFn({ proxyUrl, refreshSession, stream = streamProxy }: GrafanaStreamOptions) {
-  const streamFn: StreamFn = (model, context, options) => {
+  const streamFn: AssistantStreamFn = (model, context, options) => {
     const request = () =>
       stream(model, context, {
         ...options,
@@ -44,7 +46,7 @@ export function createGrafanaStreamFn({ proxyUrl, refreshSession, stream = strea
           rejected = event;
           break;
         }
-        output.push(event);
+        output.push(normalizeEventUsage(event));
       }
       if (rejected) {
         const refreshed = await refreshSession().then(
@@ -57,7 +59,7 @@ export function createGrafanaStreamFn({ proxyUrl, refreshSession, stream = strea
           return;
         }
         for await (const event of request()) {
-          output.push(event);
+          output.push(normalizeEventUsage(event));
         }
       }
       output.end();
@@ -65,4 +67,38 @@ export function createGrafanaStreamFn({ proxyUrl, refreshSession, stream = strea
     return output;
   };
   return streamFn;
+}
+
+/**
+ * Completes the usage of a final message: the harness sums token and cost fields into the
+ * chat's usage, and a missing field would make that sum NaN, which is not storable JSON.
+ */
+function normalizeEventUsage(event: AssistantMessageEvent): AssistantMessageEvent {
+  if (event.type === 'done') {
+    return { ...event, message: { ...event.message, usage: normalizeUsage(event.message.usage) } };
+  }
+  if (event.type === 'error') {
+    return { ...event, error: { ...event.error, usage: normalizeUsage(event.error.usage) } };
+  }
+  return event;
+}
+
+function normalizeUsage(usage: Partial<Usage> | undefined): Usage {
+  const number = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+  const cost: Partial<Usage['cost']> = usage?.cost ?? {};
+  return {
+    ...usage,
+    input: number(usage?.input),
+    output: number(usage?.output),
+    cacheRead: number(usage?.cacheRead),
+    cacheWrite: number(usage?.cacheWrite),
+    totalTokens: number(usage?.totalTokens),
+    cost: {
+      input: number(cost.input),
+      output: number(cost.output),
+      cacheRead: number(cost.cacheRead),
+      cacheWrite: number(cost.cacheWrite),
+      total: number(cost.total),
+    },
+  };
 }

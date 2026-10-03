@@ -1,6 +1,12 @@
-import type { AgentToolResult } from '@earendil-works/pi-agent-core';
+import type { ImageContent, TextContent } from '@earendil-works/pi-ai';
 
-export type TextToolResult<TDetails = Record<string, unknown>> = AgentToolResult<TDetails>;
+/** What a tool returns: content for the model, details for the transcript view. */
+export type ToolResult<TDetails = any> = {
+  content: Array<TextContent | ImageContent>;
+  details: TDetails;
+};
+
+export type TextToolResult<TDetails = Record<string, unknown>> = ToolResult<TDetails>;
 
 export function textResult<TDetails extends Record<string, unknown>>(
   text: string,

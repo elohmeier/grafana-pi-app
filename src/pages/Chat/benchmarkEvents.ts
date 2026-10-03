@@ -1,4 +1,5 @@
-import type { AgentEvent, AgentMessage } from '@earendil-works/pi-agent-core';
+import type { ChatAgentEvent } from './agentEvents';
+import type { ChatMessage } from './chatMessages';
 
 /**
  * Browser instrumentation for the agent benchmarks: serialized agent events are
@@ -7,7 +8,7 @@ import type { AgentEvent, AgentMessage } from '@earendil-works/pi-agent-core';
  */
 
 export type BenchmarkAgentEvent = {
-  type: AgentEvent['type'] | 'context_compaction';
+  type: ChatAgentEvent['type'];
   timestamp: number;
   [key: string]: unknown;
 };
@@ -22,7 +23,7 @@ declare global {
   }
 }
 
-export function emitBenchmarkEvent(event: AgentEvent) {
+export function emitBenchmarkEvent(event: ChatAgentEvent) {
   if (typeof window === 'undefined') {
     return;
   }
@@ -30,7 +31,7 @@ export function emitBenchmarkEvent(event: AgentEvent) {
   recordSerializedBenchmarkEvent(serializeBenchmarkEvent(event));
 }
 
-export function recordSerializedBenchmarkEvent(serialized: BenchmarkAgentEvent) {
+function recordSerializedBenchmarkEvent(serialized: BenchmarkAgentEvent) {
   if (typeof window === 'undefined') {
     return;
   }
@@ -61,82 +62,6 @@ export function recordSerializedBenchmarkEvent(serialized: BenchmarkAgentEvent) 
   }
 }
 
-export function emitBenchmarkTranscriptSnapshot(messages: AgentMessage[]) {
-  if (typeof window === 'undefined' || !isBenchmarkCaptureEnabled()) {
-    return;
-  }
-
-  if ((window.__PI_AGENT_BENCHMARK_EVENTS__?.length ?? 0) > 0) {
-    return;
-  }
-
-  const timestamp = Date.now();
-  const toolCalls = benchmarkToolCallsFromTranscript(messages);
-  for (const message of messages) {
-    const record = message as unknown as Record<string, unknown>;
-    if (record?.role !== 'toolResult') {
-      continue;
-    }
-    const toolCallId = typeof record.toolCallId === 'string' ? record.toolCallId : undefined;
-    const toolCall = toolCallId ? toolCalls.get(toolCallId) : undefined;
-    const toolName = typeof record.toolName === 'string' ? record.toolName : toolCall?.name;
-    if (!toolCallId || !toolName) {
-      continue;
-    }
-    recordSerializedBenchmarkEvent({
-      type: 'tool_execution_end',
-      timestamp,
-      toolCallId,
-      toolName,
-      args: sanitizeBenchmarkValue(toolCall?.args),
-      result: sanitizeBenchmarkValue({
-        content: record.content,
-        details: record.details,
-        isError: record.isError,
-      }),
-      isError: record.isError === true,
-    });
-  }
-
-  const finalAssistantMessage = [...messages]
-    .reverse()
-    .find((message) => (message as unknown as Record<string, unknown>)?.role === 'assistant');
-  if (finalAssistantMessage) {
-    recordSerializedBenchmarkEvent({
-      type: 'message_end',
-      timestamp,
-      message: summarizeBenchmarkMessage(finalAssistantMessage),
-    });
-  }
-  recordSerializedBenchmarkEvent({
-    type: 'agent_end',
-    timestamp,
-    messageCount: messages.length,
-    message: finalAssistantMessage ? summarizeBenchmarkMessage(finalAssistantMessage) : undefined,
-  });
-}
-
-function benchmarkToolCallsFromTranscript(messages: AgentMessage[]) {
-  const toolCalls = new Map<string, { name: string; args: unknown }>();
-  for (const message of messages) {
-    const record = message as unknown as Record<string, unknown>;
-    if (record?.role !== 'assistant' || !Array.isArray(record.content)) {
-      continue;
-    }
-    for (const block of record.content) {
-      if (!block || typeof block !== 'object') {
-        continue;
-      }
-      const content = block as Record<string, unknown>;
-      if (content.type !== 'toolCall' || typeof content.id !== 'string' || typeof content.name !== 'string') {
-        continue;
-      }
-      toolCalls.set(content.id, { name: content.name, args: content.arguments });
-    }
-  }
-  return toolCalls;
-}
-
 function isBenchmarkCaptureEnabled() {
   if (window.__PI_AGENT_BENCHMARK_CAPTURE__ === true) {
     return true;
@@ -149,7 +74,7 @@ function isBenchmarkCaptureEnabled() {
   }
 }
 
-function serializeBenchmarkEvent(event: AgentEvent): BenchmarkAgentEvent {
+function serializeBenchmarkEvent(event: ChatAgentEvent): BenchmarkAgentEvent {
   const timestamp = Date.now();
 
   if (event.type === 'agent_end') {
@@ -169,7 +94,6 @@ function serializeBenchmarkEvent(event: AgentEvent): BenchmarkAgentEvent {
       type: event.type,
       timestamp,
       message: summarizeBenchmarkMessage(event.message),
-      assistantMessageEvent: sanitizeBenchmarkValue(event.assistantMessageEvent),
     };
   }
 
@@ -185,7 +109,6 @@ function serializeBenchmarkEvent(event: AgentEvent): BenchmarkAgentEvent {
     return {
       type: event.type,
       timestamp,
-      message: summarizeBenchmarkMessage(event.message),
       toolResultCount: event.toolResults.length,
     };
   }
@@ -206,7 +129,6 @@ function serializeBenchmarkEvent(event: AgentEvent): BenchmarkAgentEvent {
       timestamp,
       toolCallId: event.toolCallId,
       toolName: event.toolName,
-      args: sanitizeBenchmarkValue(event.args),
       partialResult: sanitizeBenchmarkValue(event.partialResult),
     };
   }
@@ -222,10 +144,14 @@ function serializeBenchmarkEvent(event: AgentEvent): BenchmarkAgentEvent {
     };
   }
 
+  if (event.type === 'context_compaction' || event.type === 'task_failed') {
+    return { ...event, timestamp };
+  }
+
   return { type: event.type, timestamp };
 }
 
-function summarizeBenchmarkMessage(message: AgentMessage) {
+function summarizeBenchmarkMessage(message: ChatMessage) {
   if (!message || typeof message !== 'object') {
     return undefined;
   }

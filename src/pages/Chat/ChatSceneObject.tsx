@@ -11,7 +11,6 @@ import React, {
   useSyncExternalStore,
 } from 'react';
 import { css, cx } from '@emotion/css';
-import { type AgentEvent, type AgentMessage, type StreamFn } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage, ToolResultMessage } from '@earendil-works/pi-ai';
 import { SceneComponentProps, SceneObjectBase, SceneObjectState } from '@grafana/scenes';
 import {
@@ -29,7 +28,7 @@ import {
   TextArea,
   useStyles2,
 } from '@grafana/ui';
-import { getBackendSrv, locationService, usePluginUserStorage } from '@grafana/runtime';
+import { getBackendSrv, locationService } from '@grafana/runtime';
 import { useRestrictedGrafanaApis, type DashboardMutationAPI, type GrafanaTheme2 } from '@grafana/data';
 import { PLUGIN_BASE_URL, PLUGIN_ID } from '../../constants';
 import { testIds } from '../../components/testIds';
@@ -49,13 +48,13 @@ import { formatAssistantError, type AssistantErrorView } from './llmErrors';
 import { createGrafanaStreamFn } from './grafanaStream';
 import { getConfiguredModels, resolveChatModelSettings, type PiAppJsonData, type PiAppThinkingLevel } from './model';
 import {
-  conversationMessages,
   finishedTurnSteps,
-  hasPersistableMessages,
   pairToolResults,
   parseUserShellInput,
+  type ChatMessage,
   type TurnSteps,
 } from './chatMessages';
+import type { ChatAgentEvent } from './agentEvents';
 import { getGrafanaSkills } from './skills';
 import {
   ContentBlocks,
@@ -78,35 +77,23 @@ import { externalAssistantSessionTitle, type ExternalAssistantLaunch } from './e
 import { getAssistantDockRoute, routeFromLocation, storeAssistantSidebarDockRequest } from './sidebarDock';
 import { buildAssistantSidebarPageContextSnapshot } from './sidebarPageContext';
 import { createAssistantTelemetryReporter } from './telemetry';
-import {
-  formatRunElapsed,
-  resolveChatRunStatusFromStreamingMessage,
-  runStatusBadgeText,
-  runStatusText,
-} from './streamingStatus';
+import { formatRunElapsed, runStatusBadgeText, runStatusText } from './streamingStatus';
 import { getChatRun, isStoredChatRun, removeChatRun, storeChatRun } from './chatRunRegistry';
 import { createGrafanaWorkspaceBroker } from './workspace/grafanaBroker';
-import { REPORT_PATH } from './workspace/migration';
+import { REPORT_PATH } from './workspace/paths';
 import { AssistantSession, type SessionEnvironment, type SessionHost } from './session/AssistantSession';
-import { SessionRepository, type SessionMetadata } from './session/SessionRepository';
-import {
-  CHAT_SESSION_EXPORT_KIND,
-  CHAT_SESSION_EXPORT_SCHEMA_VERSION,
-  chatSessionExportFilename,
-  createSessionId,
-  importTitleFromFilename,
-  parseChatSessionExport,
-  type ChatSessionExport,
-  type StoredSession,
-} from './session/sessionRecord';
-import { emitBenchmarkEvent, emitBenchmarkTranscriptSnapshot, recordSerializedBenchmarkEvent } from './benchmarkEvents';
+import { chatExportFilename, type ChatExport } from './session/chatIdentity';
+import { ChatLogError, type ChatSummary } from './durable/chatLogClient';
+import { grafanaChatLog } from './durable/grafanaChatLog';
+import type { AssistantStreamFn } from './durable/models';
+import type { TranscriptCompaction } from './durable/transcript';
+import { emitBenchmarkEvent } from './benchmarkEvents';
 import { createBrowserPythonRunner } from './workspace/python/pythonBrowserRunner';
-import type { CompactionState } from './compaction';
-import { CompactionDivider, ContextTruncatedNotice } from './CompactionNotice';
+import { CompactionDivider } from './CompactionNotice';
 
 type ChatSceneObjectState = SceneObjectState;
 
-type SessionIndexItem = SessionMetadata;
+type SessionIndexItem = ChatSummary;
 
 type ChatLeaveGuardAction = {
   title: string;
@@ -140,14 +127,6 @@ const THINKING_LEVEL_OPTIONS: Array<{
 type PluginSettingsResponse = {
   jsonData?: PiAppJsonData;
 };
-
-// Shared by page and sidebar views, so a session handed over between them keeps its storage revisions.
-let sessionRepository: SessionRepository | undefined;
-
-function sharedSessionRepository(storage: ConstructorParameters<typeof SessionRepository>[0]) {
-  sessionRepository ??= new SessionRepository(storage);
-  return sessionRepository;
-}
 
 export class ChatSceneObject extends SceneObjectBase<ChatSceneObjectState> {
   static Component = ChatSceneRenderer;
@@ -187,11 +166,6 @@ export function ChatApp({
   const isSidebarVariant = variant === 'sidebar';
   const canDockToSidebar = !isSidebarVariant && PLUGIN_ID === ASSISTANT_SIDEBAR_PLUGIN_ID;
   const styles = useStyles2(getStyles);
-  const storage = usePluginUserStorage();
-  const repositoryRef = useRef<SessionRepository>(undefined);
-  if (repositoryRef.current == null) {
-    repositoryRef.current = sharedSessionRepository(storage);
-  }
   const { dashboardMutationAPI } = useRestrictedGrafanaApis();
   const liveDashboardEditingAvailable = hasActiveDashboardMutationCommands(dashboardMutationAPI);
   const pluginMeta = usePluginMeta();
@@ -202,18 +176,21 @@ export function ChatApp({
     [pluginMetaJsonData, settingsJsonData]
   );
   const configuredModels = useMemo(() => getConfiguredModels(jsonData), [jsonData]);
-  // The session in view. Until the first session is loaded, a detached placeholder without an agent.
+  // The session in view. Until the first session is loaded, a detached placeholder.
   const [session, setSession] = useState(() => new AssistantSession());
   const sessionRef = useRef(session);
+  // The session this view is the host of; the placeholder before the first load has none.
+  const [attachedSession, setAttachedSession] = useState<AssistantSession>();
   const sessionState = useSyncExternalStore(session.subscribeState, session.getState);
   const workspace = session.workspace;
-  const agent = session.agent;
-  const currentSessionId = session.agent ? sessionState.id : undefined;
+  const transcript = sessionState.transcript;
+  const storageState = sessionState.storage;
+  const isAttached = attachedSession === session;
+  const currentSessionId = session.started ? sessionState.id : undefined;
   const currentTitle = sessionState.title;
-  const toolRuns = sessionState.toolRuns;
-  const runStatus = sessionState.runStatus;
+  const toolRuns = transcript.toolRuns;
+  const runStatus = transcript.runStatus;
   const userShellRunning = sessionState.shellRunning;
-  const saveState = sessionState.save;
   const [isModelSettingsOpen, setIsModelSettingsOpen] = useState(false);
   const modelSelectId = useId();
   const thinkingLevelSelectId = useId();
@@ -234,7 +211,7 @@ export function ChatApp({
     : THINKING_LEVEL_OPTIONS;
   const skills = useMemo(() => getGrafanaSkills(jsonData), [jsonData]);
   const assistantTelemetry = useMemo(() => createAssistantTelemetryReporter(), []);
-  const streamFn = useMemo<StreamFn>(
+  const streamFn = useMemo<AssistantStreamFn>(
     () =>
       createGrafanaStreamFn({
         proxyUrl: `/api/plugins/${PLUGIN_ID}/resources/llm`,
@@ -286,7 +263,6 @@ export function ChatApp({
   const [error, setError] = useState<string>();
   const unsubscribeRef = useRef<() => void>(undefined);
   const sessionsRef = useRef<SessionIndexItem[]>([]);
-  const importSessionInputRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesContainerRef = useRef<HTMLElement | null>(null);
   const autoScrollRef = useRef(true);
@@ -301,10 +277,7 @@ export function ChatApp({
   const [blockedLocation, setBlockedLocation] = useState<ReturnType<typeof locationService.getLocation>>();
   const [isAutoScrollPaused, setIsAutoScrollPaused] = useState(false);
 
-  // A failed save shows as an error until it is dismissed or the next save starts.
-  const [dismissedSave, setDismissedSave] = useState<typeof saveState>();
-  const displayedError =
-    error ?? (saveState?.status === 'error' && saveState !== dismissedSave ? saveState.error : undefined);
+  const displayedError = error;
 
   const settleToolConfirmation = useCallback(
     (approved: boolean, paths?: string[]) => sessionRef.current.approvals.settle(approved, paths),
@@ -319,6 +292,7 @@ export function ChatApp({
     (target: AssistantSession): SessionEnvironment => {
       const { model, thinkingLevel } = resolveChatModelSettings(jsonData, target.getState());
       return {
+        jsonData,
         streamFn,
         model,
         thinkingLevel,
@@ -341,55 +315,56 @@ export function ChatApp({
       workspaceBroker,
     ]
   );
-  const persist = useCallback(async (record: StoredSession) => {
-    const saved = await repositoryRef.current!.save(record);
-    const next = [saved, ...sessionsRef.current.filter((item) => item.id !== record.id)];
+  // A stored chat moves to the top of the list and into the URL.
+  const onStored = useCallback((summary: ChatSummary) => {
+    const next = [summary, ...sessionsRef.current.filter((item) => item.id !== summary.id)];
     sessionsRef.current = next;
     setSessions(next);
-    if (sessionRef.current.id === record.id) {
-      setChatSessionParamInLocation(record.id);
+    if (sessionRef.current.id === summary.id) {
+      setChatSessionParamInLocation(summary.id);
     }
   }, []);
-  const hostCallbacksRef = useRef({ environment, persist });
+  const hostCallbacksRef = useRef({ environment, onStored });
   useLayoutEffect(() => {
-    hostCallbacksRef.current = { environment, persist };
-  }, [environment, persist]);
+    hostCallbacksRef.current = { environment, onStored };
+  }, [environment, onStored]);
   const host = useMemo<SessionHost>(
     () => ({
       environment: (target) => hostCallbacksRef.current.environment(target),
-      persist: (record) => hostCallbacksRef.current.persist(record),
+      chatLog: grafanaChatLog(),
       onPromptStart: (context) => assistantTelemetry.recordPromptStart(context),
-      onPromptEnd: (messages) => {
-        assistantTelemetry.recordTranscriptSnapshot(messages);
-        emitBenchmarkTranscriptSnapshot(messages);
-      },
-      onCompaction: (event) =>
-        recordSerializedBenchmarkEvent({ type: 'context_compaction', timestamp: Date.now(), ...event }),
+      onStored: (summary) => hostCallbacksRef.current.onStored(summary),
     }),
     [assistantTelemetry]
   );
 
   const handleAgentEvent = useCallback(
-    (event: AgentEvent) => {
+    (event: ChatAgentEvent) => {
       emitBenchmarkEvent(event);
       assistantTelemetry.recordAgentEvent(event);
+      if (event.type === 'agent_end') {
+        assistantTelemetry.recordTranscriptSnapshot(sessionRef.current.messages);
+      }
+      if (event.type === 'task_failed') {
+        setError(`The assistant's ${event.kind === 'pi.tool' ? 'tool call' : 'task'} failed: ${event.message}`);
+      }
       if (shouldBatchRevision(event)) {
         scheduleRevision();
       } else {
         flushRevision();
       }
     },
-    [assistantTelemetry, flushRevision, scheduleRevision]
+    [assistantTelemetry, flushRevision, scheduleRevision, setError]
   );
 
-  /** Detaches the view from its session; unless it keeps running for a handoff, the run stops. */
+  /** Detaches the view from its session; unless it keeps running for a handoff, the run stops and the chat closes. */
   const detachSession = useCallback((options?: { preserveLiveRun?: boolean }) => {
     unsubscribeRef.current?.();
     unsubscribeRef.current = undefined;
     const current = sessionRef.current;
     if (!options?.preserveLiveRun || !isStoredChatRun(current)) {
       removeChatRun(current.id);
-      current.abort();
+      void current.stop();
     }
   }, []);
 
@@ -401,6 +376,7 @@ export function ChatApp({
       next.attach(host);
       unsubscribeRef.current = next.subscribe(handleAgentEvent);
       setSession(next);
+      setAttachedSession(next);
       autoScrollRef.current = true;
       setIsAutoScrollPaused(false);
       setError(undefined);
@@ -438,23 +414,28 @@ export function ChatApp({
   const attachLiveRun = useCallback(
     (run: AssistantSession) => {
       activateSession(run);
-      if (!run.isStreaming && hasPersistableMessages(run.messages)) {
-        void run.flushSaves().catch((err) => setError(String(err)));
-      }
       return true;
     },
-    [activateSession, setError]
+    [activateSession]
   );
 
+  /** Opens a stored chat; a run a reload interrupted continues. */
   const loadSession = useCallback(
     async (id: string) => {
-      const stored = await repositoryRef.current!.get<StoredSession>(id);
-      if (!stored) {
-        setError('Session not found');
+      const title = sessionsRef.current.find((item) => item.id === id)?.title;
+      const next = new AssistantSession({ id, title, stored: true });
+      activateSession(next);
+      try {
+        await next.open();
+      } catch (err) {
+        if (sessionRef.current === next && err instanceof ChatLogError && err.failure === 'not-found') {
+          activateSession(new AssistantSession());
+          clearChatSessionParamFromLocation();
+          setError('Session not found');
+        }
         return false;
       }
       setChatSessionParamInLocation(id);
-      activateSession(AssistantSession.restore(stored));
       return true;
     },
     [activateSession, setError]
@@ -577,17 +558,14 @@ export function ChatApp({
     flushRevision();
   }, [flushRevision]);
 
-  const isStreaming = Boolean(agent?.state.isStreaming);
+  const isStreaming = transcript.busy;
   const isBusy = isStreaming || userShellRunning;
+  const isStorageLost = storageState.status === 'lost';
   const isShellInput = parseUserShellInput(input) !== undefined;
   const hasDraft = Boolean(input.trim());
-  const hasUnsavedSession = Boolean(saveState && saveState.status !== 'saved');
-  const chatLeaveDescription = hasUnsavedSession
-    ? 'This chat has changes that have not been confirmed saved. Export the session before leaving to keep a copy.'
-    : isStreaming || pendingToolConfirmation
-      ? ACTIVE_CHAT_LEAVE_MESSAGE
-      : DRAFT_CHAT_LEAVE_MESSAGE;
-  const isChatDirty = isStreaming || Boolean(pendingToolConfirmation) || hasDraft || hasUnsavedSession;
+  const chatLeaveDescription =
+    isStreaming || pendingToolConfirmation ? ACTIVE_CHAT_LEAVE_MESSAGE : DRAFT_CHAT_LEAVE_MESSAGE;
+  const isChatDirty = isStreaming || Boolean(pendingToolConfirmation) || hasDraft;
 
   const keepAutoScrollEnabled = useCallback(() => {
     setAutoScrollEnabled(true);
@@ -686,9 +664,7 @@ export function ChatApp({
         return true;
       }
 
-      const isActive = Boolean(
-        sessionRef.current.agent?.state.isStreaming || sessionRef.current.approvals.getSnapshot()
-      );
+      const isActive = Boolean(sessionRef.current.isStreaming || sessionRef.current.approvals.getSnapshot());
       pendingLeaveActionRef.current = undefined;
       setBlockedLocation(location);
       setLeaveGuardAction({
@@ -754,7 +730,7 @@ export function ChatApp({
   const submitPromptText = useCallback(
     async (prompt: string) => {
       const current = sessionRef.current;
-      if (!current.agent || !prompt || current.isStreaming) {
+      if (!prompt || current.isStreaming) {
         return;
       }
 
@@ -764,7 +740,8 @@ export function ChatApp({
       try {
         await current.prompt(prompt);
       } catch (err) {
-        if (sessionRef.current === current) {
+        // A chat that could not be stored is explained by its own notice.
+        if (sessionRef.current === current && current.getState().storage.status !== 'lost') {
           setError(err instanceof Error ? err.message : String(err));
         }
       } finally {
@@ -781,7 +758,7 @@ export function ChatApp({
   const runUserShellCommand = useCallback(
     async (command: string) => {
       const current = sessionRef.current;
-      if (!current.agent || !command || current.isStreaming || current.getState().shellRunning) {
+      if (!command || current.isStreaming || current.getState().shellRunning) {
         return;
       }
       setInput('!');
@@ -790,7 +767,7 @@ export function ChatApp({
       try {
         await current.runUserShell(command);
       } catch (err) {
-        if (sessionRef.current === current) {
+        if (sessionRef.current === current && current.getState().storage.status !== 'lost') {
           setError(`Shell command failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       } finally {
@@ -878,7 +855,7 @@ export function ChatApp({
     let mounted = true;
 
     async function loadInitialState() {
-      const page = await repositoryRef.current!.list();
+      const page = await grafanaChatLog().list({});
       const parsed = page.items;
       if (!mounted) {
         return;
@@ -976,7 +953,7 @@ export function ChatApp({
 
   const deleteSession = async (id: string) => {
     try {
-      await repositoryRef.current!.delete(id, sessionsRef.current.find((item) => item.id === id)?.revision);
+      await grafanaChatLog().delete(id);
       const next = sessionsRef.current.filter((session) => session.id !== id);
       sessionsRef.current = next;
       setSessions(next);
@@ -991,7 +968,7 @@ export function ChatApp({
   const loadMoreSessions = async () => {
     setSessionsLoading(true);
     try {
-      const page = await repositoryRef.current!.list(nextSessionCursor);
+      const page = await grafanaChatLog().list({ cursor: nextSessionCursor });
       const ids = new Set(sessionsRef.current.map((item) => item.id));
       const next = [...sessionsRef.current, ...page.items.filter((item) => !ids.has(item.id))];
       sessionsRef.current = next;
@@ -1029,8 +1006,7 @@ export function ChatApp({
     let url = `${PLUGIN_BASE_URL}/chat`;
 
     try {
-      if (current.agent && hasPersistableMessages(current.messages)) {
-        await current.save();
+      if (current.started) {
         url = buildChatSessionUrl(current.id);
       } else if (current.launch.dashboard) {
         const launch = current.launch.dashboard;
@@ -1067,12 +1043,10 @@ export function ChatApp({
     const request = { path: targetRoute };
 
     try {
-      if (current.agent) {
+      if (current.started) {
         if (current.isStreaming) {
           // The run continues without a view; the sidebar attaches to it by session ID.
           storeChatRun(current);
-        } else if (hasPersistableMessages(current.messages)) {
-          await current.save();
         }
         storeAssistantSidebarDockRequest({
           ...request,
@@ -1122,108 +1096,44 @@ export function ChatApp({
       event.stopPropagation();
 
       const current = sessionRef.current;
-      if (!current.agent || current.isStreaming) {
+      if (!current.started || current.isStreaming) {
         return;
       }
-      if (!hasPersistableMessages(current.messages)) {
-        setError('There are no chat messages to export.');
-        return;
-      }
-
-      const exportedAt = new Date().toISOString();
-      const record = current.record(current.messages, exportedAt);
-      const indexItem = sessionsRef.current.find((item) => item.id === current.id);
-      const payload: ChatSessionExport = {
-        kind: CHAT_SESSION_EXPORT_KIND,
-        schemaVersion: CHAT_SESSION_EXPORT_SCHEMA_VERSION,
-        exportedAt,
-        pluginId: PLUGIN_ID,
-        session: { ...record, createdAt: indexItem?.createdAt ?? record.createdAt },
-      };
-
-      try {
-        downloadJsonFile(payload, chatSessionExportFilename(record.title));
-        setError(undefined);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      }
+      current
+        .exportChat(PLUGIN_ID)
+        .then((file) => {
+          downloadJsonFile(file, chatExportFilename(file.chat.title));
+          setError(undefined);
+        })
+        .catch((err) => setError(err instanceof Error ? err.message : String(err)));
     },
     [setError]
   );
 
-  const openImportSessionPicker = useCallback(() => {
-    if (sessionRef.current.agent?.state.isStreaming) {
-      return;
-    }
-
-    requestGuardedAction(() => importSessionInputRef.current?.click(), {
-      title: 'Import a session?',
-      description: chatLeaveDescription,
-      confirmLabel: 'Discard and import',
-      stopCurrentAgent: false,
-    });
-  }, [chatLeaveDescription, requestGuardedAction]);
-
-  const importSessionFromFile = useCallback(
-    async (event: React.ChangeEvent<HTMLInputElement>) => {
-      const input = event.currentTarget;
-      const file = input.files?.[0];
-      input.value = '';
-      if (!file) {
-        return;
-      }
-
-      if (sessionRef.current.isStreaming) {
-        setError('Cannot import a session while the assistant is streaming.');
-        return;
-      }
-
-      try {
-        const imported = parseChatSessionExport(JSON.parse(await file.text()));
-        const title = imported.title || importTitleFromFilename(file.name) || 'Imported chat';
-        const next = AssistantSession.restore(imported, { id: createSessionId(), title, trusted: false });
-        activateSession(next);
-        await next.save();
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        setError(`Could not import chat session: ${message}`);
-      }
-    },
-    [activateSession, setError]
-  );
-
-  const agentMessages = agent?.state.messages;
-  const agentMessageCount = agentMessages?.length ?? 0;
-  // The agent appends to its message array in place, so the length keys the memos too.
-  const conversation = useMemo(
-    () => conversationMessages(agentMessages ?? []),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [agentMessages, agentMessageCount]
-  );
+  const conversation = transcript.messages;
   const toolResults = useMemo(() => pairToolResults(conversation), [conversation]);
   const toolTranscript = useMemo<ToolTranscript>(
     () => ({ results: toolResults, runs: toolRuns }),
     [toolResults, toolRuns]
   );
-  const visibleMessages = agent
-    ? [
-        ...conversation
-          .map((message, index) => ({ message, index, isStreaming: false }))
-          // Results render with their tool call in the assistant message.
-          .filter(({ message }) => message.role !== 'toolResult' || toolResults.get(message.toolCallId) !== message),
-        ...(agent.state.streamingMessage
-          ? [{ message: agent.state.streamingMessage, index: conversation.length, isStreaming: true }]
-          : []),
-      ]
-    : [];
+  const visibleMessages: VisibleMessage[] = [
+    ...conversation
+      .map((message, index) => ({ message, index, isStreaming: false }))
+      // Results render with their tool call in the assistant message.
+      .filter(({ message }) => message.role !== 'toolResult' || toolResults.get(message.toolCallId) !== message),
+    ...(transcript.streamingMessage
+      ? [{ message: transcript.streamingMessage, index: conversation.length, isStreaming: true }]
+      : []),
+  ];
   const pendingApprovalToolName = pendingToolConfirmation?.toolName;
-  const displayRunStatus = resolveChatRunStatusFromStreamingMessage(runStatus, agent?.state.streamingMessage);
+  const displayRunStatus = runStatus;
   const runElapsedMs = useRunElapsedMs(Boolean(isStreaming || pendingApprovalToolName), displayRunStatus?.startedAt);
   const streamingStatusText = runStatusText(displayRunStatus, pendingApprovalToolName);
   const streamingBadgeText = runStatusBadgeText(displayRunStatus, pendingApprovalToolName);
   const hasLLMConfig = Boolean(jsonData.isOpenAIAPIKeySet) && configuredModels.length > 0;
   const canSubmit =
-    Boolean(agent) &&
+    isAttached &&
+    !isStorageLost &&
     !isBusy &&
     (isShellInput ? Boolean(parseUserShellInput(input)) : Boolean(input.trim()) && hasLLMConfig);
 
@@ -1352,7 +1262,7 @@ export function ChatApp({
       }
     });
   };
-  const hasCurrentMessages = hasPersistableMessages(conversation);
+  const hasCurrentMessages = conversation.length > 0;
   const visibleSidebarSessions = sessions.slice(0, SIDEBAR_SESSION_MENU_LIMIT);
   const sidebarSessionMenu = (
     <div className={styles.sidebarSessionMenu}>
@@ -1369,7 +1279,6 @@ export function ChatApp({
         }
       >
         <Menu.Item disabled={isBusy} icon="plus" label="New chat" onClick={requestNewSession} />
-        <Menu.Item disabled={isBusy} icon="import" label="Import session" onClick={openImportSessionPicker} />
         <Menu.Divider />
         {visibleSidebarSessions.map((session) => (
           <Menu.Item
@@ -1467,15 +1376,6 @@ export function ChatApp({
           </Button>
         </Modal.ButtonRow>
       </Modal>
-      <input
-        accept="application/json,.json"
-        data-testid={testIds.chat.importInput}
-        disabled={isBusy}
-        hidden
-        ref={importSessionInputRef}
-        type="file"
-        onChange={importSessionFromFile}
-      />
       {!isSidebarVariant && (
         <aside className={styles.sidebar}>
           <div className={styles.sidebarHeader}>
@@ -1486,17 +1386,6 @@ export function ChatApp({
               </div>
             </div>
             <div className={styles.sidebarActions}>
-              <Button
-                aria-label="Import session"
-                data-testid={testIds.chat.import}
-                disabled={isBusy}
-                icon="import"
-                size="sm"
-                title="Import session"
-                type="button"
-                variant="secondary"
-                onClick={openImportSessionPicker}
-              />
               <Button icon="plus" size="sm" variant="secondary" onClick={requestNewSession} aria-label="New session" />
             </div>
           </div>
@@ -1529,27 +1418,7 @@ export function ChatApp({
           <div className={styles.titleGroup}>
             <h2 className={styles.title}>{currentTitle}</h2>
             <Badge text={isStreaming ? streamingBadgeText : 'Ready'} color={isStreaming ? 'blue' : 'green'} />
-            {saveState && (
-              <Badge
-                text={saveState.status === 'saving' ? 'Saving…' : saveState.status === 'saved' ? 'Saved' : 'Not saved'}
-                color={saveState.status === 'error' ? 'red' : 'blue'}
-              />
-            )}
-            {saveState?.status === 'error' && (
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={isBusy}
-                onClick={() => {
-                  void sessionRef.current
-                    .save()
-                    .then(() => setError(undefined))
-                    .catch(showLoadError);
-                }}
-              >
-                Retry save
-              </Button>
-            )}
+            {storageState.status === 'opening' && <Badge text="Opening…" color="blue" />}
           </div>
           <div className={styles.toolbarActions}>
             {isSidebarVariant && (
@@ -1661,15 +1530,27 @@ export function ChatApp({
             Configure the app plugin with an OpenAI-compatible API key and at least one model before sending prompts.
           </Alert>
         )}
-        {displayedError && (
+        {storageState.status === 'lost' && (
           <Alert
-            severity="error"
-            title="Assistant error"
-            onRemove={() => {
-              setError(undefined);
-              setDismissedSave(saveState);
-            }}
+            severity={storageState.reason === 'lease' ? 'info' : 'error'}
+            title={storageState.reason === 'lease' ? 'Chat opened elsewhere' : 'Chat unavailable'}
+            data-testid={testIds.chat.storageLost}
           >
+            <div className={styles.storageLost}>
+              <span>
+                {storageState.message}
+                {storageState.reason === 'lease' && ' This view no longer receives its updates.'}
+              </span>
+              {storageState.reason !== 'deleted' && (
+                <Button size="sm" variant="secondary" onClick={() => void loadSession(sessionState.id)}>
+                  Open here
+                </Button>
+              )}
+            </div>
+          </Alert>
+        )}
+        {displayedError && (
+          <Alert severity="error" title="Assistant error" onRemove={() => setError(undefined)}>
             {displayedError}
           </Alert>
         )}
@@ -1706,14 +1587,13 @@ export function ChatApp({
             ) : (
               <ToolTranscriptContext.Provider value={toolTranscript}>
                 <Transcript
-                  compaction={sessionState.compaction}
+                  compactions={transcript.compactions}
                   isStreaming={isStreaming}
                   messages={visibleMessages}
                   toolResults={toolResults}
                 />
               </ToolTranscriptContext.Provider>
             )}
-            {sessionState.truncation && <ContextTruncatedNotice event={sessionState.truncation} />}
             {isStreaming && (
               <div className={styles.streaming} role="status" aria-live="polite">
                 <Spinner />
@@ -1767,7 +1647,7 @@ export function ChatApp({
               rows={isSidebarVariant ? 2 : 3}
               value={input}
               // Stays editable while the assistant or a command runs, so focus and the next draft are kept.
-              disabled={!agent || (!hasLLMConfig && !isShellInput)}
+              disabled={!isAttached || isStorageLost || (!hasLLMConfig && !isShellInput)}
               placeholder="Ask about metrics, PromQL, or dashboards (! runs a shell command; Shift+Enter for a new line)"
               onChange={(event) => handleInputChange(event.currentTarget.value)}
               onKeyDown={(event) => {
@@ -1936,8 +1816,8 @@ function ReportPanel({
   );
 }
 
-/** `index` is the message's position in the agent transcript. */
-type VisibleMessage = { message: AgentMessage; index: number; isStreaming: boolean };
+/** `index` is the message's position in the transcript. */
+type VisibleMessage = { message: ChatMessage; index: number; isStreaming: boolean };
 
 /**
  * Renders the messages, folding the steps of finished turns behind their summary line.
@@ -1947,12 +1827,12 @@ function Transcript({
   messages,
   toolResults,
   isStreaming,
-  compaction,
+  compactions,
 }: {
   messages: VisibleMessage[];
   toolResults: ReadonlyMap<string, ToolResultMessage>;
   isStreaming: boolean;
-  compaction?: CompactionState;
+  compactions: TranscriptCompaction[];
 }) {
   const turnSteps = finishedTurnSteps(
     messages.map(({ message }) => message),
@@ -1970,13 +1850,20 @@ function Transcript({
       continuedInTurn={message.role === 'assistant' && messages[index + 1]?.message.role === 'assistant'}
     />
   );
-  const dividerAt = compaction ? compactionDividerIndex(messages, compaction.coveredMessages) : -1;
+  const dividers = compactions.map((compaction) => ({
+    compaction,
+    at: compactionDividerIndex(messages, compaction.index),
+  }));
   const views: React.ReactNode[] = [];
   let index = 0;
   while (index < messages.length) {
     const steps = stepsByStart.get(index);
-    if (dividerAt >= index && dividerAt <= (steps?.end ?? index)) {
-      views.push(<CompactionDivider compaction={compaction!} key="compaction" />);
+    for (const divider of dividers) {
+      if (divider.at >= index && divider.at <= (steps?.end ?? index)) {
+        views.push(
+          <CompactionDivider compaction={divider.compaction} key={`compaction-${divider.compaction.index}`} />
+        );
+      }
     }
     if (!steps) {
       views.push(renderMessage(messages[index], index));
@@ -1996,7 +1883,7 @@ function Transcript({
 
 /**
  * Where the verbatim part of the model's context begins: the first turn after
- * the summarized messages, or the first unsummarized message when the cut is in the latest turn.
+ * the summarized messages, or the first unsummarized message when the cut is within a turn.
  */
 function compactionDividerIndex(messages: VisibleMessage[], coveredMessages: number) {
   const turnStart = messages.findIndex(
@@ -2045,7 +1932,7 @@ const MessageView = memo(function MessageView({
   continuesTurn,
   continuedInTurn,
 }: {
-  message: AgentMessage;
+  message: ChatMessage;
   isStreaming?: boolean;
   /** An assistant message that directly follows another one in the same turn. */
   continuesTurn?: boolean;
@@ -2078,7 +1965,7 @@ const MessageView = memo(function MessageView({
   );
 });
 
-function renderMessageContent(message: AgentMessage, isStreaming: boolean) {
+function renderMessageContent(message: ChatMessage, isStreaming: boolean) {
   if (message.role === 'user') {
     return <ContentBlocks content={message.content} markdown={false} />;
   }
@@ -2116,7 +2003,7 @@ function renderMessageContent(message: AgentMessage, isStreaming: boolean) {
   return <pre>{JSON.stringify(message, null, 2)}</pre>;
 }
 
-function messageKey(message: AgentMessage, index: number, isStreaming: boolean) {
+function messageKey(message: ChatMessage, index: number, isStreaming: boolean) {
   const timestamp =
     typeof (message as { timestamp?: unknown }).timestamp === 'number'
       ? (message as { timestamp: number }).timestamp
@@ -2214,22 +2101,8 @@ function setChatSessionParamInLocation(sessionId: string) {
   }
 }
 
-function shouldBatchRevision(event: AgentEvent) {
-  if (event.type === 'tool_execution_update') {
-    return true;
-  }
-  if (event.type !== 'message_update') {
-    return false;
-  }
-  return !isStreamingMessageMilestone(event.assistantMessageEvent);
-}
-
-function isStreamingMessageMilestone(event: unknown) {
-  if (!event || typeof event !== 'object') {
-    return false;
-  }
-  const type = (event as Record<string, unknown>).type;
-  return type === 'thinking_start' || type === 'text_start' || type === 'toolcall_start' || type === 'toolcall_end';
+function shouldBatchRevision(event: ChatAgentEvent) {
+  return event.type === 'tool_execution_update' || event.type === 'message_update';
 }
 
 type ScheduledFrame = { kind: 'raf'; id: number } | { kind: 'timeout'; id: ReturnType<typeof setTimeout> };
@@ -2335,10 +2208,10 @@ function formatDate(value: string): string {
   });
 }
 
-function createJsonDownload(data: ChatSessionExport, filename: string) {
+function createJsonDownload(data: ChatExport, filename: string) {
   const serialized = JSON.stringify(data, null, 2);
   if (!serialized) {
-    throw new Error('Could not serialize chat session export.');
+    throw new Error('Could not serialize the chat export.');
   }
 
   const blob = new Blob([`${serialized}\n`], { type: 'application/octet-stream;charset=utf-8' });
@@ -2348,7 +2221,7 @@ function createJsonDownload(data: ChatSessionExport, filename: string) {
   };
 }
 
-function downloadJsonFile(data: ChatSessionExport, filename: string) {
+function downloadJsonFile(data: ChatExport, filename: string) {
   const download = createJsonDownload(data, filename);
   const anchor = document.createElement('a');
   anchor.href = download.url;
@@ -2883,6 +2756,12 @@ const getStyles = (theme: GrafanaTheme2) => ({
   }),
   composerActionsSidebar: css({
     flexWrap: 'nowrap',
+  }),
+  storageLost: css({
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: theme.spacing(1),
   }),
   leaveGuardModal: css({
     width: 'min(500px, calc(100vw - 32px))',

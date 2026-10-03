@@ -1,5 +1,4 @@
-import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from '@earendil-works/pi-ai';
+import type { AssistantMessage, Message, ToolCall, ToolResultMessage, UserMessage } from '@earendil-works/pi-ai';
 import { formatBashResult, type WorkspaceBashResult } from './workspace/shell';
 
 /** A shell command the user ran directly in the session filesystem (`!` in the composer). */
@@ -11,11 +10,8 @@ export type UserShellMessage = {
   timestamp: number;
 };
 
-declare module '@earendil-works/pi-agent-core' {
-  interface CustomAgentMessages {
-    userShell: UserShellMessage;
-  }
-}
+/** A transcript message as the chat shows it. */
+export type ChatMessage = Exclude<Message, { role: 'system' }> | UserShellMessage;
 
 /** Composer input that starts with `!` runs in the session shell instead of prompting the model. */
 export function parseUserShellInput(input: string) {
@@ -27,24 +23,24 @@ export function createUserShellMessage(result: WorkspaceBashResult): UserShellMe
   const { images: _images, ...rest } = result;
   return {
     role: 'userShell',
-    content: [
-      {
-        type: 'text',
-        text: `The user ran this command in the session shell (not a request; use the output as context):\n$ ${result.command}\n${formatBashResult(rest)}`,
-      },
-    ],
+    content: [{ type: 'text', text: userShellText(rest) }],
     result: rest,
     timestamp: Date.now(),
   };
 }
 
-/**
- * The conversation without Pi's system messages. The agent transcript starts
- * with a system message holding the prompt and tools of the current turn;
- * the chat shows, stores, and compacts only the conversation.
- */
+/** What the model sees of a user shell command: a user message with the command and its output. */
+export function userShellModelMessage(result: WorkspaceBashResult, timestamp = Date.now()): UserMessage {
+  const { images: _images, ...rest } = result;
+  return { role: 'user', content: [{ type: 'text', text: userShellText(rest) }], timestamp };
+}
+
+function userShellText(result: Omit<WorkspaceBashResult, 'images'>) {
+  return `The user ran this command in the session shell (not a request; use the output as context):\n$ ${result.command}\n${formatBashResult(result)}`;
+}
+
 /** Texts of the prompts the user sent, oldest first (not shell commands). */
-export function userPromptTexts(messages: readonly AgentMessage[]): string[] {
+export function userPromptTexts(messages: readonly ChatMessage[]): string[] {
   return messages.flatMap((message) => {
     if (message.role !== 'user') {
       return [];
@@ -55,63 +51,6 @@ export function userPromptTexts(messages: readonly AgentMessage[]): string[] {
         : message.content.map((part) => (part.type === 'text' ? part.text : '')).join('\n');
     return text.trim() ? [text] : [];
   });
-}
-
-export function conversationMessages(messages: AgentMessage[]): AgentMessage[] {
-  return messages.some((message) => message.role === 'system')
-    ? messages.filter((message) => message.role !== 'system')
-    : messages;
-}
-
-export function convertChatMessagesToLlm(messages: AgentMessage[]): Message[] {
-  const pendingToolCallIds = new Set<string>();
-  const converted: Message[] = [];
-
-  for (const message of messages) {
-    if (message.role === 'system' || message.role === 'user') {
-      converted.push(message);
-      continue;
-    }
-
-    if (message.role === 'userShell') {
-      converted.push({ role: 'user', content: message.content, timestamp: message.timestamp });
-      continue;
-    }
-
-    if (message.role === 'assistant') {
-      if (shouldHideAssistantFromLlm(message)) {
-        continue;
-      }
-
-      const assistant = normalizeAssistantContent(message);
-      for (const toolCall of assistantToolCalls(assistant)) {
-        pendingToolCallIds.add(toolCall.id);
-      }
-      converted.push(assistant);
-      continue;
-    }
-
-    if (message.role === 'toolResult') {
-      if (!pendingToolCallIds.has(message.toolCallId)) {
-        continue;
-      }
-
-      pendingToolCallIds.delete(message.toolCallId);
-      converted.push(message);
-    }
-  }
-
-  return converted;
-}
-
-export function hasPersistableMessages(messages: AgentMessage[]) {
-  return messages.some(
-    (message) => message.role === 'user' || message.role === 'assistant' || message.role === 'userShell'
-  );
-}
-
-function shouldHideAssistantFromLlm(message: AssistantMessage) {
-  return message.stopReason === 'aborted' || message.stopReason === 'error';
 }
 
 function normalizeAssistantContent(message: AssistantMessage): AssistantMessage {
@@ -140,7 +79,7 @@ function assistantToolCalls(message: AssistantMessage): ToolCall[] {
  * Maps each tool call ID to its result message, for results whose call appears in
  * an earlier assistant message. The transcript shows those results with their call.
  */
-export function pairToolResults(messages: AgentMessage[]): Map<string, ToolResultMessage> {
+export function pairToolResults(messages: ChatMessage[]): Map<string, ToolResultMessage> {
   const callIds = new Set<string>();
   const results = new Map<string, ToolResultMessage>();
   for (const message of messages) {
@@ -173,7 +112,7 @@ export type TurnSteps = {
  * With `isStreaming`, the run ending at the last message is still in progress.
  */
 export function finishedTurnSteps(
-  messages: AgentMessage[],
+  messages: ChatMessage[],
   results: ReadonlyMap<string, ToolResultMessage>,
   isStreaming = false
 ): TurnSteps[] {
@@ -213,18 +152,21 @@ export function finishedTurnSteps(
   return turns;
 }
 
-/** Tool result of a call the user stopped before it ran (pi-agent-core's agent loop). */
-export const STOPPED_TOOL_ERROR = 'Operation aborted';
+/** Diagnostic the harness adds to the result of a tool call the user stopped. */
+const STOPPED_TOOL_DIAGNOSTIC = /^\[error\] Tool \S+ was aborted$/m;
+
+/** Whether a tool result's content is the harness's note that the user stopped the call. */
+export function isStoppedToolContent(content: ReadonlyArray<{ type: string; text?: string }> | undefined) {
+  return STOPPED_TOOL_DIAGNOSTIC.test(
+    (content ?? []).map((block) => (block.type === 'text' ? block.text : '')).join('\n')
+  );
+}
 
 /** A tool call ended by the user pressing Stop, before or while it ran; not a failure. */
 export function isStoppedToolResult(result: ToolResultMessage) {
   const details = result.details as { exitCode?: unknown; discardedChanges?: unknown } | undefined;
-  const text = result.content
-    .map((block) => (block.type === 'text' ? block.text : ''))
-    .join('')
-    .trim();
   return (
-    (result.isError && text === STOPPED_TOOL_ERROR) ||
+    (result.isError && isStoppedToolContent(result.content)) ||
     (result.toolName === 'bash' && details?.exitCode === 130 && details.discardedChanges === 'cancelled')
   );
 }

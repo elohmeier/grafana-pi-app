@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/elohmeier/grafana-pi-app/pkg/sessionstore"
+	"github.com/elohmeier/grafana-pi-app/pkg/chatlog"
 	"github.com/grafana/authlib/authn"
 	"github.com/grafana/authlib/authz"
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -40,10 +40,10 @@ type App struct {
 	authzMu              sync.Mutex
 	authzToken           string
 	authzClient          authz.EnforcementClient
-	sessionMu            sync.Mutex
-	sessionStore         *sessionstore.Store
-	sessionKeys          authn.KeyRetriever
-	sessionKeysURL       string
+	chatMu               sync.Mutex
+	chatStore            chatlog.Store
+	idKeys               authn.KeyRetriever
+	idKeysURL            string
 	disposed             bool
 }
 
@@ -140,26 +140,26 @@ func NewApp(_ context.Context, settings backend.AppInstanceSettings) (instancemg
 // Dispose here tells plugin SDK that plugin wants to clean up resources when a new instance
 // created.
 func (a *App) Dispose() {
-	a.sessionMu.Lock()
-	defer a.sessionMu.Unlock()
+	a.chatMu.Lock()
+	defer a.chatMu.Unlock()
 	a.disposed = true
-	if a.sessionStore != nil {
-		a.sessionStore.Close()
+	if a.chatStore != nil {
+		_ = a.chatStore.Close()
+		a.chatStore = nil
 	}
 }
 
 // CheckHealth handles health checks sent from Grafana to the plugin.
 func (a *App) CheckHealth(ctx context.Context, _ *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
-	if a.settings.SessionPostgresDSN != "" {
-		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		defer cancel()
-		s, err := a.getSessionStore(ctx)
-		if err == nil {
-			err = s.Ping(ctx)
-		}
-		if err != nil {
-			return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: "Session database is unavailable; check its configuration and schema permissions"}, nil
-		}
+	storeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	s, err := a.getChatStore(storeCtx)
+	if err == nil {
+		err = s.Ping(storeCtx)
+	}
+	if err != nil {
+		backend.Logger.Error("Chat storage unavailable", "error", err)
+		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: "Chat storage (" + a.chatBackendName() + ") is unavailable; check its configuration and permissions"}, nil
 	}
 	if a.settings.OpenAIAPIKey == "" {
 		return &backend.CheckHealthResult{
@@ -176,7 +176,7 @@ func (a *App) CheckHealth(ctx context.Context, _ *backend.CheckHealthRequest) (*
 
 	return &backend.CheckHealthResult{
 		Status:  backend.HealthStatusOk,
-		Message: "LLM proxy is configured",
+		Message: "LLM proxy is configured; chats are stored in " + s.Backend(),
 	}, nil
 }
 

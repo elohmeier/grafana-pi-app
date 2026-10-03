@@ -1,4 +1,3 @@
-import type { AgentTool } from '@earendil-works/pi-agent-core';
 import type { DashboardMutationAPI } from '@grafana/data';
 import type { GrafanaSkill } from '../skills/types';
 import type { ArtifactRuntime } from '../domain/artifacts';
@@ -16,12 +15,13 @@ import { createPythonCommands, type PythonRunner } from './python/pythonCommand'
 import { renderWorkspacePromptSection } from './prompt';
 import { runWorkspaceBash, type WorkspaceBashResult, type WorkspaceShellDeps } from './shell';
 import { createLiveDashboardBroker, createLiveDashboardMount } from './liveDashboard';
-import { createWorkspaceTools } from './tools';
+import { createWorkspaceTools, type WorkspaceTool } from './tools';
 import type { GeneratedMount } from './types';
 import type { SessionWorkspace } from './workspace';
 
 export { SessionWorkspace } from './workspace';
-export { formatBashResult, WORKSPACE_TOOL_NAMES } from './tools';
+export { formatBashResult, WORKSPACE_TOOL_DEFINITIONS, WORKSPACE_TOOL_NAMES } from './tools';
+export type { WorkspaceTool, WorkspaceToolDefinition } from './tools';
 export type { WorkspaceBashResult } from './shell';
 export type { PersistedWorkspace } from './types';
 export type { WorkspaceApprovalRequest, WorkspaceApprovalService, WorkspaceBroker } from './broker';
@@ -47,7 +47,7 @@ export type SessionWorkspaceToolkitOptions = {
  * runner for shell commands the user types directly (`!` in the composer).
  */
 export function createSessionWorkspaceToolkit(options: SessionWorkspaceToolkitOptions): {
-  tools: AgentTool[];
+  tools: WorkspaceTool[];
   promptSection: string;
   runShell: (command: string, signal?: AbortSignal) => Promise<WorkspaceBashResult>;
 } {

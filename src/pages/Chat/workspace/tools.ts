@@ -1,7 +1,6 @@
-import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { createTwoFilesPatch } from 'diff';
-import { Type } from 'typebox';
-import { textResult, throwIfAborted } from '../domain/result';
+import { Type, type TSchema } from 'typebox';
+import { textResult, throwIfAborted, type ToolResult } from '../domain/result';
 import { contentRevision } from './hash';
 import { LIVE_DASHBOARD_PATH } from './liveDashboard';
 import { normalizeWorkspacePath, truncateUtf8, utf8ByteLength } from './paths';
@@ -29,7 +28,102 @@ type BashParams = { command: string; cwd?: string; timeoutMs?: number };
 
 export type WorkspaceToolDeps = WorkspaceShellDeps;
 
-export function createWorkspaceTools(deps: WorkspaceToolDeps): AgentTool[] {
+/** What the model sees of a tool, and how the harness runs it. */
+export type WorkspaceToolDefinition = {
+  name: (typeof WORKSPACE_TOOL_NAMES)[number];
+  label: string;
+  description: string;
+  parameters: TSchema;
+  executionMode?: 'sequential' | 'parallel';
+  /** Whether a call interrupted by a reload may run again; otherwise the model is told it was interrupted. */
+  replay: 'safe' | 'unsafe';
+};
+
+export type WorkspaceTool = WorkspaceToolDefinition & {
+  execute(
+    toolCallId: string,
+    params: unknown,
+    signal?: AbortSignal,
+    onUpdate?: (partial: ToolResult) => void
+  ): Promise<ToolResult>;
+};
+
+const READ_TOOL: WorkspaceToolDefinition = {
+  name: 'read',
+  label: 'Read',
+  description:
+    'Read a file from the session filesystem with line numbers, or list a directory. Large files are returned in windows: pass offset (1-based line) and limit to continue. Reading /grafana/dashboards/<uid>/dashboard.json or /grafana/alert-rules/<uid>/rule.json loads that resource on first access. The result includes a revision you can pass to write/edit to guard against concurrent changes.',
+  parameters: Type.Object({
+    path: Type.String({ description: 'Absolute path, or relative to /workspace.' }),
+    offset: Type.Optional(Type.Number({ description: '1-based first line to return. Defaults to 1.' })),
+    limit: Type.Optional(Type.Number({ description: `Maximum lines to return. Defaults to ${DEFAULT_READ_LINES}.` })),
+  }),
+  replay: 'safe',
+};
+
+const WRITE_TOOL: WorkspaceToolDefinition = {
+  name: 'write',
+  label: 'Write',
+  description:
+    'Create or overwrite one file in the session filesystem. Writable locations: /workspace, /session, /tmp, /grafana/dashboards/<uid>/dashboard.json, and /grafana/alert-rules/<uid>/rule.json (local working copies; nothing reaches Grafana until an approved `workspace apply`). Parent directories are created automatically. Prefer edit for small changes to existing files.',
+  executionMode: 'sequential',
+  parameters: Type.Object({
+    path: Type.String({ description: 'Absolute path, or relative to /workspace.' }),
+    content: Type.String({ description: 'Complete file content.' }),
+    revision: Type.Optional(
+      Type.String({ description: 'Expected current revision from read; the write fails if the file changed.' })
+    ),
+  }),
+  replay: 'unsafe',
+};
+
+const EDIT_TOOL: WorkspaceToolDefinition = {
+  name: 'edit',
+  label: 'Edit',
+  description:
+    'Replace exact text in one file. Each oldText must match exactly once (including whitespace) unless replaceAll is true; edits apply in order and atomically - if any edit fails, nothing changes. Include enough surrounding context in oldText to make it unique.',
+  executionMode: 'sequential',
+  parameters: Type.Object({
+    path: Type.String({ description: 'Absolute path, or relative to /workspace.' }),
+    edits: Type.Array(
+      Type.Object({
+        oldText: Type.String({ description: 'Exact text to replace.' }),
+        newText: Type.String({ description: 'Replacement text.' }),
+        replaceAll: Type.Optional(Type.Boolean({ description: 'Replace every occurrence instead of exactly one.' })),
+      }),
+      { minItems: 1 }
+    ),
+    revision: Type.Optional(
+      Type.String({ description: 'Expected current revision from read; the edit fails if the file changed.' })
+    ),
+  }),
+  replay: 'unsafe',
+};
+
+const BASH_TOOL: WorkspaceToolDefinition = {
+  name: 'bash',
+  label: 'Bash',
+  description:
+    'Run a non-interactive bash script in the sandboxed session filesystem (no network, no host access). Includes coreutils, find, rg, grep, sed, awk, jq, yq, diff, plus Grafana commands: grafana, grafana-dashboard, grafana-prom, workspace (run `<command> --help`). Variables and cwd reset per call; files persist. All file changes of one call are committed together, or discarded on timeout/cancel/quota errors.',
+  executionMode: 'sequential',
+  parameters: Type.Object({
+    command: Type.String({ description: 'Bash script to run.' }),
+    cwd: Type.Optional(Type.String({ description: 'Working directory. Defaults to /workspace.' })),
+    timeoutMs: Type.Optional(Type.Number({ description: 'Timeout in milliseconds (default 30000, max 120000).' })),
+  }),
+  // A call may have applied changes to Grafana before it was interrupted.
+  replay: 'unsafe',
+};
+
+/** The fixed tool list, in the order the model sees it. */
+export const WORKSPACE_TOOL_DEFINITIONS: readonly WorkspaceToolDefinition[] = [
+  READ_TOOL,
+  WRITE_TOOL,
+  EDIT_TOOL,
+  BASH_TOOL,
+];
+
+export function createWorkspaceTools(deps: WorkspaceToolDeps): WorkspaceTool[] {
   return [
     makeReadTool(deps.workspace),
     makeWriteTool(deps.workspace),
@@ -38,17 +132,9 @@ export function createWorkspaceTools(deps: WorkspaceToolDeps): AgentTool[] {
   ];
 }
 
-function makeReadTool(workspace: SessionWorkspace): AgentTool {
+function makeReadTool(workspace: SessionWorkspace): WorkspaceTool {
   return {
-    name: 'read',
-    label: 'Read',
-    description:
-      'Read a file from the session filesystem with line numbers, or list a directory. Large files are returned in windows: pass offset (1-based line) and limit to continue. Reading /grafana/dashboards/<uid>/dashboard.json or /grafana/alert-rules/<uid>/rule.json loads that resource on first access. The result includes a revision you can pass to write/edit to guard against concurrent changes.',
-    parameters: Type.Object({
-      path: Type.String({ description: 'Absolute path, or relative to /workspace.' }),
-      offset: Type.Optional(Type.Number({ description: '1-based first line to return. Defaults to 1.' })),
-      limit: Type.Optional(Type.Number({ description: `Maximum lines to return. Defaults to ${DEFAULT_READ_LINES}.` })),
-    }),
+    ...READ_TOOL,
     async execute(_toolCallId, params, signal) {
       throwIfAborted(signal);
       const args = params as ReadParams;
@@ -85,20 +171,9 @@ function makeReadTool(workspace: SessionWorkspace): AgentTool {
   };
 }
 
-function makeWriteTool(workspace: SessionWorkspace): AgentTool {
+function makeWriteTool(workspace: SessionWorkspace): WorkspaceTool {
   return {
-    name: 'write',
-    label: 'Write',
-    description:
-      'Create or overwrite one file in the session filesystem. Writable locations: /workspace, /session, /tmp, /grafana/dashboards/<uid>/dashboard.json, and /grafana/alert-rules/<uid>/rule.json (local working copies; nothing reaches Grafana until an approved `workspace apply`). Parent directories are created automatically. Prefer edit for small changes to existing files.',
-    executionMode: 'sequential',
-    parameters: Type.Object({
-      path: Type.String({ description: 'Absolute path, or relative to /workspace.' }),
-      content: Type.String({ description: 'Complete file content.' }),
-      revision: Type.Optional(
-        Type.String({ description: 'Expected current revision from read; the write fails if the file changed.' })
-      ),
-    }),
+    ...WRITE_TOOL,
     async execute(_toolCallId, params, signal) {
       throwIfAborted(signal);
       const args = params as WriteParams;
@@ -131,27 +206,9 @@ function makeWriteTool(workspace: SessionWorkspace): AgentTool {
   };
 }
 
-function makeEditTool(workspace: SessionWorkspace): AgentTool {
+function makeEditTool(workspace: SessionWorkspace): WorkspaceTool {
   return {
-    name: 'edit',
-    label: 'Edit',
-    description:
-      'Replace exact text in one file. Each oldText must match exactly once (including whitespace) unless replaceAll is true; edits apply in order and atomically - if any edit fails, nothing changes. Include enough surrounding context in oldText to make it unique.',
-    executionMode: 'sequential',
-    parameters: Type.Object({
-      path: Type.String({ description: 'Absolute path, or relative to /workspace.' }),
-      edits: Type.Array(
-        Type.Object({
-          oldText: Type.String({ description: 'Exact text to replace.' }),
-          newText: Type.String({ description: 'Replacement text.' }),
-          replaceAll: Type.Optional(Type.Boolean({ description: 'Replace every occurrence instead of exactly one.' })),
-        }),
-        { minItems: 1 }
-      ),
-      revision: Type.Optional(
-        Type.String({ description: 'Expected current revision from read; the edit fails if the file changed.' })
-      ),
-    }),
+    ...EDIT_TOOL,
     async execute(_toolCallId, params, signal) {
       throwIfAborted(signal);
       const args = params as EditParams;
@@ -188,18 +245,9 @@ function makeEditTool(workspace: SessionWorkspace): AgentTool {
   };
 }
 
-function makeBashTool(deps: WorkspaceShellDeps): AgentTool {
+function makeBashTool(deps: WorkspaceShellDeps): WorkspaceTool {
   return {
-    name: 'bash',
-    label: 'Bash',
-    description:
-      'Run a non-interactive bash script in the sandboxed session filesystem (no network, no host access). Includes coreutils, find, rg, grep, sed, awk, jq, yq, diff, plus Grafana commands: grafana, grafana-dashboard, grafana-prom, workspace (run `<command> --help`). Variables and cwd reset per call; files persist. All file changes of one call are committed together, or discarded on timeout/cancel/quota errors.',
-    executionMode: 'sequential',
-    parameters: Type.Object({
-      command: Type.String({ description: 'Bash script to run.' }),
-      cwd: Type.Optional(Type.String({ description: 'Working directory. Defaults to /workspace.' })),
-      timeoutMs: Type.Optional(Type.Number({ description: 'Timeout in milliseconds (default 30000, max 120000).' })),
-    }),
+    ...BASH_TOOL,
     async execute(_toolCallId, params, signal, onUpdate) {
       throwIfAborted(signal);
       const args = params as BashParams;

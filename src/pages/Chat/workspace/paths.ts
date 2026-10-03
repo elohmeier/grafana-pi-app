@@ -135,3 +135,6 @@ export function truncateUtf8(value: string, maxBytes: number): { text: string; t
   }
   return { text: value.slice(0, end), truncated: true };
 }
+
+/** The report the chat shows next to the messages; the agent maintains it like any other file. */
+export const REPORT_PATH = '/session/report.md';

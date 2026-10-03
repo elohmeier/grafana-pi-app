@@ -7,7 +7,7 @@ import { renderMarkdown, type GrafanaTheme2 } from '@grafana/data';
 import { Spinner, useStyles2 } from '@grafana/ui';
 import { structuredPatch } from 'diff';
 import { highlightBash } from './bashRendering';
-import { STOPPED_TOOL_ERROR } from './chatMessages';
+import { isStoppedToolContent } from './chatMessages';
 import {
   highlightJsonnetLines,
   shouldHighlightJsonnet,
@@ -224,7 +224,8 @@ function ToolEntry({
   const details = isRecord(result?.details) ? result.details : undefined;
   const errorMessage = result?.isError ? extractToolError(name, result.details, result.content).message : undefined;
   // The user pressed Stop before the tool ran; that is not a failure of the tool.
-  const stopped = errorMessage === STOPPED_TOOL_ERROR;
+  const stopped =
+    Boolean(result?.isError) && isStoppedToolContent(result?.content as Array<{ type: string; text?: string }>);
   const error = stopped ? undefined : errorMessage;
 
   switch (name) {
@@ -733,6 +734,9 @@ function extractToolText(content: unknown): string | undefined {
     .map((block) => (isRecord(block) && block.type === 'text' && typeof block.text === 'string' ? block.text : ''))
     .filter(Boolean)
     .join('\n')
+    // The harness appends its remarks about a call, such as an interruption, as `<harness>[error] ...</harness>`.
+    .replace(/<\/?harness>/g, '')
+    .replace(/^\[(?:error|warn|info)\] /gm, '')
     .trim();
 
   return text || undefined;

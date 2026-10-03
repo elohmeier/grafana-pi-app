@@ -20,8 +20,8 @@ The [conversational alerting design](docs/conversational-alerting.md) covers Mat
 - Adds dashboard panel menu actions for contextual Assistant prompts.
 - Optionally runs as the `grafana-assistant-app` variant with Grafana's extension sidebar integration enabled.
 - In the `grafana-assistant-app` variant, edits the currently open unsaved dashboard as a file: `/live/dashboard/dashboard.json` holds its v2 spec, and `live apply` replaces the browser state through Grafana's restricted dashboard mutation API (`GET_SPEC`/`APPLY_SPEC`).
-- Compacts long conversations to fit each model's configured context window.
-- Stores chat sessions, including the session filesystem, per Grafana user in PostgreSQL when configured, with legacy plugin user storage retained for existing installations.
+- Runs each chat on a [Pi Durable](https://github.com/earendil-works/pi/tree/main/packages/durable) harness: every step is stored before it is shown, a reload in the middle of an answer continues the answer, and long conversations are summarized in the background to fit each model's configured context window.
+- Stores chats, including the session filesystem, per Grafana user in the plugin backend: in an embedded SQLite file by default, or in PostgreSQL for HA deployments.
 
 The assistant can present captured files with `evidence show PATH --view table|json|text|image`; presentation never reruns a query. `/session/context.json` exposes read-only turn context, while `/session/receipts/` exposes save outcomes. Skill packages can include `scripts/` with shell, jq, and Python programs. Run `npm run test:shell-worker` after a frontend build to check the production worker, jq, filesystem RPC, and hard termination without Grafana.
 
@@ -51,7 +51,7 @@ Configure the app plugin from Grafana's plugin settings page:
   - `protocol`: Upstream API protocol, one of `auto`, `chat-completions`, or `responses`. `auto` starts with Chat Completions and switches to Responses only when the provider returns the specific `reasoning_effort` compatibility error that directs the caller to `/v1/responses`. Defaults to `auto`.
   - `thinkingLevel`: Optional model reasoning effort, one of `off`, `low`, `medium`, `high`, `xhigh`, or `max`. `xhigh` and `max` are sent as-is (`reasoning_effort` or `reasoning.effort`), so use them only for models that accept them. Defaults to `off`.
   - `thinkingFormat`: Chat Completions thinking parameter format, one of `openai`, `qwen`, `qwen-chat-template`, or `deepseek`. Responses always uses `reasoning.effort`. Defaults to `openai`.
-  - `contextWindow`: The endpoint's input-plus-output token capacity. Defaults to `131072`. The assistant compacts conversation history to fit it.
+  - `contextWindow`: The endpoint's input-plus-output token capacity. Defaults to `131072`. The assistant summarizes older conversation history to fit it.
   - `maxOutputTokens`: Output tokens requested per model call. Defaults to `16384` and is capped at half the context window. The backend clamps every request's output budget to this value.
 
   When no entry is flagged `default`, the first model is the default. All models share the configured base URL and API key.
@@ -70,11 +70,9 @@ When `OPENAI_API_KEY` is unset, Compose provides a local dummy key because llama
 
 Dashboard reads and writes run in the browser as the current Grafana user, so they follow that user's dashboard and folder permissions. The plugin service account has no dashboard or folder permissions. In local Docker, `docker-compose.yaml` starts Grafana image rendering so screenshots can run.
 
-## PostgreSQL session storage
+## Chat storage
 
-For HA deployments, the assistant can use Grafana's PostgreSQL database with a
-dedicated schema and role, or a separate database. See
-[session storage configuration and HA tests](docs/session-storage.md).
+Each chat is a Pi Durable harness that runs in the browser over the chat's commit log, which the plugin backend stores per Grafana user. Without configuration the backend keeps the logs in an embedded SQLite file next to the Grafana plugins directory; HA deployments configure a PostgreSQL schema instead. Opening a chat in another tab or window takes it over, and the previous view stops accepting work. See [chat storage](docs/chat-storage.md) for configuration, the commit log, and recovery.
 
 ## Session filesystem and agent
 
@@ -122,7 +120,7 @@ Nothing reaches Grafana until the assistant runs:
 2. `workspace apply [--path PATH]`, which validates the staged changes (errors a dashboard already had do not block), lists removed panels, queries, transformations, and variables as warnings, and opens the change-set review: a summary, the replacements repeated across dashboards with an example each, and a folder-grouped dashboard list with per-dashboard diffs and checkboxes. There is no planning mode, saved plan, or plan ID. Waiting for approval does not count against the bash timeout. After approval, the captured changes are checked again for staleness. The browser then writes the checked dashboards as the current user with `resourceVersion` preconditions, several at a time. Concurrent changes return `conflicted`; unchecked dashboards are `declined` and keep their working-copy change.
 3. `workspace receipts` or `/session/receipts/` shows save outcomes and complete diffs. `workspace revert APPLY_ID` stages the reverse of an apply for the same review.
 
-Every apply is journaled per operation as `applied`, `declined`, `conflicted`, `failed`, `unknown`, or `not attempted`. Imported chat sessions drop the journal, so approvals do not carry over. Jsonnet files from sessions created with the retired virtual-file tools migrate into `/workspace`.
+Every apply is journaled per operation as `applied`, `declined`, `conflicted`, `failed`, `unknown`, or `not attempted`. A `bash` call interrupted by a reload is not run again when the chat reopens: the model is told the call was interrupted, and `workspace receipts` shows what was applied.
 
 Live edits (`live apply`) change only the unsaved dashboard open in the browser and do not ask for approval. Saving that state still goes through Grafana's own save flow.
 
@@ -137,7 +135,7 @@ Alert rules follow the same workflow: the assistant edits `/grafana/alert-rules/
 
 ## Context window and compaction
 
-Before each model request, the assistant estimates tokens for the system prompt, tool schemas, and history. The budget is `contextWindow − maxOutputTokens − margin`. Above 80% of it, bulky tool outputs outside the recent window are elided first, then those of every step except the latest one. Output of the latest step that alone does not fit is clipped, with a note to read it in parts. If that is not enough, older turns are summarized by the model into a rolling summary of about a quarter of the history budget that keeps identifiers, paths, and receipt IDs verbatim. Cuts never separate a tool call from its result, the summary is persisted with the session, and truncation is the fallback. The visible transcript stays complete: while the summary is written the status reads "Summarizing earlier conversation", a divider marks where the model's verbatim context begins and expands to the summary, and a warning follows a reply for which messages were dropped without a summary. For long tasks, the assistant keeps notes in `/session/findings.md`.
+Compaction is Pi Durable's: the harness estimates each request from the last reported token usage plus the messages after it. When the context comes within `backgroundTokens` of `contextWindow − reserveTokens`, a summary of the older messages is written in the background while the chat keeps working, and it is placed at the next turn boundary; a request that would not fit waits for it. A request the provider rejects as too long is compacted and retried once. The thresholds scale with each model: `reserveTokens` is the model's `maxOutputTokens`, about 20% of the window (at most 20k tokens) stays verbatim, and background summaries start 15% of the window (at most 32k tokens) before the blocking point. Older messages stay in storage: the transcript stays complete, a divider marks where the model's verbatim context begins and expands to the summary, and the status reads "Summarizing earlier conversation" while a request waits for one. For long tasks, the assistant keeps notes in `/session/findings.md`.
 
 ## Skills
 
@@ -411,7 +409,7 @@ To benchmark whether facts survive context compaction, run:
 npm run benchmark:compaction
 ```
 
-This benchmark seeds three dashboards with unusual panel titles, lowers the configured model's context window to `BENCH_COMPACTION_CONTEXT_WINDOW` (default `20000`, which leaves about 6k tokens of history next to the system prompt and tool schemas) for the run, and restores the plugin settings afterwards. Over five turns the assistant inspects these dashboards, then three others (explaining what each of their panels measures), and finally answers without tools with the two facts the user stated in the first turn and every panel title of the first three dashboards. It fails when no earlier turn was summarized, when the recall turn uses tools, or when a fact is missing, and writes reports to `test-results/compaction-benchmark/latest-report.txt`, `latest-answer.md`, and `latest-events.json`.
+This benchmark seeds three dashboards with unusual panel titles, lowers the configured model's context window to `BENCH_COMPACTION_CONTEXT_WINDOW` (default `20000`, with 4096 output tokens, which leaves about 8k tokens of history next to the system prompt and tool schemas before a summary is required) for the run, and restores the plugin settings afterwards. Over five turns the assistant inspects these dashboards, then three others (explaining what each of their panels measures), and finally answers without tools with the two facts the user stated in the first turn and every panel title of the first three dashboards. It fails when no earlier turn was summarized, when the recall turn uses tools, or when a fact is missing, and writes reports to `test-results/compaction-benchmark/latest-report.txt`, `latest-answer.md`, and `latest-events.json`.
 
 To benchmark dashboard-derived metric discovery, run:
 

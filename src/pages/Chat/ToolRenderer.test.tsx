@@ -332,13 +332,13 @@ describe('ToolRenderer', () => {
     render(
       <ToolResultMessageBody
         toolName="read"
-        content={[{ type: 'text', text: 'Operation aborted' }]}
+        content={[{ type: 'text', text: '<harness>\n[error] Tool read was aborted\n</harness>' }]}
         details={{}}
         isError
       />
     );
     expect(screen.getByText('stopped')).toBeInTheDocument();
-    expect(screen.queryByText('Operation aborted')).toBeNull();
+    expect(screen.queryByText(/was aborted/)).toBeNull();
   });
 
   it('renders timed-out bash results with discarded changes', () => {

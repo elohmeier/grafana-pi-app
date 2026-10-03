@@ -1,4 +1,4 @@
-import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import type { ChatMessage } from './chatMessages';
 
 const MAX_HISTORY = 100;
 
@@ -10,7 +10,7 @@ export type PromptHistoryState = { index: number; draft: string; entries: string
  * of the pi coding agent: user prompts as typed and shell commands as
  * `!command`. Consecutive duplicates collapse into one entry.
  */
-export function promptHistory(messages: readonly AgentMessage[]): string[] {
+export function promptHistory(messages: readonly ChatMessage[]): string[] {
   const entries: string[] = [];
   for (let index = messages.length - 1; index >= 0 && entries.length < MAX_HISTORY; index--) {
     const text = composerText(messages[index]);
@@ -21,7 +21,7 @@ export function promptHistory(messages: readonly AgentMessage[]): string[] {
   return entries;
 }
 
-function composerText(message: AgentMessage): string | undefined {
+function composerText(message: ChatMessage): string | undefined {
   if (message.role === 'userShell') {
     return `!${message.result.command}`;
   }
@@ -42,7 +42,7 @@ function composerText(message: AgentMessage): string | undefined {
  */
 export function navigatePromptHistory(
   state: PromptHistoryState | undefined,
-  messages: readonly AgentMessage[],
+  messages: readonly ChatMessage[],
   input: string,
   direction: -1 | 1
 ): { state: PromptHistoryState | undefined; text: string } | undefined {

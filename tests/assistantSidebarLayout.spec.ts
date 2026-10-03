@@ -172,7 +172,7 @@ test.describe('Assistant sidebar layout', () => {
     }
   });
 
-  test('keeps an imported investigation report in one collapsible reading column', async ({ page }, testInfo) => {
+  test('keeps the investigation report in one collapsible reading column', async ({ page }, testInfo) => {
     const suffix = Date.now().toString(36);
     const dashboardUid = `assistant-sidebar-layout-${suffix}`;
     const dashboardTitle = `Assistant sidebar layout ${suffix}`;
@@ -184,11 +184,14 @@ test.describe('Assistant sidebar layout', () => {
       await expect(page.getByRole('heading', { name: 'Sidebar layout fixture' })).toBeVisible();
       await openAssistantSidebar(page, dashboardUid);
 
-      await page.getByTestId(testIds.chat.importInput).setInputFiles({
-        name: 'assistant-sidebar-layout.json',
-        mimeType: 'application/json',
-        buffer: Buffer.from(JSON.stringify(investigationSessionFixture())),
-      });
+      // The user shell writes the report the assistant would keep during an investigation.
+      await page
+        .getByTestId(testIds.chat.composer)
+        .fill(`!cat > /session/report.md <<'EOF'\n${investigationReportMarkdown()}\nEOF`);
+      await page.getByTestId(testIds.chat.send).click();
+      await expect(page.getByTestId(testIds.chat.investigationReport)).toBeVisible();
+      // Leave shell mode, whose hint would take room from the messages.
+      await page.getByTestId(testIds.chat.composer).fill('');
 
       const report = page.getByTestId(testIds.chat.investigationReport);
       const reportScroll = page.getByTestId(testIds.chat.investigationReportScroll);
@@ -347,58 +350,38 @@ async function openAssistantSidebar(page: Page, dashboardUid: string) {
   throw new Error('Could not find the Assistant sidebar trigger on the dashboard page.');
 }
 
-function investigationSessionFixture() {
-  const timestamp = '2026-08-10T19:37:00.000Z';
-  return {
-    kind: 'g42-pi-app.chat-session',
-    schemaVersion: 1,
-    exportedAt: timestamp,
-    pluginId: 'grafana-assistant-app',
-    session: {
-      id: 'assistant-sidebar-layout',
-      title: 'Troubleshoot login latency',
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      messages: [
-        {
-          role: 'user',
-          content: [{ type: 'text', text: 'Investigate the login latency.' }],
-          timestamp,
-        },
-      ],
-      investigationReport: {
-        id: 'login-latency',
-        title: 'Analyse long-running login latency across the customer domain',
-        status: 'active',
-        scope: [
-          'Dashboard UID: long-dashboard-identifier, Panel ID: 86 (Durchschnittliche Login-Zeit)',
-          'Prometheus datasource UID: thanos-production-database',
-          'Incident time range: now-6h to now, focus around 19:00',
-        ],
-        evidence: [
-          'The customer domain latency series rises sharply at 18:57 and remains elevated through 19:08.',
-          'The corresponding request-rate series remains within its normal operating range.',
-        ],
-        hypotheses: [
-          'A downstream identity provider is adding latency after the application accepts each login request.',
-          'A saturated connection pool is serialising work during the incident window.',
-        ],
-        ruledOut: [
-          'A broad traffic spike is not supported by the request-rate series.',
-          'Dashboard rendering delay does not explain the server-side metric increase.',
-        ],
-        nextSteps: [
-          'Compare the login latency with identity-provider duration and connection-pool wait time.',
-          'Inspect pod-level latency to determine whether the increase is isolated to one replica.',
-        ],
-        remediation: [
-          'Drain an unhealthy replica if the pod comparison identifies a single outlier.',
-          'Final remediation marker: validate the recovered login latency.',
-        ],
-        updatedAt: timestamp,
-      },
-    },
-  };
+/** The report the assistant keeps in /session/report.md during an investigation. */
+function investigationReportMarkdown() {
+  const section = (title: string, items: string[]) => `## ${title}\n\n${items.map((item) => `- ${item}`).join('\n')}`;
+  return [
+    '# Analyse long-running login latency across the customer domain',
+    'Status: active',
+    section('Scope', [
+      'Dashboard UID: long-dashboard-identifier, Panel ID: 86 (Durchschnittliche Login-Zeit)',
+      'Prometheus datasource UID: thanos-production-database',
+      'Incident time range: now-6h to now, focus around 19:00',
+    ]),
+    section('Evidence', [
+      'The customer domain latency series rises sharply at 18:57 and remains elevated through 19:08.',
+      'The corresponding request-rate series remains within its normal operating range.',
+    ]),
+    section('Hypotheses', [
+      'A downstream identity provider is adding latency after the application accepts each login request.',
+      'A saturated connection pool is serialising work during the incident window.',
+    ]),
+    section('Ruled out', [
+      'A broad traffic spike is not supported by the request-rate series.',
+      'Dashboard rendering delay does not explain the server-side metric increase.',
+    ]),
+    section('Next checks', [
+      'Compare the login latency with identity-provider duration and connection-pool wait time.',
+      'Inspect pod-level latency to determine whether the increase is isolated to one replica.',
+    ]),
+    section('Remediation', [
+      'Drain an unhealthy replica if the pod comparison identifies a single outlier.',
+      'Final remediation marker: validate the recovered login latency.',
+    ]),
+  ].join('\n\n');
 }
 
 function escapeRegExp(value: string) {

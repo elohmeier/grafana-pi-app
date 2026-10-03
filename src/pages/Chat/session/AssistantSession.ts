@@ -1,45 +1,50 @@
-import { ApprovalChannel } from './ApprovalChannel';
+import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context';
+import type { Api, Model } from '@earendil-works/pi-ai';
 import {
-  Agent,
-  type AgentMessage,
-  type AgentEvent,
-  type AgentTool,
-  type StreamFn,
-} from '@earendil-works/pi-agent-core';
-import { createInitialSystemMessage, normalizeContext, toToolDeclaration } from '@earendil-works/pi-ai';
+  AgentDoc,
+  createRegistry,
+  defineEntry,
+  Harness,
+  watchEvents,
+  type AgentState,
+  type Conversation,
+  type ConversationView,
+  type Cursor,
+  type EntryRecord,
+  type JsonObject,
+  type LiveState,
+  type Tx,
+} from '@earendil-works/pi-durable';
 import type { DashboardMutationAPI } from '@grafana/data';
-import type { PiAppThinkingLevel } from '../../../types';
-import {
-  conversationMessages,
-  userPromptTexts,
-  convertChatMessagesToLlm,
-  createUserShellMessage,
-  hasPersistableMessages,
-} from '../chatMessages';
-import {
-  ContextCompactor,
-  estimateTextTokens,
-  buildSummarizerPrompt,
-  isCompactionState,
-  SUMMARIZER_SYSTEM_PROMPT,
-  SUMMARY_MAX_OUTPUT_TOKENS,
-  type CompactionState,
-  type CompactionEvent,
-  type SummarizerInput,
-} from '../compaction';
+import type { PiAppJsonData, PiAppThinkingLevel } from '../../../types';
+import { createChatEventAdapter, type ChatAgentEvent } from '../agentEvents';
+import { userPromptTexts, userShellModelMessage, type ChatMessage } from '../chatMessages';
 import { renderDashboardAssistantContextBlock, type DashboardAssistantLaunch } from '../dashboardLaunch';
 import { renderExternalAssistantContextBlock, type ExternalAssistantLaunch } from '../externalAssistantLaunch';
+import type { ChatLogClient, ChatSummary } from '../durable/chatLogClient';
+import {
+  SHELL_ENTRY_KIND,
+  syncDraft,
+  toJson,
+  TurnDoc,
+  WorkspaceDoc,
+  type TurnState,
+  type WorkspaceState,
+} from '../durable/documents';
+import { createAssistantExtension } from '../durable/extension';
+import { ChatStorageLost, LogStorage } from '../durable/logStorage';
+import { createAssistantModels, modelRef, type AssistantStreamFn } from '../durable/models';
+import { assistantHarnessSettings } from '../durable/settings';
+import { EMPTY_TRANSCRIPT, projectTranscript, type ChatTranscript } from '../durable/transcript';
 import {
   renderAssistantSidebarPageContextBlock,
   sidebarPageContextSkillHints,
   type AssistantSidebarPageContextSnapshot,
 } from '../sidebarPageContext';
 import { renderGrafanaSystemPrompt, selectGrafanaSkills, type GrafanaSkill } from '../skills';
-import { createInitialRunStatus, reduceChatRunStatus, withRunPhase, type ChatRunStatus } from '../streamingStatus';
 import type { PromptTelemetryContext } from '../telemetry';
 import { createSessionWorkspaceToolkit, type SessionWorkspaceToolkitOptions, SessionWorkspace } from '../workspace';
 import type { AlertRuleBroker, DashboardBroker, WorkspaceBroker } from '../workspace/broker';
-import { migrateLegacyInvestigationReport, migrateLegacyJsonnetFiles } from '../workspace/migration';
 import {
   createAlertRuleCatalog,
   createDashboardCatalog,
@@ -48,27 +53,20 @@ import {
 } from '../workspace/mounts';
 import type { PythonRunner } from '../workspace/python/pythonCommand';
 import type { WorkspaceBashResult } from '../workspace/shell';
-import type { PersistedWorkspace } from '../workspace/types';
 import type { Artifact } from '../domain/artifacts';
+import { ApprovalChannel } from './ApprovalChannel';
 import { ArtifactStore } from './artifactStore';
 import {
   createSessionId,
   generateTitle,
   NEW_CHAT_TITLE,
   parseStoredThinkingLevel,
-  type StoredSession,
-} from './sessionRecord';
-import { reduceToolRuns, type ToolRunState } from './toolRuns';
+  type ChatExport,
+} from './chatIdentity';
 
-export type SessionSnapshot = {
-  messages: AgentMessage[];
-  modelId?: string;
-  thinkingLevel?: Agent['state']['thinkingLevel'];
-  workspace: PersistedWorkspace;
-  artifacts: Record<string, Artifact>;
-  artifactCounter: number;
-  compaction?: CompactionState;
-};
+const context = BACKGROUND_CONTEXT;
+const ENTRY_PAGE_SIZE = 500;
+const ShellEntry = defineEntry<JsonObject>(SHELL_ENTRY_KIND);
 
 /** Context a chat was opened with. It reaches the model with the first prompt and is then dropped. */
 export type SessionLaunch = {
@@ -76,11 +74,14 @@ export type SessionLaunch = {
   external?: ExternalAssistantLaunch;
 };
 
-/** Capabilities of the place the session currently runs in, resolved again for every prompt and shell command. */
+/** Capabilities of the place the session currently runs in, resolved again for every prompt, tool call, and shell command. */
 export type SessionEnvironment = {
-  streamFn: StreamFn;
-  model: Agent['state']['model'];
-  thinkingLevel: Agent['state']['thinkingLevel'];
+  /** Plugin settings; the configured models form the session's model catalog. */
+  jsonData: PiAppJsonData;
+  streamFn: AssistantStreamFn;
+  /** The chat's model and the thinking level it runs with. */
+  model: Model<Api>;
+  thinkingLevel: PiAppThinkingLevel;
   broker: WorkspaceBroker;
   skills: readonly GrafanaSkill[];
   python?: PythonRunner;
@@ -98,11 +99,19 @@ export type SessionEnvironment = {
  */
 export type SessionHost = {
   environment(session: AssistantSession): SessionEnvironment;
-  persist?(record: StoredSession): Promise<void>;
+  /** The backend that stores chats. */
+  chatLog: ChatLogClient;
   onPromptStart?(context: PromptTelemetryContext): void;
-  onPromptEnd?(messages: AgentMessage[]): void;
-  onCompaction?(event: CompactionEvent): void;
+  /** The chat was stored: opened, or changed by a finished run or shell command. */
+  onStored?(summary: ChatSummary): void;
 };
+
+/** Whether the chat is stored and accepts changes. */
+export type SessionStorageState =
+  | { status: 'new' }
+  | { status: 'opening' }
+  | { status: 'open' }
+  | { status: 'lost'; reason: ChatStorageLost['reason'] | 'open-failed'; message: string };
 
 export type SessionState = {
   id: string;
@@ -110,89 +119,59 @@ export type SessionState = {
   /** Model and thinking level chosen for this chat; undefined uses the configured default. */
   modelId?: string;
   thinkingLevel?: PiAppThinkingLevel;
-  toolRuns: ToolRunState;
-  runStatus?: ChatRunStatus;
+  transcript: ChatTranscript;
   shellRunning: boolean;
-  save?: { status: 'saving' | 'saved' | 'error'; error?: string };
-  compaction?: CompactionState;
-  /** History dropped without a summary during the latest run, because summarizing failed or was not enough. */
-  truncation?: CompactionEvent;
+  storage: SessionStorageState;
 };
 
 type SessionInit = {
   id?: string;
   title?: string;
-  createdAt?: string;
   launch?: SessionLaunch;
-  workspace?: SessionWorkspace;
-  messages?: AgentMessage[];
-  modelId?: string;
-  thinkingLevel?: PiAppThinkingLevel;
-  compaction?: CompactionState;
-  artifacts?: Record<string, Artifact>;
-  artifactCounter?: number;
+  /** The chat exists in storage and is opened on attach. */
+  stored?: boolean;
 };
 
 /**
- * One conversation, independent of any React view: its identity, launch
- * context, agent, session filesystem, approvals, run progress, and persistence.
- * Hosts attach to it to supply the model, Grafana capabilities, and storage.
+ * One chat, independent of any React view. Its transcript, tasks, and
+ * session filesystem live in a Pi Durable harness over the chat's log in the
+ * plugin backend: every step is stored before it is shown, and a run
+ * interrupted by a reload continues when the chat is opened again. Opening
+ * the chat elsewhere takes it over; this session then stops accepting work.
  */
 export class AssistantSession {
-  agent?: Agent;
-  readonly workspace: SessionWorkspace;
   readonly approvals = new ApprovalChannel();
   readonly artifacts = new ArtifactStore();
   launch: SessionLaunch;
-  createdAt?: string;
-  persistenceError?: string;
+  private currentWorkspace = new SessionWorkspace();
   private state: SessionState;
   private host?: SessionHost;
-  private saves: Promise<void> = Promise.resolve();
-  private saveSequence = 0;
+  private conversation?: Conversation;
+  private storage?: LogStorage;
+  private opening?: Promise<Conversation>;
+  private readonly stored: boolean;
+  private readonly entries = new Map<number, EntryRecord>();
+  private view?: ConversationView;
+  private readonly timing: { runStartedAt?: number; toolStartedAt: Map<string, number> } = {
+    toolStartedAt: new Map(),
+  };
+  private disposers: Array<() => void | Promise<unknown>> = [];
   private stateListeners = new Set<() => void>();
-  private listeners = new Set<(event: AgentEvent, agent: Agent) => void>();
-  private unsubscribeAgent?: () => void;
+  private listeners = new Set<(event: ChatAgentEvent) => void>();
   private catalog?: { broker: DashboardBroker; catalog: DashboardCatalog };
   private alertRuleCatalog?: { broker: AlertRuleBroker; catalog: AlertRuleCatalog };
-  private initialMessages: AgentMessage[];
+  private closed = false;
 
   constructor(init: SessionInit = {}) {
-    this.workspace = init.workspace ?? new SessionWorkspace();
     this.launch = init.launch ?? {};
-    this.createdAt = init.createdAt;
-    this.initialMessages = init.messages ?? [];
+    this.stored = Boolean(init.stored);
     this.state = {
       id: init.id ?? createSessionId(),
       title: init.title || NEW_CHAT_TITLE,
-      modelId: init.modelId,
-      thinkingLevel: init.thinkingLevel,
-      toolRuns: {},
+      transcript: EMPTY_TRANSCRIPT,
       shellRunning: false,
-      compaction: isCompactionState(init.compaction) ? init.compaction : undefined,
+      storage: { status: 'new' },
     };
-    if (init.artifacts) {
-      this.artifacts.restore(init.artifacts, init.artifactCounter);
-    }
-  }
-
-  /** Rebuilds a stored or imported session. Imported files are untrusted and get a new ID. */
-  static restore(stored: StoredSession, options: { id?: string; title?: string; trusted?: boolean } = {}) {
-    const workspace = SessionWorkspace.restore(stored.workspace, { trusted: options.trusted ?? true });
-    migrateLegacyJsonnetFiles(workspace, stored.virtualJsonnetFiles);
-    migrateLegacyInvestigationReport(workspace, stored.investigationReport);
-    return new AssistantSession({
-      id: options.id ?? stored.id,
-      title: options.title ?? stored.title,
-      createdAt: options.id ? undefined : stored.createdAt,
-      workspace,
-      messages: stored.messages,
-      modelId: stored.modelId || undefined,
-      thinkingLevel: parseStoredThinkingLevel(stored.thinkingLevel),
-      compaction: stored.compaction,
-      artifacts: stored.artifacts ?? {},
-      artifactCounter: stored.artifactCounter,
-    });
   }
 
   get id() {
@@ -203,13 +182,21 @@ export class AssistantSession {
     return this.state.title;
   }
 
-  /** The conversation, without the system message that leads the agent transcript. */
-  get messages(): AgentMessage[] {
-    return this.agent ? conversationMessages(this.agent.state.messages) : this.initialMessages;
+  get workspace() {
+    return this.currentWorkspace;
+  }
+
+  get messages(): ChatMessage[] {
+    return this.state.transcript.messages;
   }
 
   get isStreaming() {
-    return Boolean(this.agent?.state.isStreaming);
+    return this.state.transcript.busy;
+  }
+
+  /** Whether the chat has been stored; a new chat is stored with its first prompt or command. */
+  get started() {
+    return this.state.storage.status !== 'new';
   }
 
   getState = () => this.state;
@@ -221,8 +208,8 @@ export class AssistantSession {
     };
   };
 
-  /** Agent events of this session, delivered after the session updated its own state. */
-  subscribe(listener: (event: AgentEvent, agent: Agent) => void) {
+  /** Run events of this chat, for telemetry and benchmarks. */
+  subscribe(listener: (event: ChatAgentEvent) => void) {
     this.listeners.add(listener);
     return () => {
       this.listeners.delete(listener);
@@ -233,61 +220,156 @@ export class AssistantSession {
     this.update({ modelId: settings.modelId, thinkingLevel: settings.thinkingLevel });
   }
 
-  /** Attaches a host and creates the agent on first attach. */
+  /** Attaches a host. A stored chat is opened on first attach. */
   attach(host: SessionHost) {
     this.host = host;
-    if (!this.agent) {
-      const environment = host.environment(this);
-      const turn = this.buildTurn('', environment);
-      this.createAgent({
-        messages: this.initialMessages,
-        systemPrompt: turn.systemPrompt,
-        tools: turn.tools,
-        model: environment.model,
-        thinkingLevel: environment.thinkingLevel,
-        streamFn: environment.streamFn,
+    if (this.stored && !this.opening) {
+      void this.open().catch(() => {
+        // Reported through the storage state.
       });
     }
-    return this.agent!;
   }
 
   /** Stops the run and declines a pending approval. The session stays usable. */
   abort() {
     this.approvals.settle(false);
-    this.agent?.abort();
+    const conversation = this.conversation;
+    if (conversation && this.state.storage.status === 'open') {
+      void conversation.abort(context).catch(() => {
+        // A lost storage already stopped the run.
+      });
+    }
+  }
+
+  /** Opens the chat's storage and harness, creating the chat when it is new. */
+  open(): Promise<Conversation> {
+    this.opening ??= this.openHarness().catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.update({
+        storage:
+          error instanceof ChatStorageLost
+            ? { status: 'lost', reason: error.reason, message }
+            : { status: 'lost', reason: 'open-failed', message: `The chat could not be opened: ${message}` },
+      });
+      throw error;
+    });
+    return this.opening;
+  }
+
+  private async openHarness() {
+    const host = this.requireHost();
+    this.update({ storage: { status: 'opening' } });
+    const storage = await LogStorage.open(host.chatLog, this.id, {
+      create: !this.stored,
+      title: () => (this.state.title === NEW_CHAT_TITLE ? undefined : this.state.title),
+      onLost: (error) => this.update({ storage: { status: 'lost', reason: error.reason, message: error.message } }),
+    });
+    this.storage = storage;
+    if (storage.summary.title && this.state.title === NEW_CHAT_TITLE) {
+      this.update({ title: storage.summary.title });
+    }
+    const environment = host.environment(this);
+    const models = createAssistantModels(environment.jsonData, () => this.requireHost().environment(this).streamFn);
+    const registry = createRegistry();
+    registry.install(
+      createAssistantExtension({
+        tool: (_conversationId, name) => {
+          const tool = this.toolkitFor(this.requireHost().environment(this)).tools.find((item) => item.name === name);
+          if (!tool) {
+            throw new Error(`Unknown tool: ${name}`);
+          }
+          return tool;
+        },
+        persist: async (_conversationId, api, toolContext) => {
+          try {
+            await api.commit((tx) => this.writeWorkspace(tx), toolContext);
+          } catch {
+            // The invocation ended (for example on abort); store what changed outside it.
+            await this.persistWorkspace();
+          }
+        },
+      })
+    );
+    const harness = await Harness.open(
+      storage,
+      {
+        models,
+        registry,
+        settings: assistantHarnessSettings(() => this.host?.environment(this).model),
+        onReport: (error) => console.warn('Assistant extension error', error),
+      },
+      context
+    );
+    this.disposers.push(() => harness.close(context));
+    const conversation = await harness.root(context, {
+      agent: { model: modelRef(environment.model.id), thinkingLevel: environment.thinkingLevel },
+    });
+    this.conversation = conversation;
+
+    const saved = await harness.snapshot(WorkspaceDoc, conversation.id, context);
+    this.restoreWorkspace(saved);
+    const agent = await harness.snapshot(AgentDoc, conversation.id, context);
+    this.update({
+      modelId: this.state.modelId ?? agent?.model?.modelId,
+      thinkingLevel: this.state.thinkingLevel ?? parseStoredThinkingLevel(agent?.thinkingLevel),
+    });
+
+    await this.loadHistory(conversation);
+    const view = await conversation.viewState(context);
+    this.disposers.push(() => view.dispose());
+    this.applyView(view.value);
+    this.disposers.push(view.subscribe((value) => this.applyView(value)));
+
+    const adapt = createChatEventAdapter();
+    const events = await watchEvents(harness, conversation.id, context);
+    this.disposers.push(() => events.stop());
+    events.start(async (batch) => {
+      for (const event of adapt(batch)) {
+        if (event.type === 'agent_end') {
+          this.notifyStored();
+        }
+        for (const listener of this.listeners) {
+          listener(event);
+        }
+      }
+    });
+
+    this.update({ storage: { status: 'open' } });
+    this.notifyStored();
+    // Continue a run a reload interrupted.
+    harness.resume();
+    return conversation;
   }
 
   async prompt(text: string) {
-    const agent = this.agent;
     const host = this.host;
-    if (!agent || !host || !text || agent.state.isStreaming) {
+    if (!host || !text || this.isStreaming || this.isUnavailable()) {
       return;
     }
     if (this.state.title === NEW_CHAT_TITLE) {
       this.update({ title: generateTitle(text) });
     }
-    this.update({ runStatus: createInitialRunStatus(), truncation: undefined });
-    try {
-      const environment = host.environment(this);
-      const turn = this.buildTurn(text, environment);
-      host.onPromptStart?.({
-        prompt: text,
-        systemPrompt: turn.systemPrompt,
-        messages: this.messages,
-        toolCount: turn.tools.length,
-        activeSkills: turn.skillSelection.activeSkills,
-        explicitSkillNames: turn.skillSelection.explicitSkillNames,
-      });
-      setTurnSystemMessage(agent, turn.systemPrompt, turn.tools);
-      agent.state.model = environment.model;
-      agent.state.thinkingLevel = environment.thinkingLevel;
-      await agent.prompt(text);
-      host.onPromptEnd?.(this.messages);
-      await this.flushSaves();
-    } finally {
-      this.launch = {};
-      this.update({ runStatus: undefined });
-    }
+    const conversation = await this.open();
+    const environment = host.environment(this);
+    const turn = this.buildTurn(text, environment);
+    host.onPromptStart?.({
+      prompt: text,
+      systemPrompt: [turn.state.assistant, turn.state.workspace, turn.state.launch, turn.state.page]
+        .filter(Boolean)
+        .join('\n\n'),
+      messages: this.messages,
+      toolCount: turn.toolCount,
+      activeSkills: turn.skillSelection.activeSkills,
+      explicitSkillNames: turn.skillSelection.explicitSkillNames,
+    });
+    await this.configureAgent(conversation, environment);
+    await conversation.commit(async (tx) => {
+      syncDraft(await tx.doc(TurnDoc, conversation.id), toJson(turn.state) as JsonObject);
+      await this.writeWorkspace(tx);
+    }, context);
+    this.launch = {};
+    // The run continues in the harness; its progress arrives through the view.
+    await conversation.submit({ type: 'input', content: text, whenBusy: 'followUp' }, context);
   }
 
   /**
@@ -295,9 +377,8 @@ export class AssistantSession {
    * model call. The result joins the transcript, so the agent sees it on the next prompt.
    */
   async runUserShell(command: string) {
-    const agent = this.agent;
     const host = this.host;
-    if (!agent || !host || !command || agent.state.isStreaming || this.state.shellRunning) {
+    if (!host || !command || this.isStreaming || this.state.shellRunning || this.isUnavailable()) {
       return;
     }
     if (this.state.title === NEW_CHAT_TITLE) {
@@ -305,69 +386,74 @@ export class AssistantSession {
     }
     this.update({ shellRunning: true });
     try {
+      const conversation = await this.open();
       const result: WorkspaceBashResult = await this.toolkitFor(host.environment(this)).runShell(command);
-      agent.state.messages = [...agent.state.messages, createUserShellMessage(result)];
-      await this.save();
+      const { images: _images, ...stored } = result;
+      await conversation.commit(async (tx) => {
+        await tx.appendEntry(ShellEntry, conversation.id, {
+          data: toJson(stored) as unknown as JsonObject,
+          model: [userShellModelMessage(result)],
+        });
+        await this.writeWorkspace(tx);
+      }, context);
+      this.notifyStored();
     } finally {
       this.update({ shellRunning: false });
     }
   }
 
-  snapshot(messages = this.messages): SessionSnapshot {
+  /** The chat as a downloadable file: every entry and the session filesystem. */
+  async exportChat(pluginId: string, exportedAt = new Date().toISOString()): Promise<ChatExport> {
+    const conversation = await this.open();
+    await this.loadHistory(conversation);
     return {
-      messages,
-      modelId: this.state.modelId ?? this.agent?.state.model.id,
-      thinkingLevel: this.state.thinkingLevel ?? this.agent?.state.thinkingLevel,
-      workspace: this.workspace.serialize(),
-      artifacts: this.artifacts.snapshot(),
-      artifactCounter: this.artifacts.counter,
-      compaction: this.state.compaction,
+      kind: 'g42-pi-app.chat',
+      schemaVersion: 2,
+      exportedAt,
+      pluginId,
+      chat: { id: this.id, title: this.title },
+      entries: this.sortedEntries(),
+      workspace: this.workspaceState(),
     };
   }
 
-  /** The session as stored and exported. */
-  record(messages = this.messages, now = new Date().toISOString()): StoredSession {
-    const snapshot = this.snapshot(messages);
-    return {
-      id: this.id,
-      title: this.title,
-      createdAt: this.createdAt ?? now,
-      updatedAt: now,
-      ...snapshot,
-      thinkingLevel: parseStoredThinkingLevel(snapshot.thinkingLevel),
-    };
-  }
-
-  /** Queues a save of the current state. Saves run in order; sessions without a user or assistant message are not stored. */
-  save(messages = this.messages) {
-    if (!hasPersistableMessages(messages)) {
-      return this.saves;
+  /** Resolves once no run is going and the view shows it. */
+  async idle() {
+    const conversation = this.conversation ?? (this.opening ? await this.opening : undefined);
+    await conversation?.waitForIdle(context);
+    while (this.isStreaming && !this.isUnavailable()) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
     }
-    const record = this.record(messages);
-    this.createdAt = record.createdAt;
-    const persist = this.host?.persist?.bind(this.host);
-    const sequence = ++this.saveSequence;
-    this.update({ save: { status: 'saving' } });
-    const save = this.saves.then(async () => {
-      await persist?.(record);
-      this.persistenceError = undefined;
-      if (sequence === this.saveSequence) {
-        this.update({ save: { status: 'saved' } });
-      }
-    });
-    this.saves = save.catch((error) => {
-      this.persistenceError = error instanceof Error ? error.message : String(error);
-      if (sequence === this.saveSequence) {
-        this.update({ save: { status: 'error', error: this.persistenceError } });
-      }
-    });
-    return save;
   }
 
-  async flushSaves() {
-    await this.saves;
-    if (this.persistenceError) {
-      throw new Error(this.persistenceError);
+  /** Stops the run, then closes the chat. */
+  async stop() {
+    this.approvals.settle(false);
+    const conversation = this.conversation;
+    if (conversation && this.isStreaming && this.state.storage.status === 'open') {
+      await conversation.abort(context).catch(() => {
+        // A lost storage already stopped the run.
+      });
+    }
+    await this.close();
+  }
+
+  /** Stops observing the chat and closes its harness. A running answer resumes when the chat is opened again. */
+  async close() {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    // A chat that is still opening is closed once its harness exists.
+    await this.opening?.catch(() => undefined);
+    const disposers = this.disposers.reverse();
+    this.disposers = [];
+    for (const dispose of disposers) {
+      try {
+        await dispose();
+      } catch {
+        // Closing is best effort.
+      }
     }
   }
 
@@ -408,7 +494,7 @@ export class AssistantSession {
     });
   }
 
-  /** System prompt, tools, and active skills for the next prompt. */
+  /** The system prompt parts and active skills for the next prompt. */
   private buildTurn(prompt: string, environment: SessionEnvironment) {
     const page = environment.pageInPrompt ? environment.page : undefined;
     const skillSelection = selectGrafanaSkills(prompt, environment.skills, {
@@ -416,92 +502,123 @@ export class AssistantSession {
       previousPrompts: userPromptTexts(this.messages),
     });
     const toolkit = this.toolkitFor(environment);
-    const systemPrompt = [
-      renderGrafanaSystemPrompt({
+    const launch = [
+      this.launch.dashboard ? renderDashboardAssistantContextBlock(this.launch.dashboard) : undefined,
+      this.launch.external ? renderExternalAssistantContextBlock(this.launch.external.context) : undefined,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+    const state: TurnState = {
+      assistant: renderGrafanaSystemPrompt({
         skills: environment.skills,
         activeSkillNames: skillSelection.activeSkillNames,
         liveDashboardEditingAvailable: Boolean(environment.getDashboardMutationAPI),
       }),
-      toolkit.promptSection,
-      this.launch.dashboard ? renderDashboardAssistantContextBlock(this.launch.dashboard) : undefined,
-      this.launch.external ? renderExternalAssistantContextBlock(this.launch.external.context) : undefined,
-      renderAssistantSidebarPageContextBlock(page),
-    ]
-      .filter(Boolean)
-      .join('\n\n');
-    return { systemPrompt, tools: toolkit.tools, skillSelection };
+      workspace: toolkit.promptSection,
+      ...(launch ? { launch } : {}),
+      ...(page ? { page: renderAssistantSidebarPageContextBlock(page) } : {}),
+    };
+    return { state, toolCount: toolkit.tools.length, skillSelection };
   }
 
-  createAgent(options: {
-    messages: AgentMessage[];
-    systemPrompt: string;
-    tools: AgentTool[];
-    model: Agent['state']['model'];
-    thinkingLevel: Agent['state']['thinkingLevel'];
-    streamFn: StreamFn;
-  }) {
-    let agent: Agent;
-    const compactor = new ContextCompactor({
-      initialState: this.state.compaction,
-      getBudget: () => ({
-        contextWindow: agent.state.model.contextWindow,
-        maxOutputTokens: agent.state.model.maxTokens,
-        fixedTokens: estimateTextTokens(
-          agent.state.systemPrompt +
-            JSON.stringify(
-              agent.state.tools.map(({ name, description, parameters }) => ({ name, description, parameters }))
-            )
-        ),
-      }),
-      summarize: (input, signal) => summarizeWithModel(options.streamFn, agent.state.model, input, signal),
-      onStateChange: (compaction) => this.update({ compaction }),
-      onEvent: (event) => this.handleCompaction(event),
-    });
-    agent = new Agent({
-      initialState: {
-        systemPrompt: options.systemPrompt,
-        model: options.model,
-        thinkingLevel: options.thinkingLevel,
-        messages: conversationMessages(options.messages),
-        tools: options.tools,
-      },
-      convertToLlm: convertChatMessagesToLlm,
-      // Compaction and its persisted message indexes see only the conversation.
-      transformContext: async (messages, signal) => [
-        ...messages.filter((message) => message.role === 'system'),
-        ...(await compactor.transform(conversationMessages(messages), signal)),
-      ],
-      streamFn: options.streamFn,
-    });
-    this.unsubscribeAgent?.();
-    this.agent = agent;
-    this.unsubscribeAgent = agent.subscribe(async (event) => {
-      this.update({
-        toolRuns: reduceToolRuns(this.state.toolRuns, event),
-        runStatus: reduceChatRunStatus(this.state.runStatus, event),
-      });
-      if (event.type === 'agent_end') {
-        try {
-          // `event.messages` holds only this run's new messages; persist the whole history.
-          await this.save();
-        } catch {
-          /* Exposed as persistenceError and the save state. */
-        }
-      }
-      for (const listener of this.listeners) {
-        listener(event, agent);
-      }
-    });
-    return agent;
-  }
-
-  private handleCompaction(event: CompactionEvent) {
-    if (event.kind === 'summarizing') {
-      this.update({ runStatus: withRunPhase(this.state.runStatus, 'compacting') });
-    } else if (event.kind === 'truncated') {
-      this.update({ truncation: event });
+  /** Stores the chat's model choice; the next request uses it. */
+  private async configureAgent(conversation: Conversation, environment: SessionEnvironment) {
+    const agent = (this.view?.docs['pi.agent'] ?? {}) as AgentState;
+    const model = modelRef(environment.model.id);
+    if (agent.model?.modelId !== model.modelId || agent.thinkingLevel !== environment.thinkingLevel) {
+      await conversation.configure({ model, thinkingLevel: environment.thinkingLevel }, context);
     }
-    this.host?.onCompaction?.(event);
+  }
+
+  private workspaceState(): WorkspaceState {
+    return toJson({
+      workspace: this.workspace.serialize() as unknown as JsonObject,
+      artifacts: this.artifacts.snapshot() as unknown as JsonObject,
+      artifactCounter: this.artifacts.counter,
+    });
+  }
+
+  /** Writes the session filesystem into the transaction. */
+  private async writeWorkspace(tx: Tx) {
+    const conversation = this.conversation;
+    if (conversation) {
+      syncDraft(await tx.doc(WorkspaceDoc, conversation.id), this.workspaceState() as JsonObject);
+    }
+  }
+
+  private async persistWorkspace() {
+    const conversation = this.conversation;
+    if (conversation && this.state.storage.status === 'open') {
+      await conversation
+        .commit((tx) => this.writeWorkspace(tx), context)
+        .catch(() => {
+          // A lost storage is reported through the storage state.
+        });
+    }
+  }
+
+  private restoreWorkspace(saved: WorkspaceState | undefined) {
+    if (!saved) {
+      return;
+    }
+    if (saved.workspace) {
+      this.currentWorkspace = SessionWorkspace.restore(saved.workspace);
+    }
+    if (saved.artifacts) {
+      this.artifacts.restore(saved.artifacts as unknown as Record<string, Artifact>, saved.artifactCounter);
+    }
+    // A new state object, so views re-read the replaced workspace.
+    this.state = { ...this.state };
+    this.emit();
+  }
+
+  /** Loads the entries before the active context, which the view does not include. */
+  private async loadHistory(conversation: Conversation) {
+    let cursor: Cursor | undefined;
+    do {
+      const page = await conversation.entries({}, ENTRY_PAGE_SIZE, cursor, context);
+      for (const entry of page.items) {
+        this.entries.set(entry.id, entry);
+      }
+      cursor = page.next;
+    } while (cursor);
+  }
+
+  private sortedEntries() {
+    return [...this.entries.values()].sort((a, b) => a.id - b.id);
+  }
+
+  private applyView(view: ConversationView) {
+    this.view = view;
+    for (const entry of view.entries) {
+      this.entries.set(entry.id, entry);
+    }
+    const live = (view.docs['pi.live'] ?? {}) as LiveState;
+    if (live.run) {
+      this.timing.runStartedAt ??= Date.now();
+    } else {
+      this.timing.runStartedAt = undefined;
+      this.timing.toolStartedAt.clear();
+    }
+    this.update({ transcript: projectTranscript(this.sortedEntries(), view, this.timing) });
+  }
+
+  private notifyStored() {
+    const summary = this.storage?.summary;
+    if (summary) {
+      this.host?.onStored?.({ ...summary, title: this.title, updatedAt: new Date().toISOString() });
+    }
+  }
+
+  private isUnavailable() {
+    return this.state.storage.status === 'lost' || this.closed;
+  }
+
+  private requireHost() {
+    if (!this.host) {
+      throw new Error('The session is not attached to a view.');
+    }
+    return this.host;
   }
 
   private update(patch: Partial<SessionState>) {
@@ -510,46 +627,12 @@ export class AssistantSession {
       return;
     }
     this.state = { ...this.state, ...patch };
+    this.emit();
+  }
+
+  private emit() {
     for (const listener of this.stateListeners) {
       listener();
     }
   }
-}
-
-/**
- * Replaces the system message that leads the transcript with this turn's prompt
- * and tools. The prompt is rebuilt for every turn (skills, launch and page
- * context), so the transcript keeps one leading system message instead of a
- * history of prompt changes, and Pi finds no tool changes to declare.
- */
-function setTurnSystemMessage(agent: Agent, systemPrompt: string, tools: AgentTool[]) {
-  const system = createInitialSystemMessage(systemPrompt, tools.map(toToolDeclaration));
-  const conversation = conversationMessages(agent.state.messages);
-  agent.state.tools = tools;
-  agent.state.messages = system ? [system, ...conversation] : conversation;
-}
-
-async function summarizeWithModel(
-  streamFn: StreamFn,
-  model: Agent['state']['model'],
-  input: SummarizerInput,
-  signal?: AbortSignal
-) {
-  const stream = await streamFn(
-    model,
-    normalizeContext({
-      systemPrompt: SUMMARIZER_SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: buildSummarizerPrompt(input), timestamp: Date.now() }],
-    }),
-    { maxTokens: Math.min(SUMMARY_MAX_OUTPUT_TOKENS, model.maxTokens || SUMMARY_MAX_OUTPUT_TOKENS), signal }
-  );
-  const message = await stream.result();
-  if (message.stopReason === 'error' || message.stopReason === 'aborted') {
-    throw new Error(message.errorMessage || `summarization ${message.stopReason}`);
-  }
-  return message.content
-    .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n')
-    .trim();
 }
