@@ -404,13 +404,15 @@ export class WebexFake {
     const body = JSON.parse(raw.toString('utf8')) as {
       roomId?: string;
       toPersonEmail?: string;
+      toPersonId?: string;
       text?: string;
       markdown?: string;
       parentId?: string;
     };
     let roomId = body.roomId ?? '';
-    if (!roomId && body.toPersonEmail) {
-      const other = this.person(body.toPersonEmail);
+    // A message to a person goes to the direct room with them, created on first use.
+    if (!roomId && (body.toPersonId || body.toPersonEmail)) {
+      const other = this.person(body.toPersonId ?? body.toPersonEmail!);
       roomId =
         [...this.rooms.values()].find(
           (room) => room.type === 'direct' && room.members.includes(caller.id) && room.members.includes(other.id)

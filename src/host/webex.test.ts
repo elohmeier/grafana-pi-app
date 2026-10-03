@@ -127,6 +127,10 @@ describe('Webex adapter', () => {
         ],
         root.id
       );
+      // Direct messages go to the direct room with the person.
+      await channel.postDirect(alice.id, 'Your link code');
+      const direct = [...fake.rooms.values()].find((candidate) => candidate.type === 'direct');
+      expect(fake.roomMessages(direct!.id).at(-1)?.markdown).toBe('Your link code');
       const uploads = fake.roomMessages(room.id).filter((message) => message.files);
       expect(
         uploads.map((message) => [message.parentId, message.markdown, fake.file(message.files![0])?.name])

@@ -30,6 +30,8 @@ export type ResponderOptions = {
   channelIds: string[];
   allowDirect: boolean;
   log?: (message: string) => void;
+  /** Runs pending for longer are not resumed when the host starts (default 30 minutes). */
+  recoverMaxAgeMs?: number;
   /** Minimum time between progress edits of the placeholder post. */
   progressIntervalMs?: number;
   /** Screenshots of the panels a notification links to; posted in a new alert thread without the model. */
@@ -272,14 +274,29 @@ export class Responder {
 
   /** Answers runs that were pending when the host stopped: the harness continues each one. */
   async recover() {
-    const pending = this.options.store.threads().filter(([, record]) => record.pending && record.chatId);
+    const { store, channel } = this.options;
+    const maxAge = this.options.recoverMaxAgeMs ?? 30 * 60_000;
+    // This platform's threads only; each platform has its own responder.
+    const pending = store
+      .threads()
+      .filter(([key, record]) => key.startsWith(`${channel.name}:`) && record.pending && record.chatId);
     await Promise.all(
-      pending.map(([, record]) => {
+      pending.map(async ([key, record]) => {
         const run = record.pending!;
+        if (Date.now() - run.startedAt > maxAge) {
+          // An old question is no longer worth answering, and its thread may be gone.
+          this.options.log?.(
+            `dropping the run in thread ${run.threadId} from ${new Date(run.startedAt).toISOString()}`
+          );
+          await store.setThread(key, { pending: undefined });
+          return;
+        }
         this.options.log?.(`resuming the run in thread ${run.threadId}`);
-        return this.answer(run.channelId, run.threadId, run.prompt, { postId: run.postId, resume: true }).catch(
-          (error) => this.options.log?.(`resuming thread ${run.threadId} failed: ${message(error)}`)
-        );
+        return this.answer(run.channelId, run.threadId, run.prompt, {
+          postId: run.postId,
+          resume: true,
+          startedAt: run.startedAt,
+        }).catch((error) => this.options.log?.(`resuming thread ${run.threadId} failed: ${message(error)}`));
       })
     );
   }
@@ -288,7 +305,7 @@ export class Responder {
     channelId: string,
     threadId: string,
     prompt: string,
-    resumed?: { postId: string; resume: true }
+    resumed?: { postId: string; resume: true; startedAt: number }
   ) {
     const { channel, store, assistant } = this.options;
     const key = threadKey(channel.name, channelId, threadId);
@@ -297,7 +314,8 @@ export class Responder {
     const placeholder = resumed ? { id: resumed.postId } : await channel.post(channelId, WORKING, threadId);
     await store.setThread(key, {
       chatId: chat.id,
-      pending: { channelId, threadId, postId: placeholder.id, prompt, startedAt: Date.now() },
+      // A resumed run keeps its start, so it ages out after restarts.
+      pending: { channelId, threadId, postId: placeholder.id, prompt, startedAt: resumed?.startedAt ?? Date.now() },
     });
     void channel.typing?.(channelId, threadId).catch(() => undefined);
     let lastEdit = 0;

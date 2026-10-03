@@ -268,7 +268,16 @@ describe('recovery and alert noise', () => {
     await store.setThread('fake:ops:root', {
       chatId: 'chat-9',
       chatStored: true,
-      pending: { channelId: 'ops', threadId: 'root', postId: 'p1', prompt: 'why?', startedAt: 1 },
+      pending: { channelId: 'ops', threadId: 'root', postId: 'p1', prompt: 'why?', startedAt: Date.now() },
+    });
+    // Another platform's pending run and an old one of this platform are not resumed.
+    await store.setThread('other:ops:root', {
+      chatId: 'chat-x',
+      pending: { channelId: 'ops', threadId: 'root', postId: 'p9', prompt: 'other', startedAt: Date.now() },
+    });
+    await store.setThread('fake:ops:old', {
+      chatId: 'chat-old',
+      pending: { channelId: 'ops', threadId: 'old', postId: 'p8', prompt: 'old', startedAt: Date.now() - 3600_000 },
     });
     channel.posts.push({ id: 'p1', channelId: 'ops', threadId: 'root', text: 'Looking into it…' });
     await responder.recover();
@@ -277,6 +286,8 @@ describe('recovery and alert noise', () => {
     ]);
     expect(channel.posts).toEqual([{ id: 'p1', channelId: 'ops', threadId: 'root', text: 'The answer.' }]);
     expect(store.thread('fake:ops:root')?.pending).toBeUndefined();
+    expect(store.thread('fake:ops:old')?.pending).toBeUndefined();
+    expect(store.thread('other:ops:root')?.pending).toBeDefined();
   });
 
   it('starts a new chat again when it was not stored before the host stopped', async () => {
@@ -288,7 +299,7 @@ describe('recovery and alert noise', () => {
     });
     await store.setThread('fake:ops:root', {
       chatId: 'new-chat',
-      pending: { channelId: 'ops', threadId: 'root', postId: 'p1', prompt: 'why?', startedAt: 1 },
+      pending: { channelId: 'ops', threadId: 'root', postId: 'p1', prompt: 'why?', startedAt: Date.now() },
     });
     await responder.recover();
     expect(asks.map((ask) => [ask.chat, ask.resume ?? false])).toEqual([
