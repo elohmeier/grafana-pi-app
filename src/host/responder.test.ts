@@ -2,6 +2,7 @@ import { decideDelivery, formatAlertMessage, type GrafanaWebhook, type GrafanaWe
 import type { ChannelFile, ChannelMessage, ChatChannel, ThreadPost } from './channel';
 import { formatEvidence, Responder, split, type Assistant, type ResponderOptions } from './responder';
 import { alertPanels } from './screenshots';
+import type { ChatRef } from './assistant';
 import { HostStore } from './store';
 
 function alert(fingerprint: string, status: 'firing' | 'resolved' = 'firing'): GrafanaWebhookAlert {
@@ -62,11 +63,11 @@ function setup(
   options: Partial<ResponderOptions> = {}
 ) {
   const channel = new FakeChannel();
-  const asks: Array<{ conversation: string; chatId?: string; text: string }> = [];
+  const asks: Array<{ conversation: string; chat: ChatRef; text: string; resume?: boolean }> = [];
   const assistant: Assistant = {
-    ask: (conversation, chatId, text, onProgress) => {
-      asks.push({ conversation, chatId, text });
-      return answer(conversation, chatId, text, onProgress);
+    ask: (conversation, chat, text, onProgress, options) => {
+      asks.push({ conversation, chat, text, ...(options?.resume ? { resume: true } : {}) });
+      return answer(conversation, chat, text, onProgress, options);
     },
   };
   const store = new HostStore();
@@ -178,7 +179,7 @@ describe('messages', () => {
 
   it('continues the thread chat with posts since the last answer as context', async () => {
     const { channel, asks, store, responder } = setup();
-    await store.setThread('fake:ops:root', { chatId: 'chat-1', lastAnswerAt: 2000 });
+    await store.setThread('fake:ops:root', { chatId: 'chat-1', chatStored: true, lastAnswerAt: 2000 });
     channel.threadPosts = [
       { userId: 'u1', userName: 'alice', text: 'root question', createdAt: 1000, fromBot: false },
       { userId: 'bot', userName: 'bot', text: 'an answer', createdAt: 2000, fromBot: true },
@@ -189,7 +190,7 @@ describe('messages', () => {
     );
     expect(asks[0]).toEqual({
       conversation: 'fake:ops:root',
-      chatId: 'chat-1',
+      chat: { id: 'chat-1', stored: true },
       text: 'Earlier in the thread:\n- @bob: it started after the deploy\n\n@alice: check that deploy',
     });
   });
@@ -252,5 +253,61 @@ describe('evidence and screenshots', () => {
       text: '**Panel 2**',
       files: ['web-panel-2.png'],
     });
+  });
+});
+
+describe('recovery and alert noise', () => {
+  it('resumes a pending run into its placeholder post', async () => {
+    const { channel, asks, store, responder } = setup();
+    await store.setThread('fake:ops:root', {
+      chatId: 'chat-9',
+      chatStored: true,
+      pending: { channelId: 'ops', threadId: 'root', postId: 'p1', prompt: 'why?', startedAt: 1 },
+    });
+    channel.posts.push({ id: 'p1', channelId: 'ops', threadId: 'root', text: 'Looking into it…' });
+    await responder.recover();
+    expect(asks).toEqual([
+      { conversation: 'fake:ops:root', chat: { id: 'chat-9', stored: true }, text: 'why?', resume: true },
+    ]);
+    expect(channel.posts).toEqual([{ id: 'p1', channelId: 'ops', threadId: 'root', text: 'The answer.' }]);
+    expect(store.thread('fake:ops:root')?.pending).toBeUndefined();
+  });
+
+  it('starts a new chat again when it was not stored before the host stopped', async () => {
+    const { asks, store, responder } = setup(async (_conversation, chat, _text, _progress, options) => {
+      if (options?.resume) {
+        throw new Error('chat not found');
+      }
+      return { chatId: chat.id, text: 'ok', toolCalls: 0 };
+    });
+    await store.setThread('fake:ops:root', {
+      chatId: 'new-chat',
+      pending: { channelId: 'ops', threadId: 'root', postId: 'p1', prompt: 'why?', startedAt: 1 },
+    });
+    await responder.recover();
+    expect(asks.map((ask) => [ask.chat, ask.resume ?? false])).toEqual([
+      [{ id: 'new-chat', stored: true }, true],
+      [{ id: 'new-chat', stored: false }, false],
+    ]);
+    expect(store.thread('fake:ops:root')).toMatchObject({ chatStored: true });
+  });
+
+  it('edits the last update while a group flaps and skips repeated analyses of a rule', async () => {
+    const { channel, asks, responder } = setup();
+    await responder.handleAlert(notification('firing', [alert('a')]));
+    await responder.handleAlert(notification('firing', [alert('a'), alert('b')]));
+    await responder.handleAlert(notification('firing', [alert('a')]));
+    await responder.handleAlert(notification('firing', [alert('a'), alert('b'), alert('c')]));
+    await settle();
+    const updates = channel.posts.filter((post) => post.text.includes('Update: High 5xx'));
+    expect(updates).toHaveLength(1);
+    expect(updates[0].text).toContain('3 firing');
+    expect(updates[0].text).toMatch(/updated \d\d:\d\d UTC/);
+
+    await responder.handleAlert(notification('resolved', [alert('a', 'resolved')]));
+    await responder.handleAlert(notification('firing', [alert('a')]));
+    await settle();
+    expect(asks).toHaveLength(1);
+    expect(channel.posts.at(-1)?.text).toContain('Not investigated automatically');
   });
 });

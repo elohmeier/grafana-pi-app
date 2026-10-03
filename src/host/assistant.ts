@@ -15,10 +15,11 @@ export const CHANNEL_PROMPT = `You are answering in a chat thread (Mattermost), 
 - People read your answer in the thread: lead with the finding, keep it short (at most about 15 lines), use Markdown lists, and include exact numbers, times in UTC, and the names of dashboards, alert rules, and services you checked.
 - Earlier messages in the thread reach you as the conversation; the alert notification that started the thread is your starting point.`;
 
-const TEXT_ONLY_PROMPT = `- You cannot see images: screenshots are only posted for people. Never describe what a screenshot shows; take values and times from queries (\`grafana-dashboard data\`, \`grafana-prom query\`).`;
-
 const DECLINED =
   'changes cannot be applied from a chat channel; nobody can review them here. Do not retry: describe the change and say it can be made in Grafana.';
+
+/** The chat of a conversation: `stored` when it exists in the plugin backend. */
+export type ChatRef = { id: string; stored: boolean };
 
 export type AssistantRunProgress = { toolCalls: number; lastCommand?: string };
 
@@ -57,15 +58,21 @@ export class AssistantHost {
 
   constructor(private readonly options: AssistantHostOptions) {}
 
-  /** Sends `text` to the chat `chatId` (a new chat when undefined) and resolves with the final answer. */
+  /**
+   * Sends `text` to the chat and resolves with the final answer. With `resume`, a chat whose last
+   * prompt is `text` (the host stopped during its run) is continued instead of prompted again.
+   */
   ask(
     conversation: string,
-    chatId: string | undefined,
+    chat: ChatRef,
     text: string,
-    onProgress?: (progress: AssistantRunProgress) => void
+    onProgress?: (progress: AssistantRunProgress) => void,
+    options: { resume?: boolean } = {}
   ): Promise<AssistantAnswer> {
     const previous = this.queues.get(conversation) ?? Promise.resolve();
-    const run = previous.catch(() => undefined).then(() => this.limited(() => this.run(chatId, text, onProgress)));
+    const run = previous
+      .catch(() => undefined)
+      .then(() => this.limited(() => this.run(chat, text, onProgress, options.resume ?? false)));
     this.queues.set(conversation, run);
     void run.finally(() => {
       if (this.queues.get(conversation) === run) {
@@ -89,25 +96,19 @@ export class AssistantHost {
   }
 
   private async run(
-    chatId: string | undefined,
+    chat: ChatRef,
     text: string,
-    onProgress?: (progress: AssistantRunProgress) => void
+    onProgress: ((progress: AssistantRunProgress) => void) | undefined,
+    resume: boolean
   ): Promise<AssistantAnswer> {
     const jsonData = await this.options.jsonData();
     const settings: PiAppJsonData = {
       ...jsonData,
-      systemPromptAddendum: [
-        jsonData.systemPromptAddendum,
-        CHANNEL_PROMPT,
-        // New chats use the default model; a text-only model gets no image from a screenshot.
-        resolveChatModelSettings(jsonData, {}).model.input?.includes('image') ? '' : TEXT_ONLY_PROMPT,
-      ]
-        .filter(Boolean)
-        .join('\n\n'),
+      systemPromptAddendum: [jsonData.systemPromptAddendum, CHANNEL_PROMPT].filter(Boolean).join('\n\n'),
     };
     const broker = this.options.broker(settings);
     const skills = getGrafanaSkills(settings);
-    const session = new AssistantSession(chatId ? { id: chatId, stored: true } : {});
+    const session = new AssistantSession({ id: chat.id, stored: chat.stored });
     const host: SessionHost = {
       chatLog: this.options.chatLog,
       environment: (target) => {
@@ -141,18 +142,23 @@ export class AssistantHost {
         }
       }
     });
-    const before = session.messages.length;
     try {
       session.attach(host);
       await session.open();
-      const existing = session.messages.length;
-      await session.prompt(text);
+      let start = session.messages.length;
+      const prompted = resume ? lastPromptIndex(session.messages, text) : -1;
+      if (prompted >= 0) {
+        // The harness continues the interrupted run when the chat opens.
+        start = prompted + 1;
+      } else {
+        await session.prompt(text);
+      }
       await session.idle();
       const state = session.getState();
       if (state.storage.status === 'lost') {
         return { chatId: session.id, text: '', toolCalls: progress.toolCalls, error: state.storage.message };
       }
-      const answer = lastAssistantMessage(session.messages.slice(Math.max(before, existing)));
+      const answer = lastAssistantMessage(session.messages.slice(start));
       return {
         chatId: session.id,
         text: answer ? messageText(answer) : '',
@@ -198,6 +204,21 @@ export function presentedEvidence(result: { content?: unknown; details?: unknown
     }
   }
   return evidence;
+}
+
+/** Index of the last user message when its text is `text`, else -1. */
+function lastPromptIndex(messages: ChatMessage[], text: string) {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role === 'user') {
+      const content =
+        typeof message.content === 'string'
+          ? message.content
+          : message.content.map((part) => (part.type === 'text' ? part.text : '')).join('');
+      return content.trim() === text.trim() ? index : -1;
+    }
+  }
+  return -1;
 }
 
 function lastAssistantMessage(messages: ChatMessage[]): AssistantMessage | undefined {

@@ -10,6 +10,8 @@ type RenderGrafanaSystemPromptOptions = {
   skills?: readonly GrafanaSkill[];
   activeSkillNames?: readonly string[];
   liveDashboardEditingAvailable?: boolean;
+  /** Whether the model accepts images; `false` adds that screenshots are only for the user. */
+  imageInput?: boolean;
 };
 
 export function renderGrafanaSystemPrompt({
@@ -17,6 +19,7 @@ export function renderGrafanaSystemPrompt({
   skills = GRAFANA_SKILLS,
   activeSkillNames = [],
   liveDashboardEditingAvailable,
+  imageInput,
 }: RenderGrafanaSystemPromptOptions = {}) {
   const activeSkillNameSet = new Set(activeSkillNames);
   const modelVisibleSkills = skills.filter((skill) => !skill.disableModelInvocation);
@@ -25,12 +28,16 @@ export function renderGrafanaSystemPrompt({
   return [
     basePrompt.trim(),
     renderDashboardEditingCapability(liveDashboardEditingAvailable),
+    imageInput === false ? TEXT_ONLY_MODEL : '',
     renderAvailableSkills(modelVisibleSkills),
     renderActiveSkills(activeSkills),
   ]
     .filter(Boolean)
     .join('\n\n');
 }
+
+const TEXT_ONLY_MODEL = `## Images
+You cannot see images: screenshots (\`grafana-dashboard screenshot\`) are shown only to the user. Never describe what a screenshot shows; take values and times from queries (\`grafana-dashboard data\`, \`grafana-prom query\`).`;
 
 function renderDashboardEditingCapability(liveDashboardEditingAvailable: boolean | undefined) {
   if (liveDashboardEditingAvailable === undefined) {

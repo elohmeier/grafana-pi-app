@@ -1,14 +1,16 @@
 import { analysisPrompt, decideDelivery, firingFingerprints, formatAlertMessage, type GrafanaWebhook } from './alerts';
-import type { AssistantAnswer, AssistantRunProgress, PresentedEvidence } from './assistant';
+import { createSessionId } from '../pages/Chat/session/chatIdentity';
+import type { AssistantAnswer, AssistantRunProgress, ChatRef, PresentedEvidence } from './assistant';
 import type { ChannelFile, ChannelMessage, ChatChannel } from './channel';
 import type { HostStore } from './store';
 
 export type Assistant = {
   ask(
     conversation: string,
-    chatId: string | undefined,
+    chat: ChatRef,
     text: string,
-    onProgress?: (progress: AssistantRunProgress) => void
+    onProgress?: (progress: AssistantRunProgress) => void,
+    options?: { resume?: boolean }
   ): Promise<AssistantAnswer>;
 };
 
@@ -29,6 +31,10 @@ export type ResponderOptions = {
 };
 
 const WORKING = ':hourglass_flowing_sand: Looking into it…';
+/** Updates of an episode within this time edit the previous update post. */
+const UPDATE_COALESCE_MS = 10 * 60_000;
+/** A new episode of an alert rule investigated within this time is not investigated again automatically. */
+const ANALYSIS_COALESCE_MS = 10 * 60_000;
 
 /**
  * Connects a chat channel to the assistant: posts alert notifications as
@@ -107,6 +113,18 @@ export class Responder {
         updatedAt: now,
       });
       void this.postAlertPanels(payload, alertChannelId, post.id);
+      const alertname = payload.commonLabels?.alertname ?? payload.groupLabels?.alertname ?? payload.groupKey;
+      const previous = store.lastAnalysis(alertname);
+      if (previous !== undefined && now - previous < ANALYSIS_COALESCE_MS) {
+        // During an alert storm, one investigation per alert rule; people can ask for more.
+        await channel.post(
+          alertChannelId,
+          `Not investigated automatically: **${alertname}** was investigated ${Math.round((now - previous) / 60_000)} min ago. Mention me in this thread to investigate it.`,
+          post.id
+        );
+        return { action: 'open' as const, threadId: post.id };
+      }
+      await store.setLastAnalysis(alertname, now);
       // The analysis follows in the thread; a model failure does not affect the notification.
       void this.answer(alertChannelId, post.id, analysisPrompt(payload)).catch((error) =>
         this.options.log?.(`alert analysis failed: ${message(error)}`)
@@ -114,9 +132,28 @@ export class Responder {
       return { action: 'open' as const, threadId: post.id };
     }
     const { episode } = delivery;
-    await channel.post(episode.channelId, formatAlertMessage(payload, delivery.action), episode.threadId);
+    const text = formatAlertMessage(payload, delivery.action);
+    let update = { updatePostId: episode.updatePostId, updatePostedAt: episode.updatePostedAt };
+    if (
+      delivery.action === 'update' &&
+      episode.updatePostId &&
+      episode.updatePostedAt !== undefined &&
+      now - episode.updatePostedAt < UPDATE_COALESCE_MS
+    ) {
+      // A flapping group edits its last update instead of adding a post per change.
+      await channel.update(
+        episode.updatePostId,
+        `${text}\n_(updated ${new Date(now).toISOString().slice(11, 16)} UTC)_`
+      );
+    } else {
+      const post = await channel.post(episode.channelId, text, episode.threadId);
+      if (delivery.action === 'update') {
+        update = { updatePostId: post.id, updatePostedAt: now };
+      }
+    }
     await store.setEpisode(payload.groupKey, {
       ...episode,
+      ...update,
       status: delivery.action === 'resolve' ? 'resolved' : 'firing',
       fingerprints: delivery.action === 'resolve' ? [] : firingFingerprints(payload),
       updatedAt: now,
@@ -124,10 +161,35 @@ export class Responder {
     return { action: delivery.action, threadId: episode.threadId };
   }
 
-  private async answer(channelId: string, threadId: string, prompt: string) {
+  /** Answers runs that were pending when the host stopped: the harness continues each one. */
+  async recover() {
+    const pending = this.options.store.threads().filter(([, record]) => record.pending && record.chatId);
+    await Promise.all(
+      pending.map(([, record]) => {
+        const run = record.pending!;
+        this.options.log?.(`resuming the run in thread ${run.threadId}`);
+        return this.answer(run.channelId, run.threadId, run.prompt, { postId: run.postId, resume: true }).catch(
+          (error) => this.options.log?.(`resuming thread ${run.threadId} failed: ${message(error)}`)
+        );
+      })
+    );
+  }
+
+  private async answer(
+    channelId: string,
+    threadId: string,
+    prompt: string,
+    resumed?: { postId: string; resume: true }
+  ) {
     const { channel, store, assistant } = this.options;
     const key = threadKey(channel.name, channelId, threadId);
-    const placeholder = await channel.post(channelId, WORKING, threadId);
+    const record = store.thread(key);
+    const chat: ChatRef = { id: record?.chatId ?? createSessionId(), stored: record?.chatStored ?? false };
+    const placeholder = resumed ? { id: resumed.postId } : await channel.post(channelId, WORKING, threadId);
+    await store.setThread(key, {
+      chatId: chat.id,
+      pending: { channelId, threadId, postId: placeholder.id, prompt, startedAt: Date.now() },
+    });
     void channel.typing?.(channelId, threadId).catch(() => undefined);
     let lastEdit = 0;
     let editing: Promise<void> = Promise.resolve();
@@ -144,14 +206,24 @@ export class Responder {
     };
     let result: AssistantAnswer;
     try {
-      result = await assistant.ask(key, store.thread(key)?.chatId, prompt, onProgress);
+      // A new chat may already be stored when the host stopped during its first run.
+      const ref = resumed ? { ...chat, stored: true } : chat;
+      result = await assistant.ask(key, ref, prompt, onProgress, { resume: Boolean(resumed) });
     } catch (error) {
-      result = { chatId: '', text: '', toolCalls: 0, error: message(error) };
+      if (resumed && !chat.stored) {
+        // It was not: start the chat again.
+        result = await assistant
+          .ask(key, chat, prompt, onProgress)
+          .catch((retry) => ({ chatId: '', text: '', toolCalls: 0, error: message(retry) }));
+      } else {
+        result = { chatId: '', text: '', toolCalls: 0, error: message(error) };
+      }
     }
     await editing;
-    if (result.chatId) {
-      await store.setThread(key, { chatId: result.chatId, lastAnswerAt: Date.now() });
-    }
+    await store.setThread(key, {
+      pending: undefined,
+      ...(result.chatId ? { chatStored: true, lastAnswerAt: Date.now() } : {}),
+    });
     const text = result.error
       ? `:warning: The assistant could not answer: ${result.error}${result.text ? `\n\n${result.text}` : ''}`
       : result.text || ':warning: The assistant finished without an answer.';

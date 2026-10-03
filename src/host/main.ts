@@ -16,6 +16,8 @@ import { getBackendSrv, initGrafanaRuntime, refreshDatasources } from './grafana
 import { MattermostChannel } from './mattermost';
 import { Responder } from './responder';
 import { renderAlertPanels } from './screenshots';
+import { nodeShellWorkers } from './shellWorkers';
+import { setShellWorkerFactory } from '../pages/Chat/workspace/shell';
 import { HostStore } from './store';
 
 /**
@@ -42,6 +44,8 @@ const grafanaToken = setting('GRAFANA_TOKEN');
 const webhookToken = setting('ALERT_WEBHOOK_TOKEN', '');
 const port = Number(setting('HOST_PORT', '8080'));
 
+// Scripts run in worker threads, so the run timeout and cancellation can terminate them.
+setShellWorkerFactory(nodeShellWorkers(new URL('./shell.worker.mjs', import.meta.url)));
 await initGrafanaRuntime({ url: grafanaUrl, token: grafanaToken });
 setInterval(() => void refreshDatasources().catch((error) => log(`datasource refresh failed: ${error}`)), 60_000);
 log(`grafana: connected to ${grafanaUrl} as plugin ${PLUGIN_ID}`);
@@ -101,6 +105,7 @@ await channel.start((message) => {
     .handleMessage(message)
     .catch((error) => log(`message ${message.postId} failed: ${error instanceof Error ? error.message : error}`));
 });
+void responder.recover();
 
 createServer((request, response) => {
   void handle(request, response).catch((error) => {

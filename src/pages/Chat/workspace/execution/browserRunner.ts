@@ -4,13 +4,26 @@ import type { ShellHost, ShellInput } from './engine';
 
 import { FS_METHODS } from './protocol';
 
+/** What the runner needs of a worker: a browser Web Worker, or the assistant host's worker_threads adapter. */
+export type ShellWorker = {
+  postMessage(message: unknown): void;
+  terminate(): void;
+  onmessage: ((event: { data: any }) => void) | null;
+  onerror: ((event: { message?: string }) => void) | null;
+};
+
 /** Host-side RPC keeps every filesystem operation inside the original transaction. */
-export function executeInWorker(input: ShellInput, host: ShellHost, signal: AbortSignal): Promise<ExecResult> {
+export function executeInWorker(
+  input: ShellInput,
+  host: ShellHost,
+  signal: AbortSignal,
+  createWorker: () => ShellWorker = () => new Worker(new URL('./shell.worker.ts', import.meta.url)) as ShellWorker
+): Promise<ExecResult> {
   if (signal.aborted) {
     return Promise.reject(new Error('Shell cancelled'));
   }
   return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL('./shell.worker.ts', import.meta.url));
+    const worker = createWorker();
     let settled = false;
     const active = new Set<Promise<unknown>>();
     // The worker keeps the last path list it received; send it again only when it may have changed.

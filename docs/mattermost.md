@@ -21,8 +21,9 @@ session filesystem, and every shell command. Only the environment differs:
 - Chats are stored in the plugin backend as the service account's chats (a
   scope apart from users' chats); the host keeps only which chat belongs to
   which thread (`state.json` in `HOST_DATA_DIR`).
-- Bash runs in-process (there is no Web Worker in Node), and `python3` is not
-  available.
+- Bash runs in worker threads (`dist-host/shell.worker.mjs`, the browser's shell
+  worker with `self` mapped to the parent port), so the run timeout and
+  cancellation terminate a runaway script. `python3` is not available.
 
 ```text
 Grafana alerting --webhook--> assistant host --REST/websocket--> Mattermost
@@ -64,6 +65,14 @@ episodes:
 The webhook answers once the notification is posted, so Grafana retries a
 notification the host could not deliver.
 
+Against noise:
+
+- While a group flaps, an update within 10 minutes of the previous one edits
+  that update post instead of adding one.
+- During an alert storm, a new episode of an alert rule investigated in the
+  last 10 minutes is not investigated automatically; the thread says so, and a
+  mention starts the investigation.
+
 ### Screenshots and evidence
 
 Screenshots use Grafana's image renderer as the service account
@@ -91,6 +100,11 @@ as context. While the assistant works, a placeholder post shows its steps; the
 answer replaces it.
 
 Runs of one thread are serialized; at most `ASSISTANT_CONCURRENCY` runs (default 2) use the model at the same time.
+
+Before a run, the host stores it as pending with its placeholder post and
+prompt. When the host restarts, it reopens each pending chat: Pi Durable
+continues the interrupted run (or the prompt is sent again if it was never
+stored), and the answer replaces the placeholder.
 
 ## Configuration
 
@@ -144,8 +158,9 @@ npx playwright test tests/assistantHost.spec.ts --project=chromium --no-deps
 
 - **Webex:** a second `ChatChannel` (`src/host/channel.ts`) implementation.
 - **Silences** from a thread, as reviewed changes with actor-bound approval.
-- Bash in the host cannot be terminated while it computes; a runaway script
-  blocks the host until it finishes.
+- `python3` in the host: a worker_threads `PythonRunner` that loads CPython-WASM
+  from `dist/cpython`.
 - The host keeps its state in one JSON file and runs as a single instance.
-- Links in notifications come from Grafana's `root_url`. The local variant keeps
-  the default, so they point at port 3000 instead of 3001.
+- Links in notifications come from Grafana's `root_url`. The local variant sets
+  it to port 3001; the plugin setting `sessionGrafanaUrl` points the backend at
+  Grafana inside its container for ID token signing keys.

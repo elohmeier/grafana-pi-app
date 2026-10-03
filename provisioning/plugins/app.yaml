@@ -19,6 +19,8 @@ apps:
       allowedUsers: []
       systemPromptAddendum: ''
       isOpenAIAPIKeySet: true
+      # Grafana inside its container, for ID token signing keys; the variant's root URL is the published port 3001.
+      sessionGrafanaUrl: http://localhost:3000/
       allowedPrometheusDatasourceUids: ['prometheus', 'thanos-prod-db']
       # Restricted log access to the `logs` Compose profile fixture (docs/restricted-logs.md).
       logDatasources:

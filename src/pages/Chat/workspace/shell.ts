@@ -12,10 +12,21 @@ import {
   type WorkspaceCommandSpec,
 } from './commands/registry';
 import { executeShell, type ShellHost } from './execution/engine';
+import type { ShellWorker } from './execution/browserRunner';
 import { LIVE_DASHBOARD_PATH } from './liveDashboard';
 import { normalizeWorkspacePath, truncateUtf8 } from './paths';
 import type { WorkspaceFileChange } from './types';
 import { WorkspaceError, type SessionWorkspace, type WorkspaceTransaction } from './workspace';
+
+let shellWorkers: (() => ShellWorker) | undefined;
+
+/**
+ * Runs scripts in workers from `create` instead of browser Web Workers: the
+ * assistant host uses worker_threads, so a runaway script can be terminated.
+ */
+export function setShellWorkerFactory(create: (() => ShellWorker) | undefined) {
+  shellWorkers = create;
+}
 
 export const DEFAULT_SHELL_CWD = '/workspace';
 export const DEFAULT_SHELL_TIMEOUT_MS = 30_000;
@@ -171,9 +182,11 @@ export async function runWorkspaceBash(
     let escapedError: string | undefined;
     try {
       exec =
-        typeof Worker === 'undefined'
+        typeof Worker === 'undefined' && !shellWorkers
           ? await executeShell(input, host, controller.signal)
-          : await (await import('./execution/browserRunner')).executeInWorker(input, host, controller.signal);
+          : await (
+              await import('./execution/browserRunner')
+            ).executeInWorker(input, host, controller.signal, shellWorkers);
     } catch (error) {
       // Some filesystem errors (for example a redirect into a read-only file or
       // a quota violation) escape the interpreter and end the script early.

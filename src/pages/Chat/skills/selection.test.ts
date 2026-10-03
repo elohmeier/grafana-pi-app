@@ -163,3 +163,11 @@ describe('Grafana skill selection', () => {
     expect(selectGrafanaSkills('Use an explicit only workflow', skills).activeSkillNames).toEqual([]);
   });
 });
+
+describe('model capabilities in the system prompt', () => {
+  it('tells a model without image input that screenshots are only for the user', () => {
+    expect(renderGrafanaSystemPrompt({ imageInput: false })).toContain('You cannot see images');
+    expect(renderGrafanaSystemPrompt({ imageInput: true })).not.toContain('You cannot see images');
+    expect(renderGrafanaSystemPrompt()).not.toContain('You cannot see images');
+  });
+});

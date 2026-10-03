@@ -513,6 +513,7 @@ export class AssistantSession {
         skills: environment.skills,
         activeSkillNames: skillSelection.activeSkillNames,
         liveDashboardEditingAvailable: Boolean(environment.getDashboardMutationAPI),
+        imageInput: environment.model.input ? environment.model.input.includes('image') : undefined,
       }),
       workspace: toolkit.promptSection,
       ...(launch ? { launch } : {}),

@@ -5,6 +5,10 @@ import path from 'node:path';
 export type ThreadRecord = {
   /** The assistant chat of the thread, once it has one. */
   chatId?: string;
+  /** The chat exists in the plugin backend. */
+  chatStored?: boolean;
+  /** A run that has not posted its answer yet; resumed when the host starts. */
+  pending?: { channelId: string; threadId: string; postId: string; prompt: string; startedAt: number };
   /** Bot posts of the thread are newer than this time (ms); later human posts are context for the next answer. */
   lastAnswerAt?: number;
   createdAt: number;
@@ -17,6 +21,9 @@ export type AlertEpisode = {
   status: 'firing' | 'resolved';
   /** The firing alerts (fingerprints) last posted, to skip repeated notifications. */
   fingerprints: string[];
+  /** The last update post, edited by further updates for a while instead of posting again. */
+  updatePostId?: string;
+  updatePostedAt?: number;
   startedAt: number;
   updatedAt: number;
 };
@@ -24,6 +31,8 @@ export type AlertEpisode = {
 export type HostState = {
   threads: Record<string, ThreadRecord>;
   episodes: Record<string, AlertEpisode>;
+  /** When an alert rule's notification was last investigated automatically, by alert name. */
+  analyses: Record<string, number>;
 };
 
 /**
@@ -32,7 +41,7 @@ export type HostState = {
  * themselves live in the plugin backend.
  */
 export class HostStore {
-  private state: HostState = { threads: {}, episodes: {} };
+  private state: HostState = { threads: {}, episodes: {}, analyses: {} };
   private writing: Promise<void> = Promise.resolve();
 
   constructor(private readonly file?: string) {}
@@ -43,12 +52,25 @@ export class HostStore {
     }
     try {
       const parsed = JSON.parse(await readFile(this.file, 'utf8')) as Partial<HostState>;
-      this.state = { threads: parsed.threads ?? {}, episodes: parsed.episodes ?? {} };
+      this.state = { threads: parsed.threads ?? {}, episodes: parsed.episodes ?? {}, analyses: parsed.analyses ?? {} };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw error;
       }
     }
+  }
+
+  threads(): Array<[string, ThreadRecord]> {
+    return Object.entries(this.state.threads);
+  }
+
+  lastAnalysis(alertname: string): number | undefined {
+    return this.state.analyses[alertname];
+  }
+
+  async setLastAnalysis(alertname: string, time: number) {
+    this.state.analyses[alertname] = time;
+    await this.save();
   }
 
   thread(key: string): ThreadRecord | undefined {

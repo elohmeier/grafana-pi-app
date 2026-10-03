@@ -6,11 +6,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const entry = process.argv[2] ?? 'src/host/main.ts';
-
 await build({
-  entryPoints: [path.join(root, entry)],
-  outfile: path.join(root, 'dist-host', `${path.basename(entry, '.ts')}.mjs`),
+  // The host and its shell worker (worker_threads).
+  entryPoints: {
+    main: path.join(root, 'src/host/main.ts'),
+    'shell.worker': path.join(root, 'src/host/shell.worker.ts'),
+  },
+  outdir: path.join(root, 'dist-host'),
+  outExtension: { '.js': '.mjs' },
   bundle: true,
   platform: 'node',
   format: 'esm',

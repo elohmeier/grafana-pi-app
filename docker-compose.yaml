@@ -135,6 +135,8 @@ services:
       GF_AUTH_MANAGED_SERVICE_ACCOUNTS_ENABLED: 'true'
       GF_RENDERING_SERVER_URL: http://renderer:8081/render
       GF_RENDERING_CALLBACK_URL: http://grafana-assistant-variant:3000/
+      # Links in alert notifications (Mattermost) use the published port.
+      GF_SERVER_ROOT_URL: ${GF_VARIANT_ROOT_URL:-http://localhost:3001/}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-local-dev-key}
       PI_OPENAI_BASE_URL: ${PI_OPENAI_BASE_URL:-http://host.docker.internal:8080/v1}
       PI_OPENAI_PROTOCOL: ${PI_OPENAI_PROTOCOL:-auto}
