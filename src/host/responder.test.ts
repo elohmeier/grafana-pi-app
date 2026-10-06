@@ -35,6 +35,9 @@ class FakeChannel implements ChatChannel {
   name = 'fake';
   readonly maxMessageLength = 100;
   readonly markdownTables = true;
+  /** Like Webex when set: further edits of a post fail. */
+  maxEdits?: number;
+  edits = new Map<string, number>();
   posts: Array<{ id: string; channelId: string; text: string; threadId?: string; files?: string[] }> = [];
   threadPosts: ThreadPost[] = [];
   async start() {}
@@ -57,6 +60,11 @@ class FakeChannel implements ChatChannel {
     this.directs.push({ userId, text });
   }
   async update(postId: string, text: string) {
+    const edits = (this.edits.get(postId) ?? 0) + 1;
+    if (edits > (this.maxEdits ?? Infinity)) {
+      throw new Error('too many edits');
+    }
+    this.edits.set(postId, edits);
     this.posts.find((post) => post.id === postId)!.text = text;
   }
   async thread() {
@@ -212,6 +220,45 @@ describe('messages', () => {
     expect(split('abc', 50)).toEqual(['abc']);
   });
 
+  it('splits by the platform measure, without cutting characters', () => {
+    const bytes = (text: string) => Buffer.byteLength(text);
+    const text = `${'ä'.repeat(30)}\n${'😀'.repeat(10)}`;
+    const parts = split(text, 40, bytes);
+    expect(parts.every((part) => bytes(part) <= 40)).toBe(true);
+    expect(parts.join('')).toBe(text.replace('\n', ''));
+    expect(parts.join('')).not.toContain('\uFFFD');
+    expect(parts[0]).toBe('ä'.repeat(20));
+  });
+
+  it('keeps an edit for the answer on platforms that limit edits', async () => {
+    const { channel, responder } = setup(
+      async (_conversation, chat, _text, onProgress) => {
+        for (let step = 1; step <= 20; step++) {
+          onProgress?.({ toolCalls: step, lastCommand: `step ${step}` });
+        }
+        return { chatId: chat.id, text: 'The answer.', toolCalls: 20 };
+      },
+      { progressIntervalMs: 0 }
+    );
+    channel.maxEdits = 3;
+    await responder.handleMessage(message());
+    expect(channel.edits.get('p1')).toBe(3);
+    expect(channel.posts.map((post) => post.text)).toEqual(['The answer.']);
+  });
+
+  it('posts the answer when its placeholder cannot be edited any more', async () => {
+    const { channel, store, responder } = setup();
+    channel.maxEdits = 0;
+    await channel.post('ops', '⏳ Looking into it…', 'root');
+    await store.setThread('fake:ops:root', {
+      chatId: 'chat-1',
+      chatStored: true,
+      pending: { channelId: 'ops', threadId: 'root', postId: 'p1', prompt: 'why?', startedAt: Date.now() },
+    });
+    await responder.recover();
+    expect(channel.posts.map((post) => post.text)).toEqual(['⏳ Looking into it…', 'The answer.']);
+  });
+
   it('posts presented evidence below the answer: images as files, tables as Markdown', async () => {
     const { channel, responder } = setup(async () => ({
       chatId: 'c',
@@ -326,6 +373,25 @@ describe('recovery and alert noise', () => {
     await settle();
     expect(asks).toHaveLength(1);
     expect(channel.posts.at(-1)?.text).toContain('Not investigated automatically');
+  });
+
+  it('posts a new update once the last one may not be edited again', async () => {
+    const { channel, responder } = setup();
+    channel.maxEdits = 1;
+    await responder.handleAlert(notification('firing', [alert('a')]));
+    await settle();
+    // The placeholder of the analysis used its one edit; updates edit their post once.
+    for (const fingerprints of [['a', 'b'], ['a'], ['a', 'b'], ['a']]) {
+      await responder.handleAlert(
+        notification(
+          'firing',
+          fingerprints.map((fingerprint) => alert(fingerprint))
+        )
+      );
+    }
+    const updates = channel.posts.filter((post) => post.text.includes('Update: High 5xx'));
+    expect(updates).toHaveLength(2);
+    expect(updates.map((update) => channel.edits.get(update.id))).toEqual([1, 1]);
   });
 });
 
@@ -459,6 +525,22 @@ describe('identity', () => {
     );
     await responder.handleMessage(message({ postId: 'p4', text: 'unlink' }));
     expect(links.size).toBe(0);
+  });
+
+  it('lets only linked users stop a run when linking is required', async () => {
+    const { links, options } = identity(true);
+    const stopped: string[] = [];
+    const { channel, responder } = setup(undefined, options);
+    (responder as unknown as { options: { assistant: Assistant } }).options.assistant.stop = (conversation) => {
+      stopped.push(conversation);
+      return true;
+    };
+    await responder.handleMessage(message({ text: 'stop' }));
+    expect(stopped).toEqual([]);
+    expect(channel.directs).toHaveLength(1);
+    links.set('fake:u1', { userLogin: 'alice.g', source: 'code', linkedAt: '2026-10-03T12:01:00Z' });
+    await responder.handleMessage(message({ postId: 'p2', text: 'stop' }));
+    expect(stopped).toEqual(['fake:ops:root']);
   });
 
   it('answers unlinked users when linking is optional, and links on request', async () => {

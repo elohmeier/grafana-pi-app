@@ -1,4 +1,5 @@
 import type { PiAppSqlDatasource } from '../../../types';
+import { grafanaTime } from '../domain/time';
 
 /**
  * Restricted Microsoft SQL Server access for `grafana-sql`.
@@ -152,7 +153,7 @@ const INTERVAL = /^([1-9]\d*)(s|m|h|d)$/;
 const FILTER = /^\s*([^=!<>~]+?)\s*(<=|>=|!=|!~|=|<|>|~)(.*)$/s;
 const NUMBER = /^-?\d+(\.\d+)?([eE][-+]?\d+)?$/;
 const GUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-const DATE_LITERAL = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?)?(Z|[+-]\d{2}:\d{2})?$/;
+const DATE_LITERAL = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(\.\d+)?)?)?(Z|[+-]\d{2}:\d{2})?$/;
 
 /** SQL datasources from the policy that exist as MSSQL datasources. */
 export function sqlDatasources(
@@ -521,10 +522,11 @@ function typedLiteral(column: SqlColumn, value: string) {
     return String(bit);
   }
   if (TIME_TYPES.has(column.type) || column.type === 'time') {
-    if (column.type === 'time' ? !/^\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(value) : !DATE_LITERAL.test(value)) {
+    const date = column.type === 'time' ? undefined : timeLiteral(value, column.type);
+    if (column.type === 'time' ? !/^\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(value) : date === undefined) {
       throw new SqlPolicyError(`--where ${column.name}: ${JSON.stringify(value)} is not an ISO ${column.type} value`);
     }
-    return literal(value);
+    return literal(date ?? value);
   }
   if (column.type === 'uniqueidentifier') {
     if (!GUID.test(value)) {
@@ -538,6 +540,50 @@ function typedLiteral(column: SqlColumn, value: string) {
   throw new SqlPolicyError(
     `--where ${column.name}: ${column.type} columns cannot be compared; use --null or --not-null`
   );
+}
+
+/**
+ * An ISO date or date-time in a form SQL Server reads the same under every
+ * language and DATEFORMAT: `YYYYMMDD`, or `YYYY-MM-DDThh:mm:ss[.fff]`. An offset
+ * is kept for datetimeoffset columns; for the other types the value is
+ * converted to UTC, which is how query results are read.
+ */
+export function timeLiteral(value: string, type: string): string | undefined {
+  const match = DATE_LITERAL.exec(value);
+  if (!match) {
+    return undefined;
+  }
+  let [, year, month, day, hour, minute, second = '00', fraction = '', zone = ''] = match;
+  // A calendar date and time of day: SQL Server would fail the query on 2026-02-30 or 25:00.
+  const plain = `${year}-${month}-${day}T${hour ?? '00'}:${minute ?? '00'}:${second}`;
+  const parsed = new Date(`${plain}Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 19) !== plain) {
+    return undefined;
+  }
+  if (zone && type !== 'datetimeoffset') {
+    const utc = new Date(`${year}-${month}-${day}T${hour ?? '00'}:${minute ?? '00'}:${second}${fraction}${zone}`);
+    if (Number.isNaN(utc.getTime())) {
+      return undefined;
+    }
+    const iso = utc.toISOString();
+    [year, month, day, hour, minute, second] = [
+      iso.slice(0, 4),
+      iso.slice(5, 7),
+      iso.slice(8, 10),
+      iso.slice(11, 13),
+      iso.slice(14, 16),
+      iso.slice(17, 19),
+    ];
+    fraction = fraction ? iso.slice(19, 23) : '';
+    zone = '';
+  }
+  if (hour === undefined && !zone) {
+    return `${year}${month}${day}`;
+  }
+  // datetime keeps milliseconds, smalldatetime none; longer fractions fail to convert.
+  const digits = type === 'smalldatetime' ? 0 : type === 'datetime' ? 3 : 7;
+  const kept = fraction.slice(0, digits + 1);
+  return `${year}-${month}-${day}T${hour ?? '00'}:${minute ?? '00'}:${second}${kept.length > 1 ? kept : ''}${zone}`;
 }
 
 /**
@@ -584,15 +630,11 @@ function checkTime(name: string, value: string) {
 
 /** Grafana parses epoch milliseconds and date math; ISO timestamps are sent as epoch milliseconds. */
 function requestTime(value: string) {
-  if (value.startsWith('now') || /^\d+$/.test(value)) {
-    return /^\d{10}$/.test(value) ? `${value}000` : value;
-  }
-  const iso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(value) || value.length === 10 ? value : `${value}Z`;
-  const time = Date.parse(iso.replace(' ', 'T'));
-  if (Number.isNaN(time)) {
+  const time = grafanaTime(value);
+  if (time === undefined) {
     throw new SqlPolicyError(`invalid time ${JSON.stringify(value)}`);
   }
-  return String(time);
+  return time;
 }
 
 function groupKey(value: unknown): GroupKey {

@@ -139,10 +139,31 @@ export class FakeChatLog implements ChatLogClient {
     return `share-${id}`;
   }
 
+  /** Copies by token, like the backend: one copy, brought up to date while it was not written to. */
+  private copies = new Map<string, { id: string; sourceSeq: number }>();
+
   async copyShared(token: string) {
     const source = this.chat(token.replace(/^share-/, ''));
-    const id = `copy-${this.chats.size + 1}`;
     const now = this.now();
+    const previous = this.copies.get(token);
+    const existing = previous && this.chats.get(previous.id);
+    if (previous && existing && !existing.deleted) {
+      if (source.lastSeq === previous.sourceSeq) {
+        return { id: existing.id, title: existing.title, createdAt: existing.createdAt, updatedAt: existing.updatedAt };
+      }
+      if (existing.lastSeq === previous.sourceSeq) {
+        Object.assign(existing, {
+          title: source.title,
+          lastSeq: source.lastSeq,
+          lastDigest: source.lastDigest,
+          rows: structuredClone(source.rows),
+          updatedAt: now,
+        });
+        this.copies.set(token, { id: existing.id, sourceSeq: source.lastSeq });
+        return { id: existing.id, title: existing.title, createdAt: existing.createdAt, updatedAt: now };
+      }
+    }
+    const id = `copy-${this.chats.size + 1}`;
     this.chats.set(id, {
       ...structuredClone(source),
       id,
@@ -150,6 +171,7 @@ export class FakeChatLog implements ChatLogClient {
       createdAt: now,
       updatedAt: now,
     });
+    this.copies.set(token, { id, sourceSeq: source.lastSeq });
     return { id, title: source.title, createdAt: now, updatedAt: now };
   }
 }

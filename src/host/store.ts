@@ -26,6 +26,8 @@ export type AlertEpisode = {
   /** The last update post, edited by further updates for a while instead of posting again. */
   updatePostId?: string;
   updatePostedAt?: number;
+  /** How often the update post was edited, for platforms that limit edits. */
+  updateEdits?: number;
   startedAt: number;
   updatedAt: number;
 };
@@ -64,15 +66,23 @@ export function fileState(file: string): StatePersistence {
   };
 }
 
+/** Threads, episodes, and analyses untouched for this long are forgotten (default 30 days). */
+const RETENTION_MS = 30 * 24 * 60 * 60_000;
+
 /**
  * The host's own state: which chat belongs to which thread, and which thread
  * belongs to which alert group. Chats themselves live in the plugin backend.
+ * Old entries are dropped on each write, so the state stays small: a mention in
+ * a forgotten thread starts a new chat, and a forgotten alert group a new thread.
  */
 export class HostStore {
   private state: HostState = { threads: {}, episodes: {}, analyses: {} };
   private writing: Promise<void> = Promise.resolve();
 
-  constructor(private readonly persistence?: StatePersistence) {}
+  constructor(
+    private readonly persistence?: StatePersistence,
+    private readonly retentionMs = RETENTION_MS
+  ) {}
 
   async load() {
     const parsed = await this.persistence?.load();
@@ -112,7 +122,28 @@ export class HostStore {
     await this.save();
   }
 
+  /** Drops entries last used before the retention period; pending runs stay until they are resumed or dropped. */
+  private prune(now: number) {
+    const before = now - this.retentionMs;
+    for (const [key, thread] of Object.entries(this.state.threads)) {
+      if (!thread.pending && Math.max(thread.createdAt, thread.lastAnswerAt ?? 0) < before) {
+        delete this.state.threads[key];
+      }
+    }
+    for (const [key, episode] of Object.entries(this.state.episodes)) {
+      if (episode.updatedAt < before) {
+        delete this.state.episodes[key];
+      }
+    }
+    for (const [key, time] of Object.entries(this.state.analyses)) {
+      if (time < before) {
+        delete this.state.analyses[key];
+      }
+    }
+  }
+
   private save() {
+    this.prune(Date.now());
     const persistence = this.persistence;
     if (!persistence) {
       return Promise.resolve();

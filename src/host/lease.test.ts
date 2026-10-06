@@ -7,12 +7,16 @@ import { LeaseElector } from './lease';
 function fakeApi() {
   let lease: { metadata: { name: string; resourceVersion: string }; spec: Record<string, unknown> } | undefined;
   let version = 0;
+  let down = false;
   const json = (status: number, body?: unknown) =>
     new Response(body === undefined ? null : JSON.stringify(body), {
       status,
       headers: { 'Content-Type': 'application/json' },
     });
   const fetch = async (url: string | URL | Request, init?: RequestInit) => {
+    if (down) {
+      return json(503);
+    }
     const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     if (method === 'GET') {
@@ -34,7 +38,11 @@ function fakeApi() {
     }
     return json(405);
   };
-  return { fetch: fetch as typeof globalThis.fetch, lease: () => lease };
+  return {
+    fetch: fetch as typeof globalThis.fetch,
+    lease: () => lease,
+    setDown: (value: boolean) => (down = value),
+  };
 }
 
 function elector(api: ReturnType<typeof fakeApi>, identity: string) {
@@ -88,7 +96,24 @@ describe('lease elector', () => {
     await c.release();
   });
 
-  it('reports a lost lease when renewing fails for longer than its duration', async () => {
+  it('stops leading at the renew deadline, before a standby can take the lease over', async () => {
+    const api = fakeApi();
+    const a = elector(api, 'pod-a');
+    let lostAt: number | undefined;
+    const start = Date.now();
+    await a.acquire(() => (lostAt = Date.now() - start));
+    // The API server stops answering: renewals fail.
+    api.setDown(true);
+    await jest.advanceTimersByTimeAsync(1900);
+    expect(lostAt).toBeUndefined();
+    await jest.advanceTimersByTimeAsync(200);
+    // Lost at 2 s (2/3 of the 3 s duration), while the lease is still valid for others until 3 s.
+    expect(lostAt).toBeGreaterThanOrEqual(2000);
+    expect(lostAt).toBeLessThan(3000);
+    expect(a.isLeader).toBe(false);
+  });
+
+  it('reports a lost lease at once when another replica holds it', async () => {
     const api = fakeApi();
     const a = elector(api, 'pod-a');
     let lost = false;
@@ -97,7 +122,7 @@ describe('lease elector', () => {
     api.lease()!.metadata.resourceVersion = 'changed-elsewhere';
     api.lease()!.spec.holderIdentity = 'pod-b';
     api.lease()!.spec.renewTime = new Date(Date.now() + 60_000).toISOString();
-    await jest.advanceTimersByTimeAsync(5000);
+    await jest.advanceTimersByTimeAsync(1000);
     expect(lost).toBe(true);
     expect(a.isLeader).toBe(false);
   });

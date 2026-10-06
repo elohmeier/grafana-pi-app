@@ -9,7 +9,6 @@ type Request = <T>(method: string, path: string, body?: unknown) => Promise<T>;
  * account; users confirm link codes in Grafana.
  */
 export class IdentityService {
-  private cache = new Map<string, { link?: IdentityLink; at: number }>();
   /** Email matching is on, and the service account may look up users. */
   private emailLookup: boolean;
 
@@ -23,18 +22,16 @@ export class IdentityService {
     this.emailLookup = Boolean(options.emailMatch && options.lookupUser);
   }
 
-  /** The Grafana user an account is linked to, or matched by its verified email when enabled. */
+  /**
+   * The Grafana user an account is linked to, or matched by its verified email when enabled.
+   * Not cached: a link confirmed or removed in Grafana applies to the next message.
+   */
   async resolve(
     platform: string,
     user: string,
     displayName: string,
     verifiedEmail?: string
   ): Promise<IdentityLink | undefined> {
-    const key = `${platform}:${user}`;
-    const cached = this.cache.get(key);
-    if (cached && Date.now() - cached.at < 60_000) {
-      return cached.link;
-    }
     let link = await this.request<IdentityLink>(
       'GET',
       `/identity/links/${encodeURIComponent(platform)}/${encodeURIComponent(user)}`
@@ -65,7 +62,6 @@ export class IdentityService {
         );
       }
     }
-    this.cache.set(key, { link, at: Date.now() });
     return link;
   }
 
@@ -74,7 +70,6 @@ export class IdentityService {
   }
 
   async unlink(platform: string, user: string) {
-    this.cache.delete(`${platform}:${user}`);
     await this.request('DELETE', `/identity/links/${encodeURIComponent(platform)}/${encodeURIComponent(user)}`);
   }
 }

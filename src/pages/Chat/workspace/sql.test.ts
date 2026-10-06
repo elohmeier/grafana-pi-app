@@ -1,4 +1,4 @@
-import { createSqlBroker, describeColumns, literal, type SqlQuery, type SqlTransport } from './sql';
+import { createSqlBroker, describeColumns, literal, timeLiteral, type SqlQuery, type SqlTransport } from './sql';
 import { runWorkspaceBash } from './shell';
 import { SessionWorkspace } from './workspace';
 
@@ -214,8 +214,27 @@ describe('queries', () => {
   });
 
   it.each([
+    ['2026-10-03', 'datetime', '20261003'],
+    ['2026-10-03 09:00', 'datetime', '2026-10-03T09:00:00'],
+    ['2026-10-03T09:00:00.1234567', 'datetime', '2026-10-03T09:00:00.123'],
+    ['2026-10-03T09:00:00.1234567', 'datetime2', '2026-10-03T09:00:00.1234567'],
+    ['2026-10-03T09:00:30.5', 'smalldatetime', '2026-10-03T09:00:30'],
+    ['2026-10-03T11:00:00+02:00', 'datetime', '2026-10-03T09:00:00'],
+    ['2026-10-03T00:30:00.250+02:00', 'date', '2026-10-02T22:30:00.250'],
+    ['2026-10-03T11:00:00+02:00', 'datetimeoffset', '2026-10-03T11:00:00+02:00'],
+    ['2026-10-03', 'datetimeoffset', '20261003'],
+  ])('writes %s for a %s column as %s, independent of DATEFORMAT', (value, type, expected) => {
+    expect(timeLiteral(value, type)).toBe(expected);
+  });
+
+  it.each(['2026-02-30', '2026-10-03T25:00', '03.10.2026', '2026-10-03T09:00+0200'])('refuses the date %s', (value) => {
+    expect(timeLiteral(value, 'datetime')).toBeUndefined();
+  });
+
+  it.each([
     ['Priority=1 OR 1=1', /not a number/],
     ['OpenedAt>yesterday', /not an ISO datetime2 value/],
+    ['OpenedAt>2026-02-30', /not an ISO datetime2 value/],
     ['Attachment=abc', /cannot be compared/],
     ['Priority~1', /contains filters need a string column/],
     ['Nope=1', /no such column/],

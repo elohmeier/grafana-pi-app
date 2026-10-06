@@ -926,7 +926,8 @@ export function ChatApp({
         if (!mounted) {
           return;
         }
-        sessionsRef.current = [copied, ...sessionsRef.current];
+        // Opening the link again returns the same copy.
+        sessionsRef.current = [copied, ...sessionsRef.current.filter((session) => session.id !== copied.id)];
         setSessions(sessionsRef.current);
         if (await initialLoadHandlersRef.current.loadSession(copied.id)) {
           return;

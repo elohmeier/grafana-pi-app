@@ -57,8 +57,16 @@ thread.
 ## Storage
 
 Links live in the plugin backend's chat database (schema version 3):
-`identity_link_codes` (code hash, platform account, expiry) and
-`identity_links` (platform, platform user, display name, org, Grafana user UID
-and login, source, time). Creating codes and reading or setting links for a
+`host_link_codes` (code hash, host, org, platform account, expiry) and
+`host_links` (host, platform, platform user, display name, org, Grafana user
+UID and login, source, time). Creating codes and reading or setting links for a
 platform account are limited to service accounts; confirming codes and listing
 one's links are limited to users.
+
+Links belong to the service account that made them (`host`, the scope of the
+service account, like the host state): another service account with app access
+neither sees nor changes them, so it cannot link a chat account to someone
+else. Codes can only be confirmed by users of the host's org. Replacing the
+host's service account therefore starts with no links; users link again, or
+are matched by email again. The host does not cache links: one confirmed or
+removed in Grafana applies to the next message.

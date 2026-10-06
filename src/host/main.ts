@@ -210,6 +210,9 @@ if (elector) {
   await elector.acquire(() => {
     // Another replica may be the leader now: stop taking traffic and restart as a standby.
     log('lost the lease; stopping');
+    ready = false;
+    // Exits soon even when the API server does not answer the label change.
+    setTimeout(() => process.exit(1), 2000).unref();
     void markLeader(false)
       .catch(() => undefined)
       .finally(() => process.exit(1));

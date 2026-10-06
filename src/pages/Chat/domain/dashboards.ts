@@ -2,6 +2,7 @@ import { config } from '@grafana/runtime';
 import type { DashboardImage } from '../workspace/broker';
 import { backendFetch } from './client';
 import { throwIfAborted } from './result';
+import { grafanaTime } from './time';
 import type { ScreenshotParams } from './types';
 
 /** Renders a dashboard or panel through Grafana image rendering (requires the image renderer). */
@@ -51,11 +52,7 @@ export async function renderDashboardScreenshot(
 
 /** Dashboard URLs take date math or epoch milliseconds; an ISO timestamp renders an empty range. */
 export function renderTime(value: string): string {
-  if (/^now/.test(value) || /^\d+$/.test(value)) {
-    return value;
-  }
-  const time = Date.parse(/[zZ]|[+-]\d{2}:?\d{2}$/.test(value) || !value.includes(':') ? value : `${value}Z`);
-  return Number.isNaN(time) ? value : String(time);
+  return grafanaTime(value) ?? value;
 }
 
 function clamp(value: number, min: number, max: number): number {

@@ -36,8 +36,9 @@ const WEBHOOK_NAME = 'grafana-assistant';
  */
 export class WebexChannel implements ChatChannel {
   readonly name = 'webex';
-  // Webex accepts 7439 bytes per message.
+  // Webex accepts 7439 bytes per message, and 10 edits of it.
   readonly maxMessageLength = 7000;
+  readonly maxEdits = 10;
   readonly markdownTables = false;
   private botId = '';
   private botNames: string[] = [];
@@ -50,6 +51,10 @@ export class WebexChannel implements ChatChannel {
   constructor(private readonly options: WebexOptions) {
     this.url = options.url.replace(/\/$/, '');
     this.secret = options.webhookSecret ?? randomBytes(24).toString('hex');
+  }
+
+  measure(text: string) {
+    return Buffer.byteLength(text);
   }
 
   async start(onMessage: (message: ChannelMessage) => void) {

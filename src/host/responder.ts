@@ -80,13 +80,6 @@ export class Responder {
       return;
     }
     const key = threadKey(channel.name, message.channelId, message.threadId);
-    if (/^(stop|cancel)[.!]?$/i.test(message.text.trim()) && this.options.assistant.stop) {
-      const stopped = this.options.assistant.stop(key);
-      if (!stopped) {
-        await channel.post(message.channelId, 'Nothing is running in this thread.', message.threadId);
-      }
-      return;
-    }
     const identity = this.options.identity;
     const command = message.text.trim().toLowerCase().replace(/[.!]$/, '');
     if (identity && (command === 'link' || command === 'unlink' || command === 'whoami')) {
@@ -109,6 +102,14 @@ export class Responder {
         await this.sendLinkCode(message, true);
         return;
       }
+    }
+    // Only those who may ask may stop a run.
+    if (/^(stop|cancel)[.!]?$/i.test(message.text.trim()) && this.options.assistant.stop) {
+      const stopped = this.options.assistant.stop(key);
+      if (!stopped) {
+        await channel.post(message.channelId, 'Nothing is running in this thread.', message.threadId);
+      }
+      return;
     }
     const record = store.thread(key);
     // Thread posts since the last answer that did not mention the bot are context for this one.
@@ -244,22 +245,35 @@ export class Responder {
     }
     const { episode } = delivery;
     const text = formatAlertMessage(payload, delivery.action);
-    let update = { updatePostId: episode.updatePostId, updatePostedAt: episode.updatePostedAt };
-    if (
+    let update = {
+      updatePostId: episode.updatePostId,
+      updatePostedAt: episode.updatePostedAt,
+      updateEdits: episode.updateEdits,
+    };
+    const coalesce =
       delivery.action === 'update' &&
       episode.updatePostId &&
       episode.updatePostedAt !== undefined &&
-      now - episode.updatePostedAt < UPDATE_COALESCE_MS
-    ) {
-      // A flapping group edits its last update instead of adding a post per change.
-      await channel.update(
-        episode.updatePostId,
-        `${text}\n_(updated ${new Date(now).toISOString().slice(11, 16)} UTC)_`
-      );
+      now - episode.updatePostedAt < UPDATE_COALESCE_MS &&
+      (episode.updateEdits ?? 0) < (channel.maxEdits ?? Infinity);
+    // A flapping group edits its last update instead of adding a post per change.
+    const edited =
+      coalesce &&
+      (await channel
+        .update(episode.updatePostId!, `${text}\n_(updated ${new Date(now).toISOString().slice(11, 16)} UTC)_`)
+        .then(
+          () => true,
+          (error) => {
+            this.options.log?.(`editing alert update ${episode.updatePostId} failed: ${message(error)}`);
+            return false;
+          }
+        ));
+    if (edited) {
+      update.updateEdits = (episode.updateEdits ?? 0) + 1;
     } else {
       const post = await channel.post(episode.channelId, text, episode.threadId);
       if (delivery.action === 'update') {
-        update = { updatePostId: post.id, updatePostedAt: now };
+        update = { updatePostId: post.id, updatePostedAt: now, updateEdits: 0 };
       }
     }
     await store.setEpisode(episodeKey, {
@@ -320,12 +334,15 @@ export class Responder {
     void channel.typing?.(channelId, threadId).catch(() => undefined);
     let lastEdit = 0;
     let editing: Promise<void> = Promise.resolve();
+    // Platforms that limit edits keep the last one for the answer.
+    let progressEdits = (channel.maxEdits ?? Infinity) - 1;
     const onProgress = (progress: AssistantRunProgress) => {
       const now = Date.now();
-      if (now - lastEdit < (this.options.progressIntervalMs ?? 4000)) {
+      if (now - lastEdit < (this.options.progressIntervalMs ?? 4000) || progressEdits <= 0) {
         return;
       }
       lastEdit = now;
+      progressEdits--;
       const command = progress.lastCommand ? `: \`${truncate(progress.lastCommand, 120).replace(/`/g, "'")}\`` : '';
       editing = editing.then(() =>
         channel.update(placeholder.id, `${WORKING} (${progress.toolCalls} steps${command})`).catch(() => undefined)
@@ -359,8 +376,12 @@ export class Responder {
       : result.text || '⚠️ The assistant finished without an answer.';
     const link = result.chatId ? await this.chatLink(key, result) : '';
     const text = link ? `${answerText}\n\n${link}` : answerText;
-    const [first, ...rest] = split(text, channel.maxMessageLength);
-    await channel.update(placeholder.id, first);
+    const [first, ...rest] = split(text, channel.maxMessageLength, channel.measure?.bind(channel));
+    await channel.update(placeholder.id, first).catch(async (error) => {
+      // For example a resumed run's placeholder that used up its edits: the answer is posted instead.
+      this.options.log?.(`replacing placeholder ${placeholder.id} failed: ${message(error)}`);
+      await channel.post(channelId, first, threadId);
+    });
     for (const part of rest) {
       await channel.post(channelId, part, threadId);
     }
@@ -417,7 +438,11 @@ export class Responder {
     }
     for (const item of evidence) {
       if (item.view !== 'image') {
-        for (const part of split(formatEvidence(item, channel.markdownTables), channel.maxMessageLength)) {
+        for (const part of split(
+          formatEvidence(item, channel.markdownTables),
+          channel.maxMessageLength,
+          channel.measure?.bind(channel)
+        )) {
           await channel.post(channelId, part, threadId);
         }
       }
@@ -507,13 +532,29 @@ function slug(text: string) {
     .slice(0, 60);
 }
 
-/** Splits at line breaks where possible. */
-export function split(text: string, max: number) {
+/** Splits into parts of at most `max` by `measure` (characters by default), at line breaks where possible. */
+export function split(text: string, max: number, measure: (text: string) => number = (part) => part.length) {
   const parts: string[] = [];
   let rest = text;
-  while (rest.length > max) {
-    const cut = rest.lastIndexOf('\n', max);
-    const at = cut > max / 2 ? cut : max;
+  while (measure(rest) > max) {
+    // The longest prefix that fits; `measure` grows with the prefix.
+    let low = 1;
+    let high = Math.min(rest.length, max);
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (measure(rest.slice(0, middle)) <= max) {
+        low = middle;
+      } else {
+        high = middle - 1;
+      }
+    }
+    let fit = low;
+    if (fit > 1 && /[\uD800-\uDBFF]/.test(rest[fit - 1])) {
+      // Do not cut a surrogate pair.
+      fit--;
+    }
+    const cut = rest.lastIndexOf('\n', fit);
+    const at = cut > fit / 2 ? cut : fit;
     parts.push(rest.slice(0, at));
     rest = rest.slice(at).replace(/^\n/, '');
   }

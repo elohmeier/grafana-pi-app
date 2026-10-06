@@ -90,7 +90,9 @@ type Store interface {
 	Delete(ctx context.Context, scope, id string) error
 	// Share returns a token that lets another scope copy the chat; the same chat keeps its token.
 	Share(ctx context.Context, scope, id string) (string, error)
-	// CopyShared copies the shared chat, as it is now, into scope as a new chat newID.
+	// CopyShared copies the shared chat, as it is now, into scope. A scope has one copy per
+	// token: it is returned again, and brought up to date while scope has not written to it.
+	// A new copy newID is made when there is none, it was deleted, or both sides moved on.
 	CopyShared(ctx context.Context, token, scope, newID string) (Chat, error)
 	Links
 	HostState
@@ -226,16 +228,22 @@ func (s *sqlStore) migrate(ctx context.Context, tx *sql.Tx) error {
 		`CREATE TABLE IF NOT EXISTS ` + s.d.t("chat_shares") + ` (
 		 token text PRIMARY KEY, scope text NOT NULL, chat_id text NOT NULL, created_at bigint NOT NULL,
 		 UNIQUE (scope, chat_id))`,
+		// Each scope's copy of a shared chat, and the source sequence it holds.
+		`CREATE TABLE IF NOT EXISTS ` + s.d.t("chat_share_copies") + ` (
+		 token text NOT NULL, scope text NOT NULL, chat_id text NOT NULL, source_seq bigint NOT NULL,
+		 PRIMARY KEY (token, scope))`,
 		`INSERT INTO ` + s.d.t("chatlog_migrations") + ` (version) VALUES (2) ON CONFLICT DO NOTHING`,
-		// Version 3: chat platform accounts linked to Grafana users (assistant host).
-		`CREATE TABLE IF NOT EXISTS ` + s.d.t("identity_link_codes") + ` (
-		 code_hash text PRIMARY KEY, platform text NOT NULL, platform_user text NOT NULL,
+		// Version 3: chat platform accounts linked to Grafana users, per assistant host (its service account's scope).
+		`CREATE TABLE IF NOT EXISTS ` + s.d.t("host_link_codes") + ` (
+		 code_hash text PRIMARY KEY, host text NOT NULL, org_id bigint NOT NULL,
+		 platform text NOT NULL, platform_user text NOT NULL,
 		 display_name text NOT NULL, expires_at bigint NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS ` + s.d.t("identity_links") + ` (
-		 platform text NOT NULL, platform_user text NOT NULL, display_name text NOT NULL,
+		`CREATE TABLE IF NOT EXISTS ` + s.d.t("host_links") + ` (
+		 host text NOT NULL, platform text NOT NULL, platform_user text NOT NULL, display_name text NOT NULL,
 		 org_id bigint NOT NULL, user_uid text NOT NULL, user_login text NOT NULL,
 		 source text NOT NULL, linked_at bigint NOT NULL,
-		 PRIMARY KEY (platform, platform_user))`,
+		 PRIMARY KEY (host, platform, platform_user))`,
+		`CREATE INDEX IF NOT EXISTS host_links_user ON ` + s.d.t("host_links") + ` (org_id, user_uid)`,
 		`INSERT INTO ` + s.d.t("chatlog_migrations") + ` (version) VALUES (3) ON CONFLICT DO NOTHING`,
 		// Version 4: assistant host state (threads, alert episodes), shared by its replicas.
 		`CREATE TABLE IF NOT EXISTS ` + s.d.t("host_state") + ` (
@@ -595,19 +603,64 @@ func (s *sqlStore) CopyShared(ctx context.Context, token, scope, newID string) (
 		if err != nil {
 			return err
 		}
+		var copyID string
+		var copiedSeq int64
+		err = tx.QueryRowContext(ctx, s.d.q("SELECT chat_id, source_seq FROM "+s.d.t("chat_share_copies")+" WHERE token = ? AND scope = ?"), token, scope).Scan(&copyID, &copiedSeq)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if copyID != "" {
+			existing, err := s.lockChat(ctx, tx, scope, copyID)
+			switch {
+			case errors.Is(err, ErrNotFound) || errors.Is(err, ErrDeleted):
+				// Deleted by the user: a new copy follows.
+			case err != nil:
+				return err
+			case source.lastSeq == copiedSeq:
+				result = Chat{ID: copyID, Title: existing.title, CreatedAt: micros(existing.created), UpdatedAt: micros(existing.updated)}
+				return nil
+			case existing.lastSeq == copiedSeq:
+				// Not written since it was copied: it takes the source's later commits.
+				if _, err = s.exec(ctx, tx, "DELETE FROM "+s.d.t("chat_rows")+" WHERE scope = ? AND chat_id = ?", scope, copyID); err != nil {
+					return err
+				}
+				if err = s.copyRows(ctx, tx, sourceScope, sourceID, scope, copyID); err != nil {
+					return err
+				}
+				if _, err = s.exec(ctx, tx, "UPDATE "+s.d.t("chats")+" SET title = ?, last_seq = ?, last_digest = ?, bytes = (SELECT bytes FROM "+s.d.t("chats")+" WHERE scope = ? AND id = ?), updated_at = ? WHERE scope = ? AND id = ?",
+					source.title, source.lastSeq, source.lastDigest, sourceScope, sourceID, now, scope, copyID); err != nil {
+					return err
+				}
+				if _, err = s.exec(ctx, tx, "UPDATE "+s.d.t("chat_share_copies")+" SET source_seq = ? WHERE token = ? AND scope = ?", source.lastSeq, token, scope); err != nil {
+					return err
+				}
+				result = Chat{ID: copyID, Title: source.title, CreatedAt: micros(existing.created), UpdatedAt: micros(now)}
+				return nil
+			}
+		}
 		// The copy starts unopened (epoch 0) at the source's sequence; its first writer opens it.
 		if _, err = s.exec(ctx, tx, "INSERT INTO "+s.d.t("chats")+" (scope, id, title, created_at, updated_at, last_seq, last_digest, bytes) "+
 			"SELECT ?, ?, title, ?, ?, last_seq, last_digest, bytes FROM "+s.d.t("chats")+" WHERE scope = ? AND id = ?",
 			scope, newID, now, now, sourceScope, sourceID); err != nil {
 			return err
 		}
-		if _, err = s.exec(ctx, tx, "INSERT INTO "+s.d.t("chat_rows")+" (scope, chat_id, seq, idx, key, body) "+
-			"SELECT ?, ?, seq, idx, key, body FROM "+s.d.t("chat_rows")+" WHERE scope = ? AND chat_id = ?",
-			scope, newID, sourceScope, sourceID); err != nil {
+		if err = s.copyRows(ctx, tx, sourceScope, sourceID, scope, newID); err != nil {
+			return err
+		}
+		if _, err = s.exec(ctx, tx, "INSERT INTO "+s.d.t("chat_share_copies")+" (token, scope, chat_id, source_seq) VALUES (?, ?, ?, ?) "+
+			"ON CONFLICT (token, scope) DO UPDATE SET chat_id = excluded.chat_id, source_seq = excluded.source_seq",
+			token, scope, newID, source.lastSeq); err != nil {
 			return err
 		}
 		result = Chat{ID: newID, Title: source.title, CreatedAt: micros(now), UpdatedAt: micros(now)}
 		return nil
 	})
 	return result, err
+}
+
+func (s *sqlStore) copyRows(ctx context.Context, tx *sql.Tx, fromScope, fromID, toScope, toID string) error {
+	_, err := s.exec(ctx, tx, "INSERT INTO "+s.d.t("chat_rows")+" (scope, chat_id, seq, idx, key, body) "+
+		"SELECT ?, ?, seq, idx, key, body FROM "+s.d.t("chat_rows")+" WHERE scope = ? AND chat_id = ?",
+		toScope, toID, fromScope, fromID)
+	return err
 }

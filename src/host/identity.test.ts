@@ -29,15 +29,20 @@ function service(options: {
 }
 
 describe('identity service', () => {
-  it('finds links and caches them', async () => {
+  it('finds links, and sees links confirmed or removed in Grafana right away', async () => {
     const { identity, links, requests } = service({});
     links.set('/identity/links/webex/p1', { userLogin: 'alice' });
     expect(await identity.resolve('webex', 'p1', 'Alice')).toEqual({ userLogin: 'alice' });
-    expect(await identity.resolve('webex', 'p1', 'Alice')).toEqual({ userLogin: 'alice' });
     expect(await identity.resolve('webex', 'p2', 'Bob', 'bob@example.com')).toBeUndefined();
+    links.set('/identity/links/webex/p2', { userLogin: 'bob' });
+    links.delete('/identity/links/webex/p1');
+    expect(await identity.resolve('webex', 'p2', 'Bob')).toEqual({ userLogin: 'bob' });
+    expect(await identity.resolve('webex', 'p1', 'Alice')).toBeUndefined();
     expect(requests.map(([method, path]) => `${method} ${path}`)).toEqual([
       'GET /identity/links/webex/p1',
       'GET /identity/links/webex/p2',
+      'GET /identity/links/webex/p2',
+      'GET /identity/links/webex/p1',
     ]);
   });
 

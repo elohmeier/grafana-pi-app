@@ -568,22 +568,61 @@ func runContract(t *testing.T, open opener) {
 		if _, err = s.CopyShared(ctx, "unknown-token", "user", "copy-2"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("copied with an unknown token: %v", err)
 		}
-		if _, err = s.CopyShared(ctx, token, "user", "copy-1"); err == nil {
-			t.Fatal("copied over an existing chat")
+		// The user's copy is opened again while the thread has not moved on.
+		if again, err := s.CopyShared(ctx, token, "user", "copy-x"); err != nil || again.ID != "copy-1" {
+			t.Fatalf("%+v %v", again, err)
+		}
+		// Both moved on: the user's continuation stays, and a new copy holds the thread.
+		if _, err = s.Commit(ctx, "host", "chat-1", commit(opened.Epoch, 2, "h2", row(`{"n":"h2"}`), keyed(`{"doc":2}`, "doc", true))); err != nil {
+			t.Fatal(err)
+		}
+		if again, err := s.CopyShared(ctx, token, "user", "copy-2"); err != nil || again.ID != "copy-2" {
+			t.Fatalf("%+v %v", again, err)
+		}
+		// A copy the user has not written to is brought up to date.
+		if _, err = s.Commit(ctx, "host", "chat-1", commit(opened.Epoch, 3, "h3", row(`{"n":"h3"}`), keyed(`{"doc":3}`, "doc", true))); err != nil {
+			t.Fatal(err)
+		}
+		if again, err := s.CopyShared(ctx, token, "user", "copy-x"); err != nil || again.ID != "copy-2" {
+			t.Fatalf("%+v %v", again, err)
+		}
+		if got, want := bodies(readAll(t, s, "user", "copy-2", 10)), bodies(readAll(t, s, "host", "chat-1", 10)); got != want {
+			t.Fatalf("refreshed rows %s, want %s", got, want)
+		}
+		if reopened, err := s.Open(ctx, "user", "copy-2", "", false); err != nil || reopened.LastSeq != 3 {
+			t.Fatalf("%+v %v", reopened, err)
+		}
+		// A deleted copy is copied again.
+		if err = s.Delete(ctx, "user", "copy-2"); err != nil {
+			t.Fatal(err)
+		}
+		if again, err := s.CopyShared(ctx, token, "user", "copy-3"); err != nil || again.ID != "copy-3" {
+			t.Fatalf("%+v %v", again, err)
+		}
+		if page, _ := s.List(ctx, "user", "", 10); len(page.Items) != 2 {
+			t.Fatalf("%+v", page)
 		}
 	})
 
 	t.Run("link codes link a platform account once", func(t *testing.T) {
 		s, ctx := open(t), t.Context()
-		code, expires, err := s.CreateLinkCode(ctx, "webex", "person-1", "Alice Doe")
+		const host = "default:1:host-sa"
+		code, expires, err := s.CreateLinkCode(ctx, host, 1, "webex", "person-1", "Alice Doe")
 		if err != nil || len(code) != 40 || time.Until(expires) < 10*time.Minute {
 			t.Fatalf("%q %v %v", code, expires, err)
 		}
-		pending, err := s.LinkCode(ctx, code)
+		pending, err := s.LinkCode(ctx, code, 1)
 		if err != nil || pending.Platform != "webex" || pending.PlatformUser != "person-1" || pending.DisplayName != "Alice Doe" {
 			t.Fatalf("%+v %v", pending, err)
 		}
-		if _, err = s.Link(ctx, "webex", "person-1"); !errors.Is(err, ErrNotFound) {
+		// Users of another org neither see nor confirm the code.
+		if _, err = s.LinkCode(ctx, code, 2); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("code visible in another org: %v", err)
+		}
+		if _, err = s.ConfirmLinkCode(ctx, code, 2, "uid-other", "other"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("code confirmed in another org: %v", err)
+		}
+		if _, err = s.Link(ctx, host, "webex", "person-1"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("linked before confirmation: %v", err)
 		}
 		link, err := s.ConfirmLinkCode(ctx, code, 1, "uid-alice", "alice")
@@ -593,24 +632,52 @@ func runContract(t *testing.T, open opener) {
 		if _, err = s.ConfirmLinkCode(ctx, code, 1, "uid-mallory", "mallory"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("a code was used twice: %v", err)
 		}
-		if got, err := s.Link(ctx, "webex", "person-1"); err != nil || got.UserLogin != "alice" || got.LinkedAt.IsZero() {
+		if got, err := s.Link(ctx, host, "webex", "person-1"); err != nil || got.UserLogin != "alice" || got.LinkedAt.IsZero() {
 			t.Fatalf("%+v %v", got, err)
 		}
 		// A verified email links (or relinks) without a code.
-		if _, err = s.SetLink(ctx, IdentityLink{Platform: "mattermost", PlatformUser: "u-1", DisplayName: "alice", OrgID: 1, UserUID: "uid-alice", UserLogin: "alice", Source: "email"}); err != nil {
+		if _, err = s.SetLink(ctx, host, IdentityLink{Platform: "mattermost", PlatformUser: "u-1", DisplayName: "alice", OrgID: 1, UserUID: "uid-alice", UserLogin: "alice", Source: "email"}); err != nil {
 			t.Fatal(err)
 		}
 		links, err := s.UserLinks(ctx, 1, "uid-alice")
 		if err != nil || len(links) != 2 || links[0].Platform != "mattermost" || links[1].Platform != "webex" {
 			t.Fatalf("%+v %v", links, err)
 		}
-		if err = s.Unlink(ctx, "webex", "person-1"); err != nil {
+		if err = s.Unlink(ctx, host, "webex", "person-1"); err != nil {
 			t.Fatal(err)
 		}
 		if links, _ = s.UserLinks(ctx, 1, "uid-alice"); len(links) != 1 {
 			t.Fatalf("%+v", links)
 		}
-		if _, err = s.LinkCode(ctx, "unknown"); !errors.Is(err, ErrNotFound) {
+		// The user removes their own link; another user cannot.
+		if err = s.UnlinkUser(ctx, 1, "uid-mallory", "mattermost", "u-1"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("unlinked another user's account: %v", err)
+		}
+		if err = s.UnlinkUser(ctx, 1, "uid-alice", "mattermost", "u-1"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = s.LinkCode(ctx, "unknown", 1); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("%v", err)
+		}
+	})
+
+	t.Run("links belong to the host that made them", func(t *testing.T) {
+		s, ctx := open(t), t.Context()
+		const host, other = "default:1:host-sa", "default:2:ci-sa"
+		if _, err := s.SetLink(ctx, host, IdentityLink{Platform: "mattermost", PlatformUser: "u-1", OrgID: 1, UserUID: "uid-alice", UserLogin: "alice", Source: "email"}); err != nil {
+			t.Fatal(err)
+		}
+		// Another service account writes its own link and removes only its own.
+		if _, err := s.SetLink(ctx, other, IdentityLink{Platform: "mattermost", PlatformUser: "u-1", OrgID: 2, UserUID: "uid-admin", UserLogin: "admin", Source: "email"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Unlink(ctx, other, "mattermost", "u-1"); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := s.Link(ctx, host, "mattermost", "u-1"); err != nil || got.UserLogin != "alice" || got.OrgID != 1 {
+			t.Fatalf("%+v %v", got, err)
+		}
+		if _, err := s.Link(ctx, other, "mattermost", "u-1"); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("%v", err)
 		}
 	})

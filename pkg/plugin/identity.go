@@ -14,7 +14,9 @@ import (
 // Identity links connect chat platform accounts (Mattermost, Webex) to Grafana
 // users. The assistant host, a service account, creates a one-time code for a
 // platform account; the Grafana user who opens and confirms it is linked,
-// which proves control of both accounts. See docs/identity.md.
+// which proves control of both accounts. Links belong to the service account
+// that made them (its scope), like the host state: another service account
+// sees and changes only its own. See docs/identity.md.
 
 type identityHandler func(w http.ResponseWriter, r *http.Request, s chatlog.Store, identity sessionIdentity)
 
@@ -54,7 +56,7 @@ func (a *App) identityRoute(handler identityHandler) http.HandlerFunc {
 	}
 }
 
-// hostOnly allows service accounts: the assistant host acts for its platform users.
+// hostOnly allows service accounts: the assistant host acts for its platform users, within its own links.
 func (a *App) hostOnly(handler identityHandler) identityHandler {
 	return func(w http.ResponseWriter, r *http.Request, s chatlog.Store, identity sessionIdentity) {
 		if !identity.ServiceAccount {
@@ -76,13 +78,13 @@ func (a *App) usersOnly(handler identityHandler) identityHandler {
 	}
 }
 
-func (a *App) handleCreateLinkCode(w http.ResponseWriter, r *http.Request, s chatlog.Store, _ sessionIdentity) {
+func (a *App) handleCreateLinkCode(w http.ResponseWriter, r *http.Request, s chatlog.Store, identity sessionIdentity) {
 	var body api.CreateLinkCodeRequest
 	if err := decodeChatBody(w, r, maxSmallBodyBytes, false, &body); err != nil {
 		writeChatError(w, err)
 		return
 	}
-	code, expires, err := s.CreateLinkCode(r.Context(), strings.TrimSpace(body.Platform), strings.TrimSpace(body.PlatformUser), strings.TrimSpace(body.DisplayName))
+	code, expires, err := s.CreateLinkCode(r.Context(), identity.Scope, identity.OrgID, strings.TrimSpace(body.Platform), strings.TrimSpace(body.PlatformUser), strings.TrimSpace(body.DisplayName))
 	if err != nil {
 		writeChatError(w, err)
 		return
@@ -90,8 +92,8 @@ func (a *App) handleCreateLinkCode(w http.ResponseWriter, r *http.Request, s cha
 	writeJSON(w, http.StatusOK, api.LinkCode{Code: code, ExpiresAt: expires})
 }
 
-func (a *App) handleLinkCode(w http.ResponseWriter, r *http.Request, s chatlog.Store, _ sessionIdentity) {
-	link, err := s.LinkCode(r.Context(), r.PathValue("code"))
+func (a *App) handleLinkCode(w http.ResponseWriter, r *http.Request, s chatlog.Store, identity sessionIdentity) {
+	link, err := s.LinkCode(r.Context(), r.PathValue("code"), identity.OrgID)
 	if err != nil {
 		writeChatError(w, err)
 		return
@@ -119,10 +121,7 @@ func (a *App) handleUserLinks(w http.ResponseWriter, r *http.Request, s chatlog.
 }
 
 func (a *App) handleLink(w http.ResponseWriter, r *http.Request, s chatlog.Store, identity sessionIdentity) {
-	link, err := s.Link(r.Context(), r.PathValue("platform"), r.PathValue("user"))
-	if err == nil && link.OrgID != identity.OrgID {
-		err = chatlog.ErrNotFound
-	}
+	link, err := s.Link(r.Context(), identity.Scope, r.PathValue("platform"), r.PathValue("user"))
 	if err != nil {
 		writeChatError(w, err)
 		return
@@ -138,7 +137,7 @@ func (a *App) handleSetLink(w http.ResponseWriter, r *http.Request, s chatlog.St
 		return
 	}
 	body.Platform, body.PlatformUser, body.OrgID = r.PathValue("platform"), r.PathValue("user"), identity.OrgID
-	link, err := s.SetLink(r.Context(), body)
+	link, err := s.SetLink(r.Context(), identity.Scope, body)
 	if err != nil {
 		writeChatError(w, err)
 		return
@@ -150,14 +149,13 @@ func (a *App) handleSetLink(w http.ResponseWriter, r *http.Request, s chatlog.St
 // handleUnlink removes a link: the host for its platform users, or the linked Grafana user.
 func (a *App) handleUnlink(w http.ResponseWriter, r *http.Request, s chatlog.Store, identity sessionIdentity) {
 	platform, user := r.PathValue("platform"), r.PathValue("user")
-	if !identity.ServiceAccount {
-		link, err := s.Link(r.Context(), platform, user)
-		if err != nil || link.OrgID != identity.OrgID || link.UserUID != identity.UID {
-			writeChatError(w, chatlog.ErrNotFound)
-			return
-		}
+	var err error
+	if identity.ServiceAccount {
+		err = s.Unlink(r.Context(), identity.Scope, platform, user)
+	} else {
+		err = s.UnlinkUser(r.Context(), identity.OrgID, identity.UID, platform, user)
 	}
-	if err := s.Unlink(r.Context(), platform, user); err != nil {
+	if err != nil {
 		writeChatError(w, err)
 		return
 	}

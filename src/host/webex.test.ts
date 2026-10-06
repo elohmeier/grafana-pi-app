@@ -176,4 +176,37 @@ describe('Webex adapter', () => {
       await close();
     }
   });
+
+  it('answers long runs within the edit limit and long answers within the byte limit', async () => {
+    const { fake, alice, bot, room, channel, close } = await setup();
+    // German text is about 1.1 bytes per character, and emoji 2 characters for 4 bytes.
+    const answer = Array.from({ length: 400 }, (_, i) => `Zeile ${i}: Größe überschritten 🔥`).join('\n');
+    try {
+      const responder = new Responder({
+        channel,
+        store: new HostStore(),
+        channelIds: [room.id],
+        allowDirect: true,
+        progressIntervalMs: 0,
+        assistant: {
+          ask: async (_conversation, chat, _text, onProgress) => {
+            for (let step = 1; step <= 30; step++) {
+              onProgress?.({ toolCalls: step });
+            }
+            return { chatId: chat.id, text: answer, toolCalls: 30 };
+          },
+        },
+      });
+      const done: Array<Promise<void>> = [];
+      await channel.start((message) => done.push(responder.handleMessage(message)));
+      const root = fake.postAs(alice.id, { roomId: room.id, text: 'disk?', mentions: [bot.id] });
+      await fake.settled();
+      await Promise.all(done);
+      const replies = fake.roomMessages(room.id).filter((message) => message.parentId === root.id);
+      expect(replies.length).toBeGreaterThan(1);
+      expect(replies.map((message) => message.markdown).join('\n')).toBe(answer);
+    } finally {
+      await close();
+    }
+  });
 });

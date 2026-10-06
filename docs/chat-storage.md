@@ -135,8 +135,8 @@ keys: deployment namespace, organization, plugin ID, and the stable user UID.
 Service accounts (the [assistant host](mattermost.md)) store chats in a scope of
 their own; anonymous users cannot store chats.
 
-Tables (`chats`, `chat_rows`, `chat_shares`, `chatlog_migrations`, and the
-[identity link](identity.md) tables `identity_link_codes` and `identity_links`, and the
+Tables (`chats`, `chat_rows`, `chat_shares`, `chat_share_copies`, `chatlog_migrations`, and the
+[identity link](identity.md) tables `host_link_codes` and `host_links`, and the
 assistant host's `host_state` ([Kubernetes](kubernetes.md))):
 
 - `chats` holds each chat's title, timestamps, writer epoch, last sequence
@@ -147,6 +147,11 @@ assistant host's `host_state` ([Kubernetes](kubernetes.md))):
   app access who has the token can copy the chat, as it is at that moment, into
   their own chats under a new ID. The copy is independent of the original. The
   token is the only check, so treat links that contain it like the chat itself.
+- `chat_share_copies` holds each user's copy of a shared chat and the sequence
+  number it was copied at. Opening the link again opens the same copy; while
+  the user has not written to it, it is first brought up to date with the
+  original. A new copy is made when the user deleted theirs, or continued it
+  while the original moved on as well.
 
 Deleting a chat removes its rows and keeps a tombstone, so a view that still
 holds the chat cannot store it again. There is no automatic expiry or per-user
@@ -171,7 +176,7 @@ require app access, and return errors as `{"error": "..."}`; a conflict adds
 | `PATCH /chats/{id}`                  | Rename.                                                                    |
 | `DELETE /chats/{id}`                 | Delete and keep a tombstone.                                               |
 | `POST /chats/{id}/share`             | A share token for the caller's chat (the same token each time).            |
-| `POST /shares/{token}/copy`          | Copy the shared chat into the caller's chats; returns the new chat.        |
+| `POST /shares/{token}/copy`          | Copy the shared chat into the caller's chats; returns the caller's copy.   |
 
 ## Tests
 

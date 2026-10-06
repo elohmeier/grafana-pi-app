@@ -9,7 +9,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
  * Behavior follows the Webex REST API as documented: webhook payloads carry
  * the message ID but not its text, bots receive group room messages only when
  * mentioned, a reply's parentId must be a thread root, a message holds at most
- * one uploaded file and 7439 bytes of text.
+ * one uploaded file and 7439 bytes of text, and it can be edited 10 times.
  */
 
 export type FakePerson = { id: string; emails: string[]; displayName: string; type: 'person' | 'bot'; token: string };
@@ -43,6 +43,7 @@ type FakeFile = { name: string; mimeType: string; data: Buffer };
 export type Delivery = { webhookId: string; targetUrl: string; status: number | 'error'; body: string };
 
 const MAX_TEXT_BYTES = 7439;
+const MAX_EDITS = 10;
 const ID_PREFIX = 'Y2lzY29zcGFyazovL3VzL';
 
 export class WebexFake {
@@ -52,6 +53,7 @@ export class WebexFake {
   readonly deliveries: Delivery[] = [];
   private webhooks = new Map<string, FakeWebhook>();
   private files = new Map<string, FakeFile>();
+  private edits = new Map<string, number>();
   private server?: Server;
   private pending = new Set<Promise<unknown>>();
   baseUrl = '';
@@ -316,6 +318,11 @@ export class WebexFake {
           if (!text || Buffer.byteLength(text) > MAX_TEXT_BYTES) {
             throw new ApiError(400, 'Message text is missing or too long.');
           }
+          const edits = (this.edits.get(message.id) ?? 0) + 1;
+          if (edits > MAX_EDITS) {
+            throw new ApiError(400, `A message can be edited at most ${MAX_EDITS} times.`);
+          }
+          this.edits.set(message.id, edits);
           message.markdown = body.markdown;
           message.text = body.text ?? stripMarkdown(body.markdown ?? '');
           message.updated = now();

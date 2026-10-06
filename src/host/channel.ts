@@ -41,6 +41,10 @@ export interface ChatChannel {
   /** Whether Markdown tables render; otherwise tables are posted as aligned text. */
   readonly markdownTables: boolean;
   typing?(channelId: string, threadId?: string): Promise<void>;
-  /** The longest message the platform accepts. */
+  /** The longest message the platform accepts, as counted by `measure` (characters by default). */
   readonly maxMessageLength: number;
+  /** The length of a message as the platform counts it, for example in UTF-8 bytes. */
+  measure?(text: string): number;
+  /** How often the platform lets a post be edited; unlimited when undefined. */
+  readonly maxEdits?: number;
 }
