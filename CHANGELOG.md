@@ -1,3 +1,21 @@
+## [6.2.0](https://github.com/elohmeier/grafana-pi-app/compare/v6.1.0...v6.2.0) (2026-10-06)
+
+### Features
+
+* harden the assistant host against runaway scripts, restarts, and alert noise ([187413a](https://github.com/elohmeier/grafana-pi-app/commit/187413a8e887d94db6bb6d63b9b67fd589919407))
+* link Mattermost and Webex accounts to Grafana users ([8d71044](https://github.com/elohmeier/grafana-pi-app/commit/8d710441425786cae4cd649f66e79e01c02c84c2))
+* Mattermost incident threads through the assistant host ([46d2cec](https://github.com/elohmeier/grafana-pi-app/commit/46d2cec825ffbd1d4ff615656e54de406f071e43))
+* python3, stop, and metrics in the assistant host ([0300da0](https://github.com/elohmeier/grafana-pi-app/commit/0300da07b25e529322e02788b6480cef44502ad5))
+* restricted MSSQL access with grafana-sql ([b87b231](https://github.com/elohmeier/grafana-pi-app/commit/b87b231fb0582c13668ae906f6ceefd2fd91a040))
+* review and apply thread changes in Grafana through shared chats ([7aa44c8](https://github.com/elohmeier/grafana-pi-app/commit/7aa44c855e66e0e9694421553c70cdc58d23aa85))
+* run the assistant host active/standby on Kubernetes ([ae1af26](https://github.com/elohmeier/grafana-pi-app/commit/ae1af26e8d548b6f370856aef891781867601cf0))
+* Webex in the assistant host, tested against a local Webex fake ([3aa173f](https://github.com/elohmeier/grafana-pi-app/commit/3aa173fa4ac9bb710bc0fba5e5716f933dd95a8e))
+
+### Bug Fixes
+
+* harden the assistant host, identity links, shared chats, and SQL dates ([4d1033a](https://github.com/elohmeier/grafana-pi-app/commit/4d1033a5a8ad4326fd53afbc81c99734ee036042))
+* resume only recent pending runs of the responder's own platform ([cc1714d](https://github.com/elohmeier/grafana-pi-app/commit/cc1714d5ae22f5916aa06a6f8c5b1754f049a6bf))
+
 ## [6.1.0](https://github.com/elohmeier/grafana-pi-app/compare/v6.0.0...v6.1.0) (2026-10-03)
 
 ### Features
