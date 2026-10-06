@@ -47,14 +47,12 @@ source `email`.
   receive a link code by direct message.
 - The prompt names the Grafana user (`@alice (Grafana user alice.g): ...`).
 - The link does not change what data the host can read: Grafana cannot let a
-  service account act as a user. A channel answer is read by everyone in the
-  channel, so what the assistant may read there is a question of the channel's
-  audience, not the asker.
+  service account act as a user. Every thread uses the service account's
+  permissions and the plugin's global settings (datasource allow-list, log and
+  SQL policies); there are no per-channel or per-user data policies.
 
-Next steps that build on links: per-channel data policies (a service account
-or datasource allow-list per channel), narrowing direct-message answers to the
-linked user's permissions (`users.permissions:read`, which the plugin's service
-account has), and actor-bound approvals for silences in a thread.
+Links are also the basis for actor-bound approvals, such as silences from a
+thread.
 
 ## Storage
 

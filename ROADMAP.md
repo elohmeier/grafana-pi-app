@@ -16,6 +16,9 @@ describes the current implementation. The original architecture review
   through `workspace apply`, written by the browser as the current user with
   revision preconditions. `live apply` changes only the unsaved dashboard in the
   browser.
+- **One data policy.** Every chat, in Grafana or a chat thread, uses the
+  plugin's global settings (datasource allow-list, log and SQL policies); there
+  are no per-channel or per-user policies.
 - **Restricted data is guarded in the commands.** The model reaches data only
   through shell commands (the workers have no network), so the command code
   enforces the policy over Grafana's existing datasource routes. The restriction
@@ -51,10 +54,7 @@ describes the current implementation. The original architecture review
 
 ## Next
 
-1. **Channel data policies** on top of [identity links](docs/identity.md): a
-   service account or datasource allow-list per channel, and direct-message
-   answers narrowed to the linked user's permissions.
-2. **Webex with a real bot:** one session against Webex to confirm the fake's
+1. **Webex with a real bot:** one session against Webex to confirm the fake's
    behavior.
 
 ## Later
