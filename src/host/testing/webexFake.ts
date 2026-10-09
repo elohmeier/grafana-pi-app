@@ -1,5 +1,6 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { WebSocketServer, type WebSocket } from 'ws';
 
 /**
  * An in-memory Webex API for tests of the assistant host's Webex adapter: the
@@ -10,6 +11,16 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
  * the message ID but not its text, bots receive group room messages only when
  * mentioned, a reply's parentId must be a thread root, a message holds at most
  * one uploaded file and 7439 bytes of text, and it can be edited 10 times.
+ *
+ * The websocket Webex's clients use (Mercury) follows Webex's JavaScript SDK
+ * and webex_bot: the service catalog (U2C) names the device service (WDM), a
+ * device registration names its websocket, the socket is authorized with an
+ * `authorization` message and confirmed with a `mercury.buffer_state` event,
+ * pings are answered with pongs, and a second connection of a device replaces
+ * the first (close code 4000). Activities name messages by UUID, with content
+ * that stands for Webex's encryption; the conversation service maps a UUID to
+ * the REST ID. Every activity of a room goes to every member's sockets; what a
+ * bot may read is left to the REST API.
  */
 
 export type FakePerson = { id: string; emails: string[]; displayName: string; type: 'person' | 'bot'; token: string };
@@ -40,11 +51,21 @@ type FakeWebhook = {
   created: string;
 };
 type FakeFile = { name: string; mimeType: string; data: Buffer };
+type FakeDevice = {
+  id: string;
+  ownerId: string;
+  name: string;
+  deviceType?: string;
+  url: string;
+  webSocketUrl: string;
+  created: string;
+};
+/** `origin`: the fake as the client reached it, for the URLs in its events. */
+type FakeSocket = { socket: WebSocket; deviceId: string; origin: string; ownerId?: string; sequence: number };
 export type Delivery = { webhookId: string; targetUrl: string; status: number | 'error'; body: string };
 
 const MAX_TEXT_BYTES = 7439;
 const MAX_EDITS = 10;
-const ID_PREFIX = 'Y2lzY29zcGFyazovL3VzL';
 
 export class WebexFake {
   readonly people = new Map<string, FakePerson>();
@@ -54,6 +75,13 @@ export class WebexFake {
   private webhooks = new Map<string, FakeWebhook>();
   private files = new Map<string, FakeFile>();
   private edits = new Map<string, number>();
+  readonly devices = new Map<string, FakeDevice>();
+  /** Acknowledged websocket event IDs, by device. */
+  readonly acks: Array<{ deviceId: string; messageId: string }> = [];
+  private sockets = new Set<FakeSocket>();
+  /** Whether pings are answered; off, a client's keepalive must notice the dead connection. */
+  answerPings = true;
+  private websockets = new WebSocketServer({ noServer: true });
   private server?: Server;
   private pending = new Set<Promise<unknown>>();
   baseUrl = '';
@@ -64,6 +92,17 @@ export class WebexFake {
         send(response, 500, { message: error instanceof Error ? error.message : String(error) });
       });
     });
+    this.server.on('upgrade', (request, socket, head) => {
+      const match = new URL(request.url ?? '/', 'http://fake').pathname.match(/^\/mercury\/([^/]+)$/);
+      const device = match && this.devices.get(match[1]);
+      if (!device) {
+        socket.end('HTTP/1.1 404 Not Found\r\n\r\n');
+        return;
+      }
+      this.websockets.handleUpgrade(request, socket, head, (websocket) =>
+        this.attach(websocket, device, this.origin(request))
+      );
+    });
     await new Promise<void>((resolve) => this.server!.listen(port, host, resolve));
     const address = this.server.address();
     const actualPort = typeof address === 'object' && address ? address.port : port;
@@ -73,7 +112,23 @@ export class WebexFake {
 
   async close() {
     await this.settled();
+    for (const { socket } of this.sockets) {
+      socket.terminate();
+    }
+    this.websockets.close();
     await new Promise<void>((resolve) => (this.server ? this.server.close(() => resolve()) : resolve()));
+  }
+
+  /** Authorized websocket connections, by device owner. */
+  connections(ownerId?: string) {
+    return [...this.sockets].filter((entry) => entry.ownerId && (!ownerId || entry.ownerId === ownerId));
+  }
+
+  /** Closes every websocket as a lost connection would (1006 is not sendable; 4000 reads as a server close). */
+  dropSockets(code = 1011) {
+    for (const { socket } of this.sockets) {
+      socket.close(code, 'dropped');
+    }
   }
 
   /** Resolves when every webhook delivery started so far has finished. */
@@ -196,6 +251,7 @@ export class WebexFake {
     }
     this.messages.set(message.id, message);
     this.deliver(message);
+    this.publish(message, message.files ? 'share' : 'post');
     return message;
   }
 
@@ -255,6 +311,89 @@ export class WebexFake {
     }
   }
 
+  /** A websocket of a device: authorized by its owner's token, then it receives the owner's activities. */
+  private attach(socket: WebSocket, device: FakeDevice, origin: string) {
+    const entry: FakeSocket = { socket, deviceId: device.id, origin, sequence: 0 };
+    socket.on('message', (raw) => {
+      let data: { id?: string; type?: string; messageId?: string; data?: { token?: string } };
+      try {
+        data = JSON.parse(String(raw));
+      } catch {
+        socket.close(4400, 'invalid message');
+        return;
+      }
+      if (data.type === 'authorization') {
+        const owner = this.people.get(device.ownerId);
+        if (!owner || data.data?.token !== `Bearer ${owner.token}`) {
+          socket.close(4401, 'authentication failed');
+          return;
+        }
+        // One connection per device: a new one replaces the previous.
+        for (const other of this.sockets) {
+          if (other !== entry && other.deviceId === device.id) {
+            other.socket.close(4000, 'replaced');
+            this.sockets.delete(other);
+          }
+        }
+        entry.ownerId = owner.id;
+        this.send(entry, { data: { eventType: 'mercury.buffer_state' } });
+        return;
+      }
+      if (data.type === 'ping' && entry.ownerId && this.answerPings) {
+        socket.send(JSON.stringify({ id: data.id, type: 'pong' }));
+        return;
+      }
+      if (data.type === 'ack' && data.messageId) {
+        this.acks.push({ deviceId: device.id, messageId: data.messageId });
+      }
+    });
+    socket.on('close', () => this.sockets.delete(entry));
+    this.sockets.add(entry);
+  }
+
+  private send(entry: FakeSocket, event: { data: Record<string, unknown> }) {
+    entry.sequence++;
+    entry.socket.send(
+      JSON.stringify({
+        id: randomUUID(),
+        ...event,
+        timestamp: Date.now(),
+        trackingId: `fake_${randomUUID()}`,
+        alertType: 'full',
+        headers: {},
+        sequenceNumber: entry.sequence,
+        filterMessage: false,
+      })
+    );
+  }
+
+  /** A conversation activity for a message, to the sockets of the room's members. */
+  private publish(message: FakeMessage, verb: 'post' | 'share' | 'update') {
+    const room = this.rooms.get(message.roomId)!;
+    const sender = this.people.get(message.personId)!;
+    const activity = (origin: string) => ({
+      id: uuidOf(message.id),
+      objectType: 'activity',
+      verb,
+      actor: { id: uuidOf(sender.id), objectType: 'person', emailAddress: sender.emails[0] },
+      // Webex encrypts content; the adapter must fetch the message instead.
+      object: { objectType: 'comment', displayName: 'eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..encrypted' },
+      target: {
+        id: uuidOf(room.id),
+        objectType: 'conversation',
+        url: `${origin}/conversation/api/v1/conversations/${uuidOf(room.id)}`,
+      },
+      ...(message.parentId ? { parent: { id: uuidOf(message.parentId), type: 'reply' } } : {}),
+      published: message.updated ?? message.created,
+      encryptionKeyUrl: 'kms://fake/keys/1',
+    });
+    for (const entry of this.sockets) {
+      if (entry.ownerId && room.members.includes(entry.ownerId)) {
+        this.send(entry, { data: { eventType: 'conversation.activity', activity: activity(entry.origin) } });
+      }
+    }
+  }
+
   private async route(request: IncomingMessage, response: ServerResponse) {
     const url = new URL(request.url ?? '/', 'http://fake');
     const path = url.pathname;
@@ -266,6 +405,54 @@ export class WebexFake {
       const caller = this.caller(request);
       const method = request.method ?? 'GET';
       let match: RegExpMatchArray | null;
+      if (method === 'GET' && path === '/u2c/api/v1/catalog') {
+        return send(response, 200, { serviceLinks: { wdm: `${this.origin(request)}/wdm/api/v1` } });
+      }
+      if (path === '/wdm/api/v1/devices' && method === 'GET') {
+        const devices = [...this.devices.values()].filter((device) => device.ownerId === caller.id);
+        return send(response, 200, { devices: devices.map(publicDevice) });
+      }
+      if (path === '/wdm/api/v1/devices' && method === 'POST') {
+        const body = JSON.parse(raw.toString('utf8')) as { name?: string; deviceType?: string };
+        if (!body.name || !body.deviceType) {
+          throw new ApiError(400, 'name and deviceType are required.');
+        }
+        const deviceId = randomUUID();
+        const device: FakeDevice = {
+          id: deviceId,
+          ownerId: caller.id,
+          name: body.name,
+          deviceType: body.deviceType,
+          url: `${this.origin(request)}/wdm/api/v1/devices/${deviceId}`,
+          webSocketUrl: `${this.origin(request).replace(/^http/, 'ws')}/mercury/${deviceId}`,
+          created: now(),
+        };
+        this.devices.set(deviceId, device);
+        return send(response, 200, publicDevice(device));
+      }
+      if (method === 'DELETE' && (match = path.match(/^\/wdm\/api\/v1\/devices\/([^/]+)$/))) {
+        const device = this.devices.get(match[1]);
+        if (!device || device.ownerId !== caller.id) {
+          throw new ApiError(404, 'The requested resource could not be found.');
+        }
+        this.devices.delete(device.id);
+        for (const entry of this.sockets) {
+          if (entry.deviceId === device.id) {
+            entry.socket.close(4404, 'device deleted');
+          }
+        }
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+      // The conversation service names a message by its UUID; the REST ID comes back as `id`.
+      if (method === 'GET' && (match = path.match(/^\/conversation\/api\/v1\/messages\/([^/]+)$/))) {
+        const message = [...this.messages.values()].find((candidate) => uuidOf(candidate.id) === match![1]);
+        if (!message || !this.rooms.get(message.roomId)?.members.includes(caller.id)) {
+          throw new ApiError(404, 'The requested resource could not be found.');
+        }
+        return send(response, 200, { id: message.id, objectType: 'activity', verb: 'post' });
+      }
       if (method === 'GET' && path === '/v1/people/me') {
         return send(response, 200, publicPerson(caller));
       }
@@ -326,6 +513,7 @@ export class WebexFake {
           message.markdown = body.markdown;
           message.text = body.text ?? stripMarkdown(body.markdown ?? '');
           message.updated = now();
+          this.publish(message, 'update');
           return send(response, 200, message);
         }
       }
@@ -445,6 +633,8 @@ export class WebexFake {
         rooms: [...this.rooms.values()],
         messages: [...this.messages.values()],
         deliveries: this.deliveries,
+        devices: [...this.devices.values()],
+        connections: this.connections().map(({ deviceId, ownerId }) => ({ deviceId, ownerId })),
       };
     }
     const room = path.match(/^\/_test\/rooms\/([^/]+)\/messages$/);
@@ -452,6 +642,11 @@ export class WebexFake {
       return { items: this.roomMessages(decodeURIComponent(room[1])) };
     }
     throw new ApiError(404, `no control route ${method} ${path}`);
+  }
+
+  /** The fake's URL as the client reached it (a Compose service name, not localhost). */
+  private origin(request: IncomingMessage) {
+    return request.headers.host ? `http://${request.headers.host}` : this.baseUrl;
   }
 
   private caller(request: IncomingMessage) {
@@ -473,8 +668,13 @@ class ApiError extends Error {
   }
 }
 
+/** A REST ID as Webex forms them: base64 of `ciscospark://us/<KIND>/<uuid>` (URL-safe here, for the fake's routes). */
 function id(kind: string) {
-  return `${ID_PREFIX}${Buffer.from(`${kind}/${randomUUID()}`).toString('base64url')}`;
+  return Buffer.from(`ciscospark://us/${kind}/${randomUUID()}`).toString('base64url');
+}
+
+function uuidOf(restId: string) {
+  return Buffer.from(restId, 'base64url').toString('utf8').split('/').pop() ?? '';
 }
 
 function now() {
@@ -490,6 +690,11 @@ function stripMarkdown(markdown: string) {
 
 function publicPerson(person: FakePerson) {
   const { token: _token, ...rest } = person;
+  return rest;
+}
+
+function publicDevice(device: FakeDevice) {
+  const { id: _id, ownerId: _ownerId, ...rest } = device;
   return rest;
 }
 

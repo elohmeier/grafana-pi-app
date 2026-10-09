@@ -60,19 +60,21 @@ spec:
               value: {{ $.Values.mattermost.allowDirect | quote }}
             {{- include "assistant-host.secretEnv" (dict "env" "MATTERMOST_TOKEN" "secret" $.Values.existingSecret "key" "mattermost-token" "optional" false) | nindent 12 }}
             {{- end }}
-            {{- with .Values.webex.webhookUrl }}
+            {{- if or .Values.webex.enabled .Values.webex.webhookUrl }}
             - name: WEBEX_API_URL
-              value: {{ $.Values.webex.apiUrl | quote }}
+              value: {{ .Values.webex.apiUrl | quote }}
+            {{- with .Values.webex.webhookUrl }}
             - name: WEBEX_WEBHOOK_URL
               value: {{ . | quote }}
+            {{- end }}
             - name: WEBEX_ALERT_ROOM
-              value: {{ $.Values.webex.alertRoom | quote }}
+              value: {{ .Values.webex.alertRoom | quote }}
             - name: WEBEX_ROOMS
-              value: {{ $.Values.webex.rooms | quote }}
+              value: {{ .Values.webex.rooms | quote }}
             - name: WEBEX_ALLOW_DIRECT
-              value: {{ $.Values.webex.allowDirect | quote }}
-            {{- include "assistant-host.secretEnv" (dict "env" "WEBEX_TOKEN" "secret" $.Values.existingSecret "key" "webex-token" "optional" false) | nindent 12 }}
-            {{- include "assistant-host.secretEnv" (dict "env" "WEBEX_WEBHOOK_SECRET" "secret" $.Values.existingSecret "key" "webex-webhook-secret" "optional" true) | nindent 12 }}
+              value: {{ .Values.webex.allowDirect | quote }}
+            {{- include "assistant-host.secretEnv" (dict "env" "WEBEX_TOKEN" "secret" .Values.existingSecret "key" "webex-token" "optional" false) | nindent 12 }}
+            {{- include "assistant-host.secretEnv" (dict "env" "WEBEX_WEBHOOK_SECRET" "secret" .Values.existingSecret "key" "webex-webhook-secret" "optional" true) | nindent 12 }}
             {{- end }}
             - name: ASSISTANT_REQUIRE_LINK
               value: {{ .Values.assistant.requireLink | quote }}

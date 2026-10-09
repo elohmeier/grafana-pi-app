@@ -285,7 +285,10 @@ services:
       # Webex through the local fake (profile `webex`): `mise run dev:webex` sets HOST_WEBEX.
       WEBEX_TOKEN_FILE: ${HOST_WEBEX:+/repo/work/host/webex-token}
       WEBEX_API_URL: http://webex-fake:8099/v1
-      WEBEX_WEBHOOK_URL: http://assistant-host:8080/webex/webhook
+      # Websocket mode against the fake's service catalog; set WEBEX_WEBHOOK_URL to
+      # http://assistant-host:8080/webex/webhook to test webhook mode instead.
+      WEBEX_CATALOG_URL: http://webex-fake:8099/u2c/api/v1/catalog
+      WEBEX_WEBHOOK_URL: ${WEBEX_WEBHOOK_URL:-}
       WEBEX_ALERT_ROOM: Alerts
       WEBEX_ROOMS: Ops
     ports:

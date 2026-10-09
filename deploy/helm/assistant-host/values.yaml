@@ -24,8 +24,12 @@ mattermost:
   allowDirect: true
 
 webex:
+  # Messages arrive over Webex's websocket, outbound only. Behind an HTTP proxy, set
+  # HTTPS_PROXY, NO_PROXY (Grafana, the Kubernetes API), and NODE_USE_ENV_PROXY=1 in `env`.
+  enabled: false
   apiUrl: https://webexapis.com/v1
-  # Public URL of this service's /webex/webhook route (an Ingress).
+  # Optional: public URL of this service's /webex/webhook route (an Ingress), to receive
+  # messages through a webhook instead of the websocket. Setting it enables Webex.
   webhookUrl: ''
   alertRoom: ''
   rooms: ''

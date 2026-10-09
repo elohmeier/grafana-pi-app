@@ -55,7 +55,8 @@ describes the current implementation. The original architecture review
 ## Next
 
 1. **Webex with a real bot:** one session against Webex to confirm the fake's
-   behavior.
+   behavior, in webhook and websocket mode (the websocket protocol follows
+   Webex's SDK, not a documented API).
 
 ## Later
 

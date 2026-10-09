@@ -210,3 +210,162 @@ describe('Webex adapter', () => {
     }
   });
 });
+
+/** The adapter in websocket mode: no webhook URL, messages over the fake's Mercury websocket. */
+async function setupSocket(options: { pingIntervalMs?: number; pongTimeoutMs?: number } = {}) {
+  const fake = await new WebexFake().listen();
+  const bot = fake.addPerson({ email: 'assistant@webex.bot', displayName: 'Grafana Assistant', bot: true });
+  const alice = fake.addPerson({ email: 'alice@example.com', displayName: 'Alice Doe' });
+  const room = fake.addRoom({ title: 'Ops Alerts', members: [bot.id, alice.id] });
+  const direct = fake.addRoom({ title: 'Alice Doe', type: 'direct', members: [bot.id, alice.id] });
+  const logs: string[] = [];
+  const create = () =>
+    new WebexChannel({
+      url: `${fake.baseUrl}/v1`,
+      token: bot.token,
+      catalogUrl: `${fake.baseUrl}/u2c/api/v1/catalog`,
+      reconnectDelayMs: 20,
+      ...options,
+      log: (message) => logs.push(message),
+    });
+  const channel = create();
+  const received: ChannelMessage[] = [];
+  await channel.start((message) => received.push(message));
+  const close = async () => {
+    await channel.stop();
+    await fake.close();
+  };
+  return { fake, bot, alice, room, direct, channel, received, logs, create, close };
+}
+
+async function until(check: () => boolean, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() > deadline) {
+      throw new Error('condition not met in time');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+describe('Webex adapter over the websocket', () => {
+  it('receives messages from others, not its own posts and edits, and acknowledges every event', async () => {
+    const { fake, alice, bot, room, direct, channel, received, close } = await setupSocket();
+    try {
+      expect(fake.connections(bot.id)).toHaveLength(1);
+      const mention = fake.postAs(alice.id, { roomId: room.id, text: 'why is checkout slow?', mentions: [bot.id] });
+      const dm = fake.postAs(alice.id, { roomId: direct.id, text: 'hello' });
+      const other = fake.postAs(alice.id, { roomId: room.id, text: 'who is on call?' });
+      const own = await channel.post(room.id, '⏳ Looking into it…', mention.id);
+      await channel.update(own.id, 'Done.');
+      await until(() => received.length === 3);
+      // Unmentioned group messages reach the responder, which ignores them, as with Mattermost.
+      expect(received).toEqual([
+        expect.objectContaining({
+          channelId: room.id,
+          threadId: mention.id,
+          postId: mention.id,
+          userName: 'Alice Doe',
+          text: 'why is checkout slow?',
+          mentioned: true,
+          direct: false,
+        }),
+        expect.objectContaining({ channelId: direct.id, postId: dm.id, text: 'hello', direct: true }),
+        expect.objectContaining({ postId: other.id, text: 'who is on call?', mentioned: false }),
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(received).toHaveLength(3);
+      // Authorization confirmation, 3 posts by Alice, the bot's post, and its edit.
+      expect(fake.acks.length).toBeGreaterThanOrEqual(6);
+    } finally {
+      await close();
+    }
+  });
+
+  it('reuses its device, replaces an earlier webhook, and refuses webhook calls', async () => {
+    const { fake, bot, create, channel, close } = await setupSocket();
+    try {
+      // A host that ran in webhook mode before left a webhook behind.
+      const legacy = new WebexChannel({
+        url: `${fake.baseUrl}/v1`,
+        token: bot.token,
+        webhookUrl: 'http://127.0.0.1:9/webex/webhook',
+      });
+      await legacy.start(() => undefined);
+      const restarted = create();
+      await restarted.start(() => undefined);
+      const state = await (await fetch(`${fake.baseUrl}/_test/state`)).json();
+      expect(state.devices).toHaveLength(1);
+      // The new connection of the device replaced the earlier one.
+      await until(() => fake.connections(bot.id).length === 1);
+      const hooks = await fetch(`${fake.baseUrl}/v1/webhooks`, { headers: { Authorization: `Bearer ${bot.token}` } });
+      expect((await hooks.json()).items).toEqual([]);
+      expect(await channel.handleWebhook(Buffer.from('{}'), undefined)).toBe(404);
+      await restarted.stop();
+    } finally {
+      await close();
+    }
+  });
+
+  it('reconnects after a lost connection and registers again when its device is refused', async () => {
+    const { fake, alice, bot, direct, received, logs, close } = await setupSocket();
+    try {
+      fake.dropSockets();
+      await until(
+        () => fake.connections(bot.id).length === 1 && logs.filter((line) => /connected/.test(line)).length === 2
+      );
+      fake.postAs(alice.id, { roomId: direct.id, text: 'after reconnect' });
+      await until(() => received.some((message) => message.text === 'after reconnect'));
+      // Webex forgot the device: its socket is refused, and a new device is registered.
+      const [device] = fake.devices.values();
+      fake.devices.delete(device.id);
+      fake.dropSockets();
+      await until(() => fake.devices.size === 1 && fake.connections(bot.id).length === 1);
+      expect([...fake.devices.values()][0].id).not.toBe(device.id);
+      fake.postAs(alice.id, { roomId: direct.id, text: 'new device' });
+      await until(() => received.some((message) => message.text === 'new device'));
+    } finally {
+      await close();
+    }
+  });
+
+  it('closes and reconnects a connection that stops answering pings', async () => {
+    const { fake, bot, logs, close } = await setupSocket({ pingIntervalMs: 20, pongTimeoutMs: 50 });
+    try {
+      fake.answerPings = false;
+      await until(() => logs.some((line) => line.includes('pong not received')));
+      fake.answerPings = true;
+      await until(
+        () => fake.connections(bot.id).length === 1 && logs.filter((line) => /connected/.test(line)).length >= 2
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it('answers a mention in its thread through the responder', async () => {
+    const { fake, alice, bot, room, channel, close } = await setupSocket();
+    try {
+      const responder = new Responder({
+        channel,
+        store: new HostStore(),
+        channelIds: [room.id],
+        allowDirect: true,
+        assistant: {
+          ask: async (_conversation, chat, text) => ({ chatId: chat.id, text: `Answer to: ${text}`, toolCalls: 0 }),
+        },
+      });
+      const done: Array<Promise<void>> = [];
+      await channel.stop();
+      await channel.start((message) => done.push(responder.handleMessage(message)));
+      const root = fake.postAs(alice.id, { roomId: room.id, text: 'errors on web?', mentions: [bot.id] });
+      fake.postAs(alice.id, { roomId: room.id, text: 'unrelated chatter' });
+      await until(() => done.length === 2);
+      await Promise.all(done);
+      const replies = fake.roomMessages(room.id).filter((message) => message.parentId === root.id);
+      expect(replies.map((message) => message.markdown)).toEqual(['Answer to: @Alice Doe: errors on web?']);
+    } finally {
+      await close();
+    }
+  });
+});

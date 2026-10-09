@@ -236,8 +236,11 @@ if (setting('WEBEX_TOKEN', '')) {
   webex = new WebexChannel({
     url: setting('WEBEX_API_URL', 'https://webexapis.com/v1'),
     token: setting('WEBEX_TOKEN'),
-    webhookUrl: setting('WEBEX_WEBHOOK_URL'),
+    // Without a webhook URL, messages arrive over Webex's websocket (no public URL needed).
+    webhookUrl: setting('WEBEX_WEBHOOK_URL', '') || undefined,
     webhookSecret: setting('WEBEX_WEBHOOK_SECRET', '') || undefined,
+    catalogUrl: setting('WEBEX_CATALOG_URL', '') || undefined,
+    deviceUrl: setting('WEBEX_DEVICE_URL', '') || undefined,
     log,
   });
   responders.push(

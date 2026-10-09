@@ -45,7 +45,11 @@ helm install assistant deploy/helm/assistant-host \
 ```
 
 Point Grafana's webhook contact point at the Service
-(`http://<release>-assistant-host:8080/alerts/grafana`). For Webex, expose
+(`http://<release>-assistant-host:8080/alerts/grafana`). For Webex, set
+`webex.enabled=true`: the leader connects out to Webex's websocket, so no
+Ingress is needed. Behind an HTTP proxy, add `HTTPS_PROXY`, `NO_PROXY` (with
+Grafana's Service and `kubernetes.default.svc`), and `NODE_USE_ENV_PROXY=1`
+through `env` ([Webex](webex.md#websocket)). To use a webhook instead, expose
 `/webex/webhook` through an Ingress and set `webex.webhookUrl`. See
 `values.yaml` for the remaining settings.
 
@@ -68,7 +72,8 @@ kubectl -n assistant-ha create secret generic assistant-host \
 helm install ha deploy/helm/assistant-host -n assistant-ha \
   --set grafana.url=http://host.docker.internal:3001 --set grafana.publicUrl=http://localhost:3001 \
   --set webex.apiUrl=http://host.docker.internal:8099/v1 \
-  --set webex.webhookUrl=http://host.docker.internal:18080/webex/webhook \
+  --set webex.enabled=true \
+  --set 'env[0].name=WEBEX_CATALOG_URL' --set 'env[0].value=http://host.docker.internal:8099/u2c/api/v1/catalog' \
   --set webex.alertRoom=Alerts --set webex.rooms=Ops \
   --set service.type=LoadBalancer --set service.port=18080
 kubectl -n assistant-ha get pods -L assistant-host/leader
