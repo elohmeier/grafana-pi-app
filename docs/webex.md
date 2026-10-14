@@ -55,7 +55,7 @@ in a row, which the WebSocket API reports as 1006), the host deletes it and
 registers a new one. Activities seen before a reconnect are delivered once.
 
 Behind an HTTP proxy, Node's `fetch` and `WebSocket` use `HTTPS_PROXY` and
-`NO_PROXY` when `NODE_USE_ENV_PROXY=1` is set (Node 22.21+ and 24); `wss://`
+`NO_PROXY` when `NODE_USE_ENV_PROXY=1` is set; `wss://`
 connections are tunneled with `CONNECT`. Exclude Grafana and, on Kubernetes,
 the API server (`kubernetes.default.svc`) in `NO_PROXY`.
 
