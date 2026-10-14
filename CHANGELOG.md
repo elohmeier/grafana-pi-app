@@ -1,3 +1,21 @@
+## [7.0.0](https://github.com/elohmeier/grafana-pi-app/compare/v6.2.0...v7.0.0) (2026-10-14)
+
+### ⚠ BREAKING CHANGES
+
+* `/alerts/grafana` and the fixed alert room
+(`WEBEX_ALERT_ROOM`, `MATTERMOST_ALERT_CHANNEL`) are removed; use alert
+channels. Webex webhook mode (`WEBEX_WEBHOOK_URL`, `WEBEX_WEBHOOK_SECRET`,
+`/webex/webhook`) is removed; the host uses the websocket. Custom skill
+`toolGroups` are no longer read. `ALERT_WEBHOOK_TOKEN` is required
+(`ALERT_WEBHOOK_INSECURE` is removed). The Helm chart drops
+`mattermost.alertChannel`, `webex.alertRoom`, `webex.webhookUrl`, and the
+`webex-webhook-secret` key; `webex.enabled` enables Webex.
+
+### Features
+
+* alert channels as Grafana contact points ([97d0cc4](https://github.com/elohmeier/grafana-pi-app/commit/97d0cc420c046e2727dad71ec1b91959ad3f27fd))
+* receive Webex messages over the websocket ([03aa336](https://github.com/elohmeier/grafana-pi-app/commit/03aa336f32d1a128617c7db2443ff8bc742c0e0b))
+
 ## [6.2.0](https://github.com/elohmeier/grafana-pi-app/compare/v6.1.0...v6.2.0) (2026-10-06)
 
 ### Features
