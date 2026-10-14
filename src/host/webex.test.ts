@@ -260,19 +260,22 @@ describe('Webex adapter over the websocket', () => {
       await channel.update(own.id, 'Done.');
       await until(() => received.length === 3);
       // Unmentioned group messages reach the responder, which ignores them, as with Mattermost.
-      expect(received).toEqual([
-        expect.objectContaining({
-          channelId: room.id,
-          threadId: mention.id,
-          postId: mention.id,
-          userName: 'Alice Doe',
-          text: 'why is checkout slow?',
-          mentioned: true,
-          direct: false,
-        }),
-        expect.objectContaining({ channelId: direct.id, postId: dm.id, text: 'hello', direct: true }),
-        expect.objectContaining({ postId: other.id, text: 'who is on call?', mentioned: false }),
-      ]);
+      // Messages are fetched concurrently, so delivery order can differ from posting order.
+      expect(received).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            channelId: room.id,
+            threadId: mention.id,
+            postId: mention.id,
+            userName: 'Alice Doe',
+            text: 'why is checkout slow?',
+            mentioned: true,
+            direct: false,
+          }),
+          expect.objectContaining({ channelId: direct.id, postId: dm.id, text: 'hello', direct: true }),
+          expect.objectContaining({ postId: other.id, text: 'who is on call?', mentioned: false }),
+        ])
+      );
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(received).toHaveLength(3);
       // Authorization confirmation, 3 posts by Alice, the bot's post, and its edit.
