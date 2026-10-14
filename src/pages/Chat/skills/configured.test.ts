@@ -22,7 +22,6 @@ describe('configured Grafana skills', () => {
             name: 'team-runbook',
             description: 'Team incident workflow.',
             content: '# Team Runbook\n\nUse the internal incident workflow.',
-            toolGroups: ['metrics', 'dashboardRead', 'adHocDashboards'],
             resources: [
               {
                 path: 'references/runbook.md',
@@ -81,8 +80,7 @@ describe('configured Grafana skills', () => {
           "name": "team-runbook",
           "description": "Team incident workflow.",
           "content": "# Team Runbook",
-          "activation": { "keywords": ["incident"] },
-          "toolGroups": ["metrics", "skillResources"]
+          "activation": { "keywords": ["incident"] }
         }
       ]`)
     ).toEqual([
@@ -91,20 +89,8 @@ describe('configured Grafana skills', () => {
         description: 'Team incident workflow.',
         content: '# Team Runbook',
         activation: { keywords: ['incident'] },
-        toolGroups: ['metrics', 'skillResources'],
       },
     ]);
-
-    expect(
-      validateCustomSkillsJson(`[
-        {
-          "name": "unsupported-runbook",
-          "description": "Unsupported group.",
-          "content": "# Unsupported",
-          "toolGroups": ["sql"]
-        }
-      ]`)
-    ).toContain('unsupported group "sql"');
 
     expect(validateCustomSkillsJson('{"name":"not-array"}')).toContain('must be an array');
     expect(
@@ -112,36 +98,9 @@ describe('configured Grafana skills', () => {
         {
           "name": "bad name",
           "description": "Invalid",
-          "content": "# Invalid",
-          "toolGroups": ["adHocDashboards"]
+          "content": "# Invalid"
         }
       ]`)
     ).toContain('name must be kebab-case');
-  });
-
-  it('accepts legacy Jsonnet tool groups without selecting them', () => {
-    expect(
-      validateCustomSkillsJson(`[
-        {
-          "name": "legacy-runbook",
-          "description": "Legacy groups.",
-          "content": "# Legacy",
-          "toolGroups": ["metrics", "jsonnetFiles", "jsonnetDashboards"]
-        }
-      ]`)
-    ).toBeUndefined();
-
-    const [skill] = getGrafanaSkills({
-      customSkills: [
-        {
-          name: 'legacy-runbook',
-          description: 'Legacy groups.',
-          content: '# Legacy',
-          toolGroups: ['metrics', 'jsonnetFiles', 'jsonnetDashboards'] as any,
-        },
-      ],
-    }).filter((candidate) => candidate.name === 'legacy-runbook');
-
-    expect(skill).not.toHaveProperty('toolGroups');
   });
 });

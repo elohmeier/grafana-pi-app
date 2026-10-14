@@ -15,7 +15,6 @@ export type PiAppCustomSkill = {
   content?: string;
   enabled?: boolean;
   activation?: PiAppCustomSkillActivation;
-  toolGroups?: string[];
   resources?: PiAppCustomSkillResource[];
   disableModelInvocation?: boolean;
 };
@@ -77,6 +76,10 @@ export type PiAppJsonData = {
   openAIBaseUrl?: string;
   models?: PiAppModelConfig[];
   isOpenAIAPIKeySet?: boolean;
+  /** The assistant host as Grafana and the plugin reach it, for alert channels (docs/alert-channels.md). */
+  assistantHostUrl?: string;
+  /** The host token (secureJsonData assistantHostToken) is set. */
+  isAssistantHostTokenSet?: boolean;
   accessMode?: PiAppAccessMode;
   allowedUsers?: string[];
   allowedPrometheusDatasourceUids?: string[];
@@ -84,8 +87,6 @@ export type PiAppJsonData = {
   logDatasources?: PiAppLogDatasource[];
   /** MSSQL datasources for `grafana-sql`; datasources that are not listed are denied. */
   sqlDatasources?: PiAppSqlDatasource[];
-  // Legacy name kept for existing plugin settings.
-  allowedDatasourceUids?: string[];
   systemPromptAddendum?: string;
   customSkills?: PiAppCustomSkill[];
 };

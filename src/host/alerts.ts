@@ -29,6 +29,8 @@ export type GrafanaWebhook = {
   groupKey: string;
   truncatedAlerts?: number;
   title?: string;
+  /** The contact point's Message template, rendered by Grafana. */
+  message?: string;
 };
 
 export type AlertDelivery =

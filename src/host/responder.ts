@@ -1,4 +1,5 @@
 import { analysisPrompt, decideDelivery, firingFingerprints, formatAlertMessage, type GrafanaWebhook } from './alerts';
+import { isTestNotification, type AlertOptions } from './alertRoutes';
 import { createSessionId } from '../pages/Chat/session/chatIdentity';
 import type { AssistantAnswer, AssistantRunProgress, ChatRef, PresentedEvidence } from './assistant';
 import type { ChannelFile, ChannelMessage, ChatChannel } from './channel';
@@ -24,9 +25,7 @@ export type ResponderOptions = {
   channel: ChatChannel;
   assistant: Assistant;
   store: HostStore;
-  /** Channel the alert notifications go to. */
-  alertChannelId?: string;
-  /** Channels where mentions are answered, in addition to the alert channel. */
+  /** Channels where mentions are answered, in addition to alert threads. */
   channelIds: string[];
   allowDirect: boolean;
   log?: (message: string) => void;
@@ -49,6 +48,9 @@ export type ResponderOptions = {
   sharedChatUrl?: (token: string) => string;
 };
 
+/** Where a notification goes and how it is treated (docs/alert-channels.md). */
+export type AlertTarget = { channelId: string; options: AlertOptions };
+
 const WORKING = '⏳ Looking into it…';
 /** Updates of an episode within this time edit the previous update post. */
 const UPDATE_COALESCE_MS = 10 * 60_000;
@@ -65,17 +67,14 @@ export class Responder {
 
   constructor(private readonly options: ResponderOptions) {}
 
-  /** Whether this responder posts alert notifications (it has an alert channel). */
-  get handlesAlerts() {
-    return Boolean(this.options.alertChannelId);
-  }
-
   /** A message from the channel; answered when it is direct or mentions the bot in an allowed channel. */
   async handleMessage(message: ChannelMessage) {
     const { channel, store } = this.options;
     const allowed = message.direct
       ? this.options.allowDirect
-      : message.mentioned && this.allowedChannels().includes(message.channelId);
+      : message.mentioned &&
+        (this.options.channelIds.includes(message.channelId) ||
+          store.isAlertThread(message.channelId, message.threadId));
     if (!allowed || !message.text) {
       return;
     }
@@ -179,29 +178,45 @@ export class Responder {
     }
   }
 
-  /** A Grafana webhook notification; the alert message is posted before, and independent of, the model. */
-  handleAlert(payload: GrafanaWebhook) {
-    const previous = this.alertQueues.get(payload.groupKey) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(() => this.deliverAlert(payload));
-    this.alertQueues.set(payload.groupKey, next);
+  /** A Grafana webhook notification for a channel; the alert message is posted before, and independent of, the model. */
+  handleAlert(payload: GrafanaWebhook, target: AlertTarget) {
+    // Each platform and channel has its own threads for a notification group.
+    const episodeKey = `${this.options.channel.name}:${target.channelId}:${payload.groupKey}`;
+    const previous = this.alertQueues.get(episodeKey) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(() => this.deliverAlert(payload, target, episodeKey));
+    this.alertQueues.set(episodeKey, next);
     // The caller handles a rejection; the cleanup must not raise it again.
     void next
       .catch(() => undefined)
       .finally(() => {
-        if (this.alertQueues.get(payload.groupKey) === next) {
-          this.alertQueues.delete(payload.groupKey);
+        if (this.alertQueues.get(episodeKey) === next) {
+          this.alertQueues.delete(episodeKey);
         }
       });
     return next;
   }
 
-  private async deliverAlert(payload: GrafanaWebhook) {
-    const { channel, store, alertChannelId } = this.options;
-    if (!alertChannelId) {
-      throw new Error('no alert channel is configured');
+  private async deliverAlert(payload: GrafanaWebhook, target: AlertTarget, episodeKey: string) {
+    const { channel, store } = this.options;
+    const { channelId: alertChannelId, options } = target;
+    const message = (kind: 'open' | 'update' | 'resolve') =>
+      options.format === 'grafana' && payload.message?.trim()
+        ? payload.message.trim()
+        : formatAlertMessage(payload, kind);
+    if (isTestNotification(payload)) {
+      // Grafana's "Test" button: shows that the contact point reaches the channel; no thread, no investigation.
+      // (Test payloads name the integration type as the receiver, not the contact point.)
+      await channel.post(
+        alertChannelId,
+        `🧪 **Test notification** from Grafana: alerts of this contact point are posted here.\n\n${message('open')}`
+      );
+      this.options.metrics?.inc(
+        'assistant_host_alert_notifications_total',
+        'Grafana notifications received, by what they did.',
+        { action: 'test' }
+      );
+      return { action: 'test' as const };
     }
-    // Each platform has its own threads for a notification group.
-    const episodeKey = `${channel.name}:${payload.groupKey}`;
     const delivery = decideDelivery(payload, store.episode(episodeKey));
     this.options.metrics?.inc(
       'assistant_host_alert_notifications_total',
@@ -215,7 +230,7 @@ export class Responder {
     }
     const now = Date.now();
     if (delivery.action === 'open') {
-      const post = await channel.post(alertChannelId, formatAlertMessage(payload, 'open'));
+      const post = await channel.post(alertChannelId, message('open'));
       await store.setEpisode(episodeKey, {
         channelId: alertChannelId,
         threadId: post.id,
@@ -224,7 +239,15 @@ export class Responder {
         startedAt: now,
         updatedAt: now,
       });
-      void this.postAlertPanels(payload, alertChannelId, post.id);
+      if (options.screenshots) {
+        void this.postAlertPanels(payload, alertChannelId, post.id);
+      }
+      if (options.investigate !== 'auto') {
+        if (options.investigate === 'mention') {
+          await channel.post(alertChannelId, 'Mention me in this thread to investigate.', post.id);
+        }
+        return { action: 'open' as const, threadId: post.id };
+      }
       const alertname = payload.commonLabels?.alertname ?? payload.groupLabels?.alertname ?? payload.groupKey;
       const previous = store.lastAnalysis(`${channel.name}:${alertname}`);
       if (previous !== undefined && now - previous < ANALYSIS_COALESCE_MS) {
@@ -244,7 +267,7 @@ export class Responder {
       return { action: 'open' as const, threadId: post.id };
     }
     const { episode } = delivery;
-    const text = formatAlertMessage(payload, delivery.action);
+    const text = message(delivery.action);
     let update = {
       updatePostId: episode.updatePostId,
       updatePostedAt: episode.updatePostedAt,
@@ -466,10 +489,6 @@ export class Responder {
     } catch (error) {
       this.options.log?.(`alert panel screenshot failed: ${message(error)}`);
     }
-  }
-
-  private allowedChannels() {
-    return [...this.options.channelIds, ...(this.options.alertChannelId ? [this.options.alertChannelId] : [])];
   }
 }
 

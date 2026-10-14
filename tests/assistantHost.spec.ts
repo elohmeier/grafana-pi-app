@@ -14,9 +14,10 @@ function secret(name: string) {
 
 /**
  * Alert delivery through the assistant host (Compose profile `mattermost`,
- * docs/mattermost.md) without depending on the model: a synthetic Grafana
- * webhook opens one thread, a repeated notification is skipped, and the
- * resolution replies in the same thread. Skipped unless `mise run dev:mattermost` ran.
+ * docs/alert-channels.md) without depending on the model: a synthetic Grafana
+ * webhook to an alert channel opens one thread, a repeated notification is
+ * skipped, and the resolution replies in the same thread. Skipped unless
+ * `mise run dev:mattermost` ran.
  */
 test.describe('assistant host', () => {
   test('posts alert notifications as one thread per firing episode', async ({ request }) => {
@@ -46,7 +47,10 @@ test.describe('assistant host', () => {
       ],
     });
     const send = (body: unknown, token = webhookToken) =>
-      request.post(`${HOST_URL}/alerts/grafana`, { data: body, headers: { Authorization: `Bearer ${token}` } });
+      request.post(`${HOST_URL}/alerts/mattermost/ops/alerts?investigate=off`, {
+        data: body,
+        headers: { Authorization: `Bearer ${token}` },
+      });
 
     expect((await send(payload('firing'), 'wrong')).status()).toBe(401);
     const opened = await send(payload('firing'));
@@ -95,7 +99,10 @@ test.describe('assistant host', () => {
       ],
     });
     const send = (body: unknown) =>
-      request.post(`${HOST_URL}/alerts/grafana`, { data: body, headers: { Authorization: `Bearer ${webhookToken}` } });
+      request.post(`${HOST_URL}/alerts/webex/${encodeURIComponent(fake!.rooms.alerts)}?investigate=off`, {
+        data: body,
+        headers: { Authorization: `Bearer ${webhookToken}` },
+      });
     expect((await send(payload('firing'))).ok()).toBe(true);
     expect((await (await send(payload('resolved'))).json()).action).toBe('resolve');
 

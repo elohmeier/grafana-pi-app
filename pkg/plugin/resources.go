@@ -940,6 +940,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	a.registerChatRoutes(mux)
 	a.registerIdentityRoutes(mux)
 	a.registerHostStateRoutes(mux)
+	a.registerAlertChannelRoutes(mux)
 	mux.HandleFunc("/llm/stream", a.withAppAccess(a.handleLLMStream))
 	// streamProxy appends /api/stream to proxyUrl; keep this alias so the frontend
 	// can use Pi's client-side proxy stream implementation unchanged.

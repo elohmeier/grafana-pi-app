@@ -1,5 +1,4 @@
 import { streamProxy } from '@earendil-works/pi-agent-core';
-import { timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { hostname } from 'node:os';
@@ -12,6 +11,7 @@ import { createGrafanaWorkspaceBroker } from '../pages/Chat/workspace/grafanaBro
 import type { WorkspaceBroker } from '../pages/Chat/workspace/broker';
 import type { PiAppJsonData } from '../types';
 import { isGrafanaWebhook } from './alerts';
+import { parseAlertRoute, sameSecret, verifyAlertRequest, type AlertRoute } from './alertRoutes';
 import { IdentityService, lookupGrafanaUser, pluginRequest } from './identity';
 import { AssistantHost } from './assistant';
 import { getBackendSrv, initGrafanaRuntime, refreshDatasources } from './grafanaRuntime';
@@ -53,12 +53,8 @@ function setting(name: string, fallback?: string) {
 
 const grafanaUrl = setting('GRAFANA_URL').replace(/\/$/, '');
 const grafanaToken = setting('GRAFANA_TOKEN');
-const webhookToken = setting('ALERT_WEBHOOK_TOKEN', '');
-if (!webhookToken && setting('ALERT_WEBHOOK_INSECURE', 'false') !== 'true') {
-  throw new Error(
-    'ALERT_WEBHOOK_TOKEN is required; set ALERT_WEBHOOK_INSECURE=true to accept unauthenticated notifications'
-  );
-}
+// Authenticates alert notifications (HMAC or Bearer) and the plugin backend's channel list.
+const webhookToken = setting('ALERT_WEBHOOK_TOKEN');
 const port = Number(setting('HOST_PORT', '8080'));
 
 // Scripts run in worker threads, so the run timeout and cancellation can terminate them.
@@ -146,15 +142,11 @@ const list = (name: string) =>
     .filter(Boolean);
 
 /** One responder per configured platform; they share the assistant, the store, and the alert notifications. */
-async function connect(
-  channel: ChatChannel,
-  config: { alertChannel: string; channels: string[]; allowDirect: boolean }
-): Promise<Responder> {
+async function connect(channel: ChatChannel, config: { channels: string[]; allowDirect: boolean }): Promise<Responder> {
   const responder = new Responder({
     channel,
     assistant,
     store,
-    alertChannelId: config.alertChannel ? await channel.resolveChannel(config.alertChannel) : undefined,
     channelIds: await Promise.all(config.channels.map((name) => channel.resolveChannel(name))),
     allowDirect: config.allowDirect,
     alertPanels: async (payload) => renderAlertPanels(payload, createBroker(await jsonData()), log),
@@ -167,6 +159,7 @@ async function connect(
     sharedChatUrl: (token) => `${publicUrl}/a/${PLUGIN_ID}/chat?share=${encodeURIComponent(token)}`,
     log,
   });
+  platforms.set(channel.name, { channel, responder });
   await channel.start((message) => {
     void responder
       .handleMessage(message)
@@ -221,31 +214,27 @@ if (elector) {
 await store.load();
 
 const responders: Responder[] = [];
-let webex: WebexChannel | undefined;
+/** The platforms by name, for alert channels (`/alerts/<platform>/<channel>`). */
+const platforms = new Map<string, { channel: ChatChannel; responder: Responder }>();
 if (setting('MATTERMOST_URL', '')) {
   const mattermost = new MattermostChannel({ url: setting('MATTERMOST_URL'), token: setting('MATTERMOST_TOKEN'), log });
   responders.push(
     await connect(mattermost, {
-      alertChannel: setting('MATTERMOST_ALERT_CHANNEL', ''),
       channels: list('MATTERMOST_CHANNELS'),
       allowDirect: setting('MATTERMOST_ALLOW_DIRECT', 'true') !== 'false',
     })
   );
 }
 if (setting('WEBEX_TOKEN', '')) {
-  webex = new WebexChannel({
+  const webex = new WebexChannel({
     url: setting('WEBEX_API_URL', 'https://webexapis.com/v1'),
     token: setting('WEBEX_TOKEN'),
-    // Without a webhook URL, messages arrive over Webex's websocket (no public URL needed).
-    webhookUrl: setting('WEBEX_WEBHOOK_URL', '') || undefined,
-    webhookSecret: setting('WEBEX_WEBHOOK_SECRET', '') || undefined,
     catalogUrl: setting('WEBEX_CATALOG_URL', '') || undefined,
     deviceUrl: setting('WEBEX_DEVICE_URL', '') || undefined,
     log,
   });
   responders.push(
     await connect(webex, {
-      alertChannel: setting('WEBEX_ALERT_ROOM', ''),
       channels: list('WEBEX_ROOMS'),
       allowDirect: setting('WEBEX_ALLOW_DIRECT', 'true') !== 'false',
     })
@@ -271,7 +260,7 @@ async function handle(request: IncomingMessage, response: ServerResponse) {
     return reply(response, initialized ? 200 : 503, { ready, leader: elector?.isLeader ?? true });
   }
   if (!ready && request.method === 'POST') {
-    // Grafana and Webex retry; the leader answers.
+    // Grafana retries; the leader answers.
     return reply(response, 503, { error: 'not ready' });
   }
   if (request.method === 'GET' && request.url === '/metrics') {
@@ -279,33 +268,18 @@ async function handle(request: IncomingMessage, response: ServerResponse) {
     response.end(metrics.render());
     return;
   }
-  if (request.method === 'POST' && request.url === '/webex/webhook' && webex) {
-    const status = await webex.handleWebhook(await body(request), header(request, 'x-spark-signature'));
-    response.writeHead(status);
-    response.end();
-    return;
+  if (request.method === 'GET' && request.url === '/api/channels') {
+    // For the plugin backend, which lists them to admins creating contact points.
+    if (!sameSecret(request.headers.authorization ?? '', `Bearer ${webhookToken}`)) {
+      return reply(response, 401, { error: 'unauthorized' });
+    }
+    return reply(response, 200, { platforms: await listPlatforms() });
   }
-  if (request.method !== 'POST' || request.url !== '/alerts/grafana') {
-    return reply(response, 404, { error: 'not found' });
+  const alertRoute = request.method === 'POST' ? parseAlertRoute(request.url ?? '') : undefined;
+  if (alertRoute) {
+    return handleAlertChannel(request, response, alertRoute);
   }
-  if (webhookToken && !sameSecret(request.headers.authorization ?? '', `Bearer ${webhookToken}`)) {
-    return reply(response, 401, { error: 'unauthorized' });
-  }
-  let payload: unknown;
-  try {
-    payload = JSON.parse((await body(request)).toString('utf8'));
-  } catch {
-    return reply(response, 400, { error: 'invalid JSON' });
-  }
-  if (!isGrafanaWebhook(payload)) {
-    return reply(response, 400, { error: 'not a Grafana webhook notification' });
-  }
-  // Grafana retries failed deliveries; answer once the notification is posted everywhere.
-  const results = await Promise.all(
-    responders.filter((responder) => responder.handlesAlerts).map((responder) => responder.handleAlert(payload))
-  );
-  log(`alert ${payload.groupKey}: ${results.map((result) => result.action).join(', ') || 'no alert channel'}`);
-  return reply(response, 200, results[0] ?? { action: 'skip' });
+  return reply(response, 404, { error: 'not found' });
 }
 
 async function body(request: IncomingMessage) {
@@ -316,18 +290,68 @@ async function body(request: IncomingMessage) {
   return Buffer.concat(chunks);
 }
 
-function header(request: IncomingMessage, name: string) {
-  const value = request.headers[name];
-  return typeof value === 'string' ? value : undefined;
-}
-
 function reply(response: ServerResponse, status: number, body: unknown) {
   response.writeHead(status, { 'Content-Type': 'application/json' });
   response.end(JSON.stringify(body));
 }
 
-function sameSecret(actual: string, expected: string) {
-  const a = Buffer.from(actual);
-  const b = Buffer.from(expected);
-  return a.length === b.length && timingSafeEqual(a, b);
+/** Resolved alert channels, for a while: a room left by the bot fails again after this time. */
+const resolvedChannels = new Map<string, { id: string; until: number }>();
+const RESOLVED_CHANNEL_TTL_MS = 5 * 60_000;
+
+/** A notification of an alert channel: a Grafana webhook contact point that names its chat channel (docs/alert-channels.md). */
+async function handleAlertChannel(
+  request: IncomingMessage,
+  response: ServerResponse,
+  route: AlertRoute | { error: string }
+) {
+  const raw = await body(request);
+  if (!verifyAlertRequest(request.headers, raw, webhookToken)) {
+    return reply(response, 401, {
+      error: 'unauthorized: sign with the host token (HMAC) or send it as a Bearer token',
+    });
+  }
+  if ('error' in route) {
+    return reply(response, 400, { error: route.error });
+  }
+  const platform = platforms.get(route.platform);
+  if (!platform) {
+    return reply(response, 404, { error: `${route.platform} is not configured on the assistant host` });
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw.toString('utf8'));
+  } catch {
+    return reply(response, 400, { error: 'invalid JSON' });
+  }
+  if (!isGrafanaWebhook(payload)) {
+    return reply(response, 400, { error: 'not a Grafana webhook notification' });
+  }
+  const key = `${route.platform}:${route.channel}`;
+  const cached = resolvedChannels.get(key);
+  let channelId = cached && cached.until > Date.now() ? cached.id : undefined;
+  if (!channelId) {
+    try {
+      channelId = await platform.channel.resolveChannel(route.channel);
+    } catch (error) {
+      // Grafana shows this in the contact point's delivery status.
+      return reply(response, 404, { error: error instanceof Error ? error.message : String(error) });
+    }
+    resolvedChannels.set(key, { id: channelId, until: Date.now() + RESOLVED_CHANNEL_TTL_MS });
+  }
+  // Grafana retries failed deliveries; answer once the notification is posted.
+  const result = await platform.responder.handleAlert(payload, { channelId, options: route.options });
+  log(`alert ${payload.groupKey} to ${key}: ${result.action}`);
+  return reply(response, 200, result);
+}
+
+/** The channels each platform's bot can post alerts to. */
+async function listPlatforms() {
+  return Promise.all(
+    [...platforms.values()].map(async ({ channel }) => ({
+      platform: channel.name,
+      bot: channel.botName,
+      channels: await channel.listChannels(),
+    }))
+  );
 }

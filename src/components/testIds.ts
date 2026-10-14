@@ -38,6 +38,10 @@ export const testIds = {
     customSkillResourceAdd: 'data-testid ac-custom-skill-resource-add',
     customSkillResourcePath: 'data-testid ac-custom-skill-resource-path',
     customSkillResourceContent: 'data-testid ac-custom-skill-resource-content',
+    assistantHostUrl: 'data-testid ac-assistant-host-url',
+    assistantHostToken: 'data-testid ac-assistant-host-token',
+    alertChannels: 'data-testid ac-alert-channels',
+    alertChannelCreate: 'data-testid ac-alert-channel-create',
     submit: 'data-testid ac-submit-form',
   },
   chat: {

@@ -8,19 +8,12 @@ covers what is specific to Webex.
 ## How it works
 
 `WebexChannel` (`src/host/webex.ts`) uses the Webex REST API with a bot token.
-Messages arrive in one of two ways; both only name a message, whose text the
-host then fetches with `GET /messages/{id}`:
+Messages arrive over the websocket Webex's own clients use (Mercury, since
+2026-10-09), so the host needs no public URL and no ingress, only outbound
+HTTPS to Webex. An event only names a message, whose text the host then
+fetches with `GET /messages/{id}`.
 
-- **Websocket (default, added 2026-10-09).** The host connects out to the
-  websocket Webex's own clients use (Mercury), so it needs no public URL and
-  no ingress, only outbound HTTPS to Webex.
-- **Webhook.** With `WEBEX_WEBHOOK_URL`, Webex calls the host's
-  `POST /webex/webhook` route instead; the host must be reachable from Webex
-  over HTTPS.
-
-Common to both:
-
-- Webex delivers group room messages to a bot only when they mention it, and
+- Webex lets a bot read group room messages only when they mention it, and
   every direct message.
 - Threads are `parentId` replies to a root message. Answers replace their
   placeholder with `PUT /messages/{id}`.
@@ -61,51 +54,36 @@ refuses the device (close codes 1005 and 4400-4404, or three failed handshakes
 in a row, which the WebSocket API reports as 1006), the host deletes it and
 registers a new one. Activities seen before a reconnect are delivered once.
 
-Starting in websocket mode removes a webhook left from webhook mode, so Webex
-stops calling an address the host no longer serves; `/webex/webhook` answers 404.
-
 Behind an HTTP proxy, Node's `fetch` and `WebSocket` use `HTTPS_PROXY` and
 `NO_PROXY` when `NODE_USE_ENV_PROXY=1` is set (Node 22.21+ and 24); `wss://`
 connections are tunneled with `CONNECT`. Exclude Grafana and, on Kubernetes,
 the API server (`kubernetes.default.svc`) in `NO_PROXY`.
 
-### Webhook
-
-- On start, the host registers one webhook (`resource: messages`,
-  `event: created`) named `grafana-assistant` for `WEBEX_WEBHOOK_URL`, the
-  public URL of its `POST /webex/webhook` route, and replaces earlier ones.
-- Webex signs each call with `X-Spark-Signature`, an HMAC-SHA1 of the body with
-  the webhook secret; calls without a valid signature are refused.
-
 ## Configuration
 
-| Variable               | Meaning                                                                                       |
-| ---------------------- | --------------------------------------------------------------------------------------------- |
-| `WEBEX_TOKEN`          | Bot access token; Webex is enabled when set.                                                  |
-| `WEBEX_API_URL`        | API base (default `https://webexapis.com/v1`).                                                |
-| `WEBEX_WEBHOOK_URL`    | Public URL of the host's `/webex/webhook` route; selects webhook mode. Empty: websocket mode. |
-| `WEBEX_WEBHOOK_SECRET` | Webhook secret (default: random per start; the webhook is registered again).                  |
-| `WEBEX_CATALOG_URL`    | Service catalog for websocket mode (default `https://u2c.wbx2.com/u2c/api/v1/catalog`).       |
-| `WEBEX_DEVICE_URL`     | Device service base URL; skips the catalog lookup.                                            |
-| `WEBEX_ALERT_ROOM`     | Title or ID of the room for alert notifications.                                              |
-| `WEBEX_ROOMS`          | Comma-separated room titles or IDs where mentions are answered.                               |
-| `WEBEX_ALLOW_DIRECT`   | `true` (default) to answer direct messages.                                                   |
+| Variable             | Meaning                                                                                 |
+| -------------------- | --------------------------------------------------------------------------------------- |
+| `WEBEX_TOKEN`        | Bot access token; Webex is enabled when set.                                            |
+| `WEBEX_API_URL`      | API base (default `https://webexapis.com/v1`).                                          |
+| `WEBEX_CATALOG_URL`  | Service catalog for websocket mode (default `https://u2c.wbx2.com/u2c/api/v1/catalog`). |
+| `WEBEX_DEVICE_URL`   | Device service base URL; skips the catalog lookup.                                      |
+| `WEBEX_ROOMS`        | Comma-separated room titles or IDs where mentions are answered outside alert threads.   |
+| `WEBEX_ALLOW_DIRECT` | `true` (default) to answer direct messages.                                             |
 
-The bot must be a member of the rooms. Secrets can be read from files named by
+Alerts go to the rooms of [alert channels](alert-channels.md). The bot must be a member of the rooms. Secrets can be read from files named by
 `<NAME>_FILE`.
 
 ## Local test server
 
 There is no local Webex, so `src/host/testing/webexFake.ts` implements the part
 of the API the adapter uses, in memory: people, rooms, messages with threads,
-edits, file uploads, signed webhook delivery, and the websocket path (service
+edits, file uploads, and the websocket path (service
 catalog, device registration, the Mercury websocket with authorization, pings,
 acknowledgements, and replaced connections, activities with placeholder
 encrypted content, and the conversation service's message ID lookup). Every
 activity of a room goes to the sockets of all its members; what a bot may read
-is left to the REST API. It enforces the rules above
-(no text in webhook payloads, mentions in group rooms, replies to thread roots
-only, one file per message, 7439 bytes per message). A control API under
+is left to the REST API. It enforces replies to thread roots only, one file
+per message, and 7439 bytes per message. A control API under
 `/_test` creates people and rooms, posts as a person (a mention puts the bot's
 display name in the text, as the Webex client does), and lists messages.
 
@@ -114,9 +92,7 @@ mise run dev:mattermost   # the host and its Grafana setup
 mise run dev:webex        # the fake (port 8099), its bot, people, and rooms; the host with Webex
 ```
 
-The Compose host uses websocket mode against the fake's catalog; set
-`WEBEX_WEBHOOK_URL=http://assistant-host:8080/webex/webhook` to test webhook
-mode. `dev:webex` creates the bot `Grafana Assistant`, Alice Doe and Bob Roe, the
+The Compose host connects to the fake's catalog. `dev:webex` creates the bot `Grafana Assistant`, Alice Doe and Bob Roe, the
 rooms `Alerts` and `Ops`, and a direct room with Alice, and writes the bot
 token and IDs to `work/host/`. The fake keeps no state across restarts; run
 the task again after its container restarts. To talk to the bot as Alice:

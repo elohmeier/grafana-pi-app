@@ -1,4 +1,4 @@
-import type { ChannelFile, ChannelMessage, ChatChannel, ThreadPost } from './channel';
+import type { ChannelFile, ChannelInfo, ChannelMessage, ChatChannel, ThreadPost } from './channel';
 
 type Post = {
   id: string;
@@ -28,7 +28,7 @@ export class MattermostChannel implements ChatChannel {
   readonly maxMessageLength = 16000;
   readonly markdownTables = true;
   private botId = '';
-  private botName = '';
+  private username = '';
   private socket?: WebSocket;
   private stopped = false;
   private seq = 1;
@@ -43,10 +43,14 @@ export class MattermostChannel implements ChatChannel {
     return this.botId;
   }
 
+  get botName() {
+    return this.username;
+  }
+
   async start(onMessage: (message: ChannelMessage) => void) {
     const me = await this.api<{ id: string; username: string }>('GET', '/users/me');
     this.botId = me.id;
-    this.botName = me.username;
+    this.username = me.username;
     this.connect(onMessage, 0);
   }
 
@@ -65,6 +69,27 @@ export class MattermostChannel implements ChatChannel {
       `/teams/name/${encodeURIComponent(team)}/channels/name/${encodeURIComponent(channel)}`
     );
     return found.id;
+  }
+
+  async listChannels(): Promise<ChannelInfo[]> {
+    const teams = await this.api<Array<{ id: string; name: string }>>('GET', '/users/me/teams');
+    const channels = await Promise.all(
+      teams.map(async (team) => {
+        const members = await this.api<Array<{ id: string; name: string; display_name: string; type: string }>>(
+          'GET',
+          `/users/me/teams/${team.id}/channels`
+        );
+        // Open and private channels; direct and group messages are not alert channels.
+        return members
+          .filter((channel) => channel.type === 'O' || channel.type === 'P')
+          .map((channel) => ({
+            id: channel.id,
+            name: `${team.name}/${channel.name}`,
+            title: channel.display_name || channel.name,
+          }));
+      })
+    );
+    return channels.flat().sort((left, right) => left.name.localeCompare(right.name));
   }
 
   async post(channelId: string, text: string, threadId?: string) {
@@ -168,7 +193,7 @@ export class MattermostChannel implements ChatChannel {
     }
     const mentions: string[] = event.data.mentions ? JSON.parse(event.data.mentions) : [];
     const sender = await this.user(post.user_id);
-    const mentioned = mentions.includes(this.botId) || new RegExp(`@${this.botName}\\b`, 'i').test(post.message);
+    const mentioned = mentions.includes(this.botId) || new RegExp(`@${this.username}\\b`, 'i').test(post.message);
     onMessage({
       channelId: post.channel_id,
       threadId: post.root_id || post.id,
@@ -176,7 +201,7 @@ export class MattermostChannel implements ChatChannel {
       userId: post.user_id,
       userName: sender.username,
       ...(sender.verifiedEmail ? { verifiedEmail: sender.verifiedEmail } : {}),
-      text: post.message.replace(new RegExp(`@${this.botName}\\b`, 'gi'), '').trim(),
+      text: post.message.replace(new RegExp(`@${this.username}\\b`, 'gi'), '').trim(),
       direct: event.data.channel_type === 'D',
       mentioned,
       createdAt: post.create_at,

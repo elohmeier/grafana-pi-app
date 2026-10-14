@@ -60,6 +60,9 @@ type appSettings struct {
 	SessionNamespace                string `json:"sessionNamespace"`
 	SessionPostgresDSN              string `json:"-"`
 	SessionGrafanaURL               string `json:"sessionGrafanaUrl"`
+	// AssistantHostURL is the assistant host as Grafana and the plugin reach it, for alert channels.
+	AssistantHostURL   string `json:"assistantHostUrl"`
+	AssistantHostToken string `json:"-"`
 }
 
 type modelSettings struct {
@@ -198,6 +201,8 @@ func loadSettings(settings backend.AppInstanceSettings) appSettings {
 	loaded.AllowedUsers = normalizeAllowedUsers(loaded.AllowedUsers)
 	loaded.OpenAIAPIKey = settings.DecryptedSecureJSONData["openAIAPIKey"]
 	loaded.SessionPostgresDSN = settings.DecryptedSecureJSONData["sessionPostgresDsn"]
+	loaded.AssistantHostURL = strings.TrimRight(strings.TrimSpace(loaded.AssistantHostURL), "/")
+	loaded.AssistantHostToken = settings.DecryptedSecureJSONData["assistantHostToken"]
 	if value := os.Getenv("PI_SESSION_POSTGRES_DSN"); value != "" {
 		loaded.SessionPostgresDSN = value
 	}

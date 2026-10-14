@@ -63,13 +63,17 @@ the thread.
 
 ### Alerts
 
-A Grafana webhook contact point posts notifications to `POST /alerts/grafana`
-(bearer token `ALERT_WEBHOOK_TOKEN`). Each notification group (`groupKey`) has
-episodes:
+Grafana webhook contact points post notifications to the host, each for one
+channel: `POST /alerts/mattermost/<team>/<channel>` and
+`POST /alerts/webex/<room>`, signed with `ALERT_WEBHOOK_TOKEN`. Notification
+policies route alerts to them, and their URL options decide whether the
+assistant investigates automatically or when mentioned; admins create them in
+the app settings ([alert channels](alert-channels.md)). Each notification group
+(`groupKey`) has episodes per channel:
 
-- **firing, no open episode:** the host posts the notification to
-  `MATTERMOST_ALERT_CHANNEL` as a new thread, then asks the assistant to
-  investigate it there. The notification text is built without the model
+- **firing, no open episode:** the host posts the notification to the channel
+  as a new thread, then asks the assistant to investigate it there
+  (`investigate=auto`; by default the thread asks for a mention instead). The notification text is built without the model
   (labels, values, start time, dashboard, panel, rule, and silence links), so a
   model failure never blocks it; the analysis follows in the thread or reports
   the failure.
@@ -108,8 +112,8 @@ SQL) is not rendered.
 
 ### Conversations
 
-The bot answers direct messages and mentions (`@grafana-assistant`) in the
-alert channel and `MATTERMOST_CHANNELS`. Each thread is one assistant chat:
+The bot answers direct messages and mentions (`@grafana-assistant`) in alert
+threads and in `MATTERMOST_CHANNELS`. Each thread is one assistant chat:
 a mention in an alert thread continues the chat that investigated the alert.
 Thread posts since the bot's last answer that did not mention it are sent along
 as context. While the assistant works, a placeholder post shows its steps; the
@@ -126,21 +130,20 @@ stored), and the answer replaces the placeholder.
 
 ## Configuration
 
-| Variable                     | Meaning                                                                                   |
-| ---------------------------- | ----------------------------------------------------------------------------------------- |
-| `GRAFANA_URL`                | Grafana base URL reachable from the host.                                                 |
-| `GRAFANA_TOKEN`              | Service account token.                                                                    |
-| `GRAFANA_PLUGIN_ID`          | `grafana-assistant-app` (default) or `g42-pi-app`.                                        |
-| `MATTERMOST_URL`             | Mattermost base URL.                                                                      |
-| `MATTERMOST_TOKEN`           | Bot account access token.                                                                 |
-| `MATTERMOST_ALERT_CHANNEL`   | `team/channel` for alert notifications.                                                   |
-| `MATTERMOST_CHANNELS`        | Comma-separated `team/channel` list where mentions are answered (plus the alert channel). |
-| `MATTERMOST_ALLOW_DIRECT`    | `true` (default) to answer direct messages.                                               |
-| `ALERT_WEBHOOK_TOKEN`        | Bearer token the contact point sends. Required unless `ALERT_WEBHOOK_INSECURE=true`.      |
-| `GRAFANA_PUBLIC_URL`         | Grafana URL in links people open (default: Grafana's `appUrl`).                           |
-| `CPYTHON_DIR`                | CPython-WASM assets (default: `dist/cpython` next to the host bundle).                    |
-| `ASSISTANT_CONCURRENCY`      | Concurrent assistant runs (default 2).                                                    |
-| `HOST_PORT`, `HOST_DATA_DIR` | HTTP port (default 8080) and state directory.                                             |
+| Variable                     | Meaning                                                                                        |
+| ---------------------------- | ---------------------------------------------------------------------------------------------- |
+| `GRAFANA_URL`                | Grafana base URL reachable from the host.                                                      |
+| `GRAFANA_TOKEN`              | Service account token.                                                                         |
+| `GRAFANA_PLUGIN_ID`          | `grafana-assistant-app` (default) or `g42-pi-app`.                                             |
+| `MATTERMOST_URL`             | Mattermost base URL.                                                                           |
+| `MATTERMOST_TOKEN`           | Bot account access token.                                                                      |
+| `MATTERMOST_CHANNELS`        | Comma-separated `team/channel` list where mentions are answered (plus the alert channel).      |
+| `MATTERMOST_ALLOW_DIRECT`    | `true` (default) to answer direct messages.                                                    |
+| `ALERT_WEBHOOK_TOKEN`        | Required. Signs notifications (HMAC) or is sent as Bearer token, and authenticates the plugin. |
+| `GRAFANA_PUBLIC_URL`         | Grafana URL in links people open (default: Grafana's `appUrl`).                                |
+| `CPYTHON_DIR`                | CPython-WASM assets (default: `dist/cpython` next to the host bundle).                         |
+| `ASSISTANT_CONCURRENCY`      | Concurrent assistant runs (default 2).                                                         |
+| `HOST_PORT`, `HOST_DATA_DIR` | HTTP port (default 8080) and state directory.                                                  |
 
 | `ASSISTANT_REQUIRE_LINK` | `true` to answer only users linked to a Grafana user ([identity](identity.md)). |
 | `ASSISTANT_EMAIL_MATCH` | `true` to link verified email addresses to Grafana users automatically. |

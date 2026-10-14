@@ -15,7 +15,6 @@ describe('custom skills editor model', () => {
           activation: {
             keywords: ['incident', 'incident', ''],
           },
-          toolGroups: ['metrics'],
           resources: [{ path: 'references/runbook.md', content: '# Runbook\n' }],
         },
       ])
@@ -28,7 +27,6 @@ describe('custom skills editor model', () => {
           explicitOnly: false,
           keywords: ['incident'],
         },
-        toolGroups: ['skillResources', 'metrics'],
         resources: [{ path: 'references/runbook.md', content: '# Runbook' }],
       },
     ]);

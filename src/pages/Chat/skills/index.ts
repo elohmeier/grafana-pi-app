@@ -1,10 +1,5 @@
 export { GRAFANA_SKILLS, getGrafanaSkill, getGrafanaSkills } from './catalog';
-export {
-  CONFIGURABLE_SKILL_TOOL_GROUPS,
-  getConfiguredGrafanaSkills,
-  parseCustomSkillsJson,
-  validateCustomSkillsJson,
-} from './configured';
+export { getConfiguredGrafanaSkills, parseCustomSkillsJson, validateCustomSkillsJson } from './configured';
 export { extractSkillReferences, selectGrafanaSkills } from './selection';
 export { renderGrafanaSystemPrompt } from './prompt';
 export type {

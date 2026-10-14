@@ -1,5 +1,5 @@
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import type { ChannelFile, ChannelMessage, ChatChannel, ThreadPost } from './channel';
+import { randomUUID } from 'node:crypto';
+import type { ChannelFile, ChannelInfo, ChannelMessage, ChatChannel, ThreadPost } from './channel';
 
 type Message = {
   id: string;
@@ -19,13 +19,6 @@ type WebexOptions = {
   url: string;
   /** Bot access token. */
   token: string;
-  /**
-   * Public URL of the host's `/webex/webhook` route, which Webex calls. Without
-   * it, the channel receives messages over a websocket instead (no public URL).
-   */
-  webhookUrl?: string;
-  /** Webhook secret; a random one is used when omitted. */
-  webhookSecret?: string;
   /** Webex's service catalog (U2C), which names the device service of the bot's cluster. */
   catalogUrl?: string;
   /** The device service (WDM) base URL; looked up in the catalog when omitted. */
@@ -57,7 +50,6 @@ type MercuryEvent = {
   data?: { eventType?: string; activity?: Activity };
 };
 
-const WEBHOOK_NAME = 'grafana-assistant';
 const CATALOG_URL = 'https://u2c.wbx2.com/u2c/api/v1/catalog';
 const DEVICE = {
   deviceName: 'grafana-assistant-host',
@@ -80,12 +72,11 @@ const AUTHORIZE_TIMEOUT_MS = 30_000;
 const MAX_RECONNECT_DELAY_MS = 32_000;
 
 /**
- * Webex through its REST API as a bot account. Messages arrive either through
- * a messages webhook or, without a public URL, over the websocket Webex's
- * clients use (Mercury). Both only name a message: webhook payloads carry its
- * ID, and websocket activities are encrypted end to end, so the text is
- * fetched with the bot's token, decrypted by Webex. Webex delivers group room
- * messages to a bot only when they mention it.
+ * Webex through its REST API as a bot account. Messages arrive over the
+ * websocket Webex's clients use (Mercury), so no public URL is needed. Its
+ * activities are encrypted end to end and only name a message, whose text is
+ * fetched with the bot's token, decrypted by Webex. Webex lets a bot read
+ * group room messages only when they mention it.
  */
 export class WebexChannel implements ChatChannel {
   readonly name = 'webex';
@@ -97,7 +88,6 @@ export class WebexChannel implements ChatChannel {
   private botNames: string[] = [];
   private onMessage?: (message: ChannelMessage) => void;
   private readonly url: string;
-  private readonly secret: string;
   private rooms = new Map<string, string>();
   private names = new Map<string, string>();
   /** The bot's person UUID, as websocket activities name their actor. */
@@ -112,7 +102,6 @@ export class WebexChannel implements ChatChannel {
 
   constructor(private readonly options: WebexOptions) {
     this.url = options.url.replace(/\/$/, '');
-    this.secret = options.webhookSecret ?? randomBytes(24).toString('hex');
   }
 
   measure(text: string) {
@@ -126,27 +115,10 @@ export class WebexChannel implements ChatChannel {
     this.botNames = [me.displayName, me.displayName.split(' ')[0]].filter(Boolean);
     this.onMessage = onMessage;
     this.stopped = false;
-    // One webhook per host: replace earlier registrations of this bot. Without a
-    // webhook URL, remove them, so Webex stops calling an address no longer used.
-    const hooks = await this.api<{ items: Array<{ id: string; name: string }> }>('GET', '/webhooks');
-    for (const hook of hooks.items.filter((item) => item.name === WEBHOOK_NAME)) {
-      await this.api('DELETE', `/webhooks/${hook.id}`);
+    this.device = await this.register(false);
+    if (!(await this.connect(0))) {
+      this.options.log?.('webex: websocket not connected yet; retrying in the background');
     }
-    if (!this.options.webhookUrl) {
-      this.device = await this.register(false);
-      if (!(await this.connect(0))) {
-        this.options.log?.('webex: websocket not connected yet; retrying in the background');
-      }
-      return;
-    }
-    await this.api('POST', '/webhooks', {
-      name: WEBHOOK_NAME,
-      targetUrl: this.options.webhookUrl,
-      resource: 'messages',
-      event: 'created',
-      secret: this.secret,
-    });
-    this.options.log?.(`webex: webhook registered for ${this.options.webhookUrl}`);
   }
 
   async stop() {
@@ -154,37 +126,6 @@ export class WebexChannel implements ChatChannel {
     this.clearKeepalive();
     this.socket?.close(1000, 'done (forced)');
     this.socket = undefined;
-  }
-
-  /**
-   * A webhook call: verifies X-Spark-Signature (HMAC-SHA1 of the raw body) and
-   * delivers the message it names. Returns the HTTP status to answer with.
-   */
-  async handleWebhook(rawBody: Buffer, signature: string | undefined): Promise<number> {
-    if (!this.options.webhookUrl) {
-      return 404;
-    }
-    const expected = createHmac('sha1', this.secret).update(rawBody).digest('hex');
-    if (
-      !signature ||
-      signature.length !== expected.length ||
-      !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
-    ) {
-      return 401;
-    }
-    const payload = JSON.parse(rawBody.toString('utf8')) as {
-      resource?: string;
-      event?: string;
-      data?: { id?: string; personId?: string };
-    };
-    if (payload.resource !== 'messages' || payload.event !== 'created' || !payload.data?.id) {
-      return 200;
-    }
-    if (payload.data.personId === this.botId) {
-      return 200;
-    }
-    await this.deliver(payload.data.id);
-    return 200;
   }
 
   /** Fetches a message by its ID and passes it on, unless the bot sent it. */
@@ -408,17 +349,34 @@ export class WebexChannel implements ChatChannel {
     }
   }
 
+  get botName() {
+    return this.botNames[0] ?? '';
+  }
+
   async resolveChannel(name: string) {
-    // A room ID, or the title of a group room the bot is in.
+    // A room ID the bot is a member of (Webex answers 404 for other rooms), or the title of a group room it is in.
     if (/^Y2lzY29zcGFyazovL/.test(name)) {
-      return name;
+      try {
+        return (await this.api<{ id: string }>('GET', `/rooms/${encodeURIComponent(name)}`)).id;
+      } catch (error) {
+        if (/failed: 40[34]\b/.test(error instanceof Error ? error.message : '')) {
+          throw new Error(`the Webex bot is not a member of room ${name}`);
+        }
+        throw error;
+      }
     }
-    const rooms = await this.api<{ items: Array<{ id: string; title: string }> }>('GET', '/rooms?type=group&max=1000');
-    const room = rooms.items.find((item) => item.title === name);
+    const room = (await this.listChannels()).find((item) => item.title === name);
     if (!room) {
       throw new Error(`Webex room ${JSON.stringify(name)} not found among the bot's rooms`);
     }
     return room.id;
+  }
+
+  async listChannels(): Promise<ChannelInfo[]> {
+    const rooms = await this.api<{ items: Array<{ id: string; title: string }> }>('GET', '/rooms?type=group&max=1000');
+    return rooms.items
+      .map((room) => ({ id: room.id, name: room.title, title: room.title }))
+      .sort((left, right) => left.title.localeCompare(right.title));
   }
 
   async post(channelId: string, text: string, threadId?: string) {
@@ -477,7 +435,8 @@ export class WebexChannel implements ChatChannel {
         `/messages?roomId=${encodeURIComponent(channelId)}&parentId=${encodeURIComponent(threadId)}&max=100`
       ),
     ]);
-    const messages = [root, ...replies.items].sort(
+    // Webex lists replies newest first: reversed, the stable sort keeps posts of the same millisecond in order.
+    const messages = [root, ...replies.items.reverse()].sort(
       (left, right) => Date.parse(left.created) - Date.parse(right.created)
     );
     return Promise.all(

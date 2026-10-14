@@ -39,6 +39,7 @@ import {
   getConfiguredAccessMode,
   parseAllowedUsersInput,
 } from '../../utils/access';
+import { AlertChannels } from './AlertChannels';
 import { CustomSkillsEditor } from './CustomSkillsEditor';
 import { LogDatasourcesEditor, serializeLogDatasources } from './LogDatasourcesEditor';
 import { SqlDatasourcesEditor, serializeSqlDatasources } from './SqlDatasourcesEditor';
@@ -60,6 +61,9 @@ type State = {
   sqlDatasources: PiAppSqlDatasource[];
   systemPromptAddendum: string;
   customSkills: PiAppCustomSkill[];
+  assistantHostUrl: string;
+  assistantHostToken: string;
+  isAssistantHostTokenSet: boolean;
 };
 
 const emptyModelRow = (isDefault: boolean): PiAppModelConfig => ({
@@ -156,6 +160,9 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
     sqlDatasources: Array.isArray(jsonData?.sqlDatasources) ? jsonData.sqlDatasources : [],
     systemPromptAddendum: typeof jsonData?.systemPromptAddendum === 'string' ? jsonData.systemPromptAddendum : '',
     customSkills: Array.isArray(jsonData?.customSkills) ? jsonData.customSkills : [],
+    assistantHostUrl: jsonData?.assistantHostUrl ?? '',
+    assistantHostToken: '',
+    isAssistantHostTokenSet: Boolean(jsonData?.isAssistantHostTokenSet),
   });
   const datasourceOptions = getPrometheusDatasourceOptions(state.allowedPrometheusDatasourceUids);
   const customSkillIssues = useMemo(
@@ -273,6 +280,11 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
   const onSubmit = (event: SyntheticEvent) => {
     event.preventDefault();
     const customSkills = serializeCustomSkills(state.customSkills);
+    // Only changed secrets are sent; Grafana keeps the others.
+    const secureJsonData = {
+      ...(state.isOpenAIAPIKeySet ? {} : { openAIAPIKey: state.openAIAPIKey }),
+      ...(state.isAssistantHostTokenSet ? {} : { assistantHostToken: state.assistantHostToken }),
+    };
 
     updatePluginAndReload(plugin.meta.id, {
       enabled,
@@ -289,277 +301,317 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         sqlDatasources: serializeSqlDatasources(state.sqlDatasources),
         systemPromptAddendum: state.systemPromptAddendum.trim(),
         customSkills,
+        assistantHostUrl: state.assistantHostUrl.trim().replace(/\/$/, ''),
+        isAssistantHostTokenSet: state.isAssistantHostTokenSet || Boolean(state.assistantHostToken),
       },
-      secureJsonData: state.isOpenAIAPIKeySet
-        ? undefined
-        : {
-            openAIAPIKey: state.openAIAPIKey,
-          },
+      secureJsonData: Object.keys(secureJsonData).length ? secureJsonData : undefined,
     });
   };
 
   return (
-    <form onSubmit={onSubmit}>
-      <FieldSet label="Access" className={s.marginTopXl}>
-        <Field
-          label="Who can use the app"
-          description={`RBAC mode checks the ${APP_ACCESS_ACTION} permission. The plugin role grants it to organization admins by default.`}
-        >
-          <RadioButtonGroup<PiAppAccessMode>
-            options={accessModeOptions}
-            value={state.accessMode}
-            onChange={onChangeAccessMode}
-          />
-        </Field>
-
-        {state.accessMode === 'users' && (
+    <>
+      <form onSubmit={onSubmit}>
+        <FieldSet label="Access" className={s.marginTopXl}>
           <Field
-            label="Allowed users"
-            description="One Grafana login or email per line. Organization admins are always allowed."
-            className={s.marginTop}
-            invalid={Boolean(allowedUsersError)}
-            error={allowedUsersError}
+            label="Who can use the app"
+            description={`RBAC mode checks the ${APP_ACCESS_ACTION} permission. The plugin role grants it to organization admins by default.`}
           >
-            <TextArea
-              className={s.allowedUsersTextArea}
-              data-testid={testIds.appConfig.allowedUsers}
-              id="allowed-users"
-              rows={5}
-              value={state.allowedUsersText}
-              placeholder="alice@example.com"
-              onChange={onChangeAllowedUsers}
+            <RadioButtonGroup<PiAppAccessMode>
+              options={accessModeOptions}
+              value={state.accessMode}
+              onChange={onChangeAccessMode}
             />
           </Field>
-        )}
-      </FieldSet>
 
-      <FieldSet label="OpenAI-compatible LLM" className={s.marginTopXl}>
-        <Field label="API Key" description="Stored in secureJsonData and only used by the backend plugin.">
-          <SecretInput
-            width={60}
-            data-testid={testIds.appConfig.openAIAPIKey}
-            id="openai-api-key"
-            value={state.openAIAPIKey}
-            isConfigured={state.isOpenAIAPIKeySet}
-            placeholder="sk-..."
-            onChange={onChangeOpenAIAPIKey}
-            onReset={onResetOpenAIAPIKey}
-          />
-        </Field>
+          {state.accessMode === 'users' && (
+            <Field
+              label="Allowed users"
+              description="One Grafana login or email per line. Organization admins are always allowed."
+              className={s.marginTop}
+              invalid={Boolean(allowedUsersError)}
+              error={allowedUsersError}
+            >
+              <TextArea
+                className={s.allowedUsersTextArea}
+                data-testid={testIds.appConfig.allowedUsers}
+                id="allowed-users"
+                rows={5}
+                value={state.allowedUsersText}
+                placeholder="alice@example.com"
+                onChange={onChangeAllowedUsers}
+              />
+            </Field>
+          )}
+        </FieldSet>
 
-        <Field
-          label="Base URL"
-          description="OpenAI-compatible API root, without /chat/completions or /responses."
-          className={s.marginTop}
-        >
-          <Input
-            width={60}
-            id="openai-base-url"
-            data-testid={testIds.appConfig.openAIBaseUrl}
-            value={state.openAIBaseUrl}
-            placeholder="https://api.openai.com/v1"
-            onChange={onChangeOpenAIBaseUrl}
-          />
-        </Field>
+        <FieldSet label="OpenAI-compatible LLM" className={s.marginTopXl}>
+          <Field label="API Key" description="Stored in secureJsonData and only used by the backend plugin.">
+            <SecretInput
+              width={60}
+              data-testid={testIds.appConfig.openAIAPIKey}
+              id="openai-api-key"
+              value={state.openAIAPIKey}
+              isConfigured={state.isOpenAIAPIKeySet}
+              placeholder="sk-..."
+              onChange={onChangeOpenAIAPIKey}
+              onReset={onResetOpenAIAPIKey}
+            />
+          </Field>
 
-        <Field
-          label="Models"
-          description="Models chat users can pick from the assistant model selector. The default model is preselected for new chats. Per-model protocol and thinking settings apply to requests with that model."
-          className={s.marginTop}
-          invalid={Boolean(modelsError)}
-          error={modelsError}
-        >
-          <div className={s.modelList}>
-            {state.models.map((model, index) => (
-              <div className={s.modelRow} data-testid={testIds.appConfig.modelRow} key={index}>
-                <div className={s.modelRowLine}>
-                  <Field className={s.modelRowField} label="Model ID">
-                    <Input
-                      width={30}
-                      data-testid={testIds.appConfig.modelId}
-                      value={model.id ?? ''}
-                      placeholder="gpt-4.1"
-                      onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                        onChangeModelRow(index, { id: event.target.value.trim() })
-                      }
-                    />
-                  </Field>
-                  <Field className={s.modelRowField} label="Display name (optional)">
-                    <Input
-                      width={24}
-                      data-testid={testIds.appConfig.modelName}
-                      value={model.name ?? ''}
-                      placeholder={model.id?.trim() || 'Shown in the chat selector'}
-                      onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                        onChangeModelRow(index, { name: event.target.value })
-                      }
-                    />
-                  </Field>
-                  <div className={s.modelRowControls}>
-                    <Checkbox
-                      data-testid={testIds.appConfig.modelDefault}
-                      label="Default"
-                      checked={Boolean(model.default)}
-                      onChange={() => onSetDefaultModel(index)}
-                    />
-                    <IconButton
-                      aria-label="Remove model"
-                      data-testid={testIds.appConfig.modelDelete}
-                      disabled={state.models.length === 1}
-                      name="trash-alt"
-                      tooltip="Remove model"
-                      onClick={() => onRemoveModel(index)}
-                    />
-                  </div>
-                </div>
-                <div className={s.modelRowLine}>
-                  <Field className={s.modelRowField} label="API protocol">
-                    <Combobox<PiAppOpenAIProtocol>
-                      data-testid={testIds.appConfig.modelProtocol}
-                      options={openAIProtocolOptions}
-                      value={normalizeOpenAIProtocol(model.protocol)}
-                      width={22}
-                      onChange={(option) => onChangeModelRow(index, { protocol: option.value })}
-                    />
-                  </Field>
-                  <Field className={s.modelRowField} label="Thinking level">
-                    <Combobox<PiAppThinkingLevel>
-                      data-testid={testIds.appConfig.modelThinkingLevel}
-                      options={thinkingLevelOptions}
-                      value={normalizeThinkingLevel(model.thinkingLevel)}
-                      width={16}
-                      onChange={(option) => onChangeModelRow(index, { thinkingLevel: option.value })}
-                    />
-                  </Field>
-                  {normalizeOpenAIProtocol(model.protocol) !== 'responses' && (
-                    <Field className={s.modelRowField} label="Thinking format">
-                      <Combobox<PiAppThinkingFormat>
-                        data-testid={testIds.appConfig.modelThinkingFormat}
-                        options={thinkingFormatOptions}
-                        value={normalizeThinkingFormat(model.thinkingFormat)}
-                        width={20}
-                        onChange={(option) => onChangeModelRow(index, { thinkingFormat: option.value })}
+          <Field
+            label="Base URL"
+            description="OpenAI-compatible API root, without /chat/completions or /responses."
+            className={s.marginTop}
+          >
+            <Input
+              width={60}
+              id="openai-base-url"
+              data-testid={testIds.appConfig.openAIBaseUrl}
+              value={state.openAIBaseUrl}
+              placeholder="https://api.openai.com/v1"
+              onChange={onChangeOpenAIBaseUrl}
+            />
+          </Field>
+
+          <Field
+            label="Models"
+            description="Models chat users can pick from the assistant model selector. The default model is preselected for new chats. Per-model protocol and thinking settings apply to requests with that model."
+            className={s.marginTop}
+            invalid={Boolean(modelsError)}
+            error={modelsError}
+          >
+            <div className={s.modelList}>
+              {state.models.map((model, index) => (
+                <div className={s.modelRow} data-testid={testIds.appConfig.modelRow} key={index}>
+                  <div className={s.modelRowLine}>
+                    <Field className={s.modelRowField} label="Model ID">
+                      <Input
+                        width={30}
+                        data-testid={testIds.appConfig.modelId}
+                        value={model.id ?? ''}
+                        placeholder="gpt-4.1"
+                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                          onChangeModelRow(index, { id: event.target.value.trim() })
+                        }
                       />
                     </Field>
-                  )}
-                  <Field
-                    className={s.modelRowField}
-                    label="Context window"
-                    description="Tokens the endpoint accepts (input + output). Default 131072."
-                  >
-                    <Input
-                      type="number"
-                      min={4096}
-                      width={16}
-                      placeholder="131072"
-                      value={model.contextWindow ?? ''}
-                      onChange={(event) => onChangeModelRow(index, { contextWindow: event.currentTarget.value })}
-                    />
-                  </Field>
-                  <Field
-                    className={s.modelRowField}
-                    label="Max output tokens"
-                    description="Per model call. Default 16384."
-                  >
-                    <Input
-                      type="number"
-                      min={256}
-                      width={16}
-                      placeholder="16384"
-                      value={model.maxOutputTokens ?? ''}
-                      onChange={(event) => onChangeModelRow(index, { maxOutputTokens: event.currentTarget.value })}
-                    />
-                  </Field>
+                    <Field className={s.modelRowField} label="Display name (optional)">
+                      <Input
+                        width={24}
+                        data-testid={testIds.appConfig.modelName}
+                        value={model.name ?? ''}
+                        placeholder={model.id?.trim() || 'Shown in the chat selector'}
+                        onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                          onChangeModelRow(index, { name: event.target.value })
+                        }
+                      />
+                    </Field>
+                    <div className={s.modelRowControls}>
+                      <Checkbox
+                        data-testid={testIds.appConfig.modelDefault}
+                        label="Default"
+                        checked={Boolean(model.default)}
+                        onChange={() => onSetDefaultModel(index)}
+                      />
+                      <IconButton
+                        aria-label="Remove model"
+                        data-testid={testIds.appConfig.modelDelete}
+                        disabled={state.models.length === 1}
+                        name="trash-alt"
+                        tooltip="Remove model"
+                        onClick={() => onRemoveModel(index)}
+                      />
+                    </div>
+                  </div>
+                  <div className={s.modelRowLine}>
+                    <Field className={s.modelRowField} label="API protocol">
+                      <Combobox<PiAppOpenAIProtocol>
+                        data-testid={testIds.appConfig.modelProtocol}
+                        options={openAIProtocolOptions}
+                        value={normalizeOpenAIProtocol(model.protocol)}
+                        width={22}
+                        onChange={(option) => onChangeModelRow(index, { protocol: option.value })}
+                      />
+                    </Field>
+                    <Field className={s.modelRowField} label="Thinking level">
+                      <Combobox<PiAppThinkingLevel>
+                        data-testid={testIds.appConfig.modelThinkingLevel}
+                        options={thinkingLevelOptions}
+                        value={normalizeThinkingLevel(model.thinkingLevel)}
+                        width={16}
+                        onChange={(option) => onChangeModelRow(index, { thinkingLevel: option.value })}
+                      />
+                    </Field>
+                    {normalizeOpenAIProtocol(model.protocol) !== 'responses' && (
+                      <Field className={s.modelRowField} label="Thinking format">
+                        <Combobox<PiAppThinkingFormat>
+                          data-testid={testIds.appConfig.modelThinkingFormat}
+                          options={thinkingFormatOptions}
+                          value={normalizeThinkingFormat(model.thinkingFormat)}
+                          width={20}
+                          onChange={(option) => onChangeModelRow(index, { thinkingFormat: option.value })}
+                        />
+                      </Field>
+                    )}
+                    <Field
+                      className={s.modelRowField}
+                      label="Context window"
+                      description="Tokens the endpoint accepts (input + output). Default 131072."
+                    >
+                      <Input
+                        type="number"
+                        min={4096}
+                        width={16}
+                        placeholder="131072"
+                        value={model.contextWindow ?? ''}
+                        onChange={(event) => onChangeModelRow(index, { contextWindow: event.currentTarget.value })}
+                      />
+                    </Field>
+                    <Field
+                      className={s.modelRowField}
+                      label="Max output tokens"
+                      description="Per model call. Default 16384."
+                    >
+                      <Input
+                        type="number"
+                        min={256}
+                        width={16}
+                        placeholder="16384"
+                        value={model.maxOutputTokens ?? ''}
+                        onChange={(event) => onChangeModelRow(index, { maxOutputTokens: event.currentTarget.value })}
+                      />
+                    </Field>
+                  </div>
                 </div>
+              ))}
+              <div>
+                <Button
+                  data-testid={testIds.appConfig.modelAdd}
+                  icon="plus"
+                  size="sm"
+                  type="button"
+                  variant="secondary"
+                  onClick={onAddModel}
+                >
+                  Add model
+                </Button>
               </div>
-            ))}
-            <div>
-              <Button
-                data-testid={testIds.appConfig.modelAdd}
-                icon="plus"
-                size="sm"
-                type="button"
-                variant="secondary"
-                onClick={onAddModel}
-              >
-                Add model
-              </Button>
             </div>
-          </div>
-        </Field>
+          </Field>
 
-        <Field
-          label="System prompt addendum"
-          description="Optional central instructions appended after the built-in guardrails. Do not include secrets."
-          className={s.marginTop}
-        >
-          <TextArea
-            className={s.promptTextArea}
-            data-testid={testIds.appConfig.systemPromptAddendum}
-            id="system-prompt-addendum"
-            rows={8}
-            value={state.systemPromptAddendum}
-            placeholder="Prefer concise incident summaries. Mention dashboard changes explicitly."
-            onChange={onChangeSystemPromptAddendum}
+          <Field
+            label="System prompt addendum"
+            description="Optional central instructions appended after the built-in guardrails. Do not include secrets."
+            className={s.marginTop}
+          >
+            <TextArea
+              className={s.promptTextArea}
+              data-testid={testIds.appConfig.systemPromptAddendum}
+              id="system-prompt-addendum"
+              rows={8}
+              value={state.systemPromptAddendum}
+              placeholder="Prefer concise incident summaries. Mention dashboard changes explicitly."
+              onChange={onChangeSystemPromptAddendum}
+            />
+          </Field>
+
+          <Field
+            label="Allowed Prometheus datasources"
+            description="Leave empty to allow all Prometheus datasources visible to the current Grafana user. Select datasources to restrict assistant discovery and queries."
+            className={s.marginTop}
+          >
+            <MultiCombobox
+              width={60}
+              id="allowed-prometheus-datasource-uids"
+              data-testid={testIds.appConfig.allowedPrometheusDatasourceUids}
+              options={datasourceOptions}
+              value={state.allowedPrometheusDatasourceUids}
+              placeholder="All visible Prometheus datasources"
+              isClearable
+              onChange={onChangeAllowedDatasourceUids}
+            />
+          </Field>
+        </FieldSet>
+
+        <FieldSet label="Log datasources" className={s.marginTopXl}>
+          <p className={s.colorWeak}>
+            Elasticsearch datasources the assistant may use. It sees fields, counts, and documents without text fields
+            such as messages. Datasources that are not listed are not available to the assistant.
+          </p>
+          <LogDatasourcesEditor
+            value={state.logDatasources}
+            onChange={(logDatasources) => setState({ ...state, logDatasources })}
           />
-        </Field>
+        </FieldSet>
 
-        <Field
-          label="Allowed Prometheus datasources"
-          description="Leave empty to allow all Prometheus datasources visible to the current Grafana user. Select datasources to restrict assistant discovery and queries."
-          className={s.marginTop}
-        >
-          <MultiCombobox
-            width={60}
-            id="allowed-prometheus-datasource-uids"
-            data-testid={testIds.appConfig.allowedPrometheusDatasourceUids}
-            options={datasourceOptions}
-            value={state.allowedPrometheusDatasourceUids}
-            placeholder="All visible Prometheus datasources"
-            isClearable
-            onChange={onChangeAllowedDatasourceUids}
+        <FieldSet label="SQL datasources" className={s.marginTopXl}>
+          <p className={s.colorWeak}>
+            Microsoft SQL Server datasources the assistant may use. It sees the schema, counts, and rows without string
+            columns, except the string columns listed as visible. Datasources that are not listed are not available to
+            the assistant.
+          </p>
+          <SqlDatasourcesEditor
+            value={state.sqlDatasources}
+            onChange={(sqlDatasources) => setState({ ...state, sqlDatasources })}
           />
-        </Field>
-      </FieldSet>
+        </FieldSet>
 
-      <FieldSet label="Log datasources" className={s.marginTopXl}>
-        <p className={s.colorWeak}>
-          Elasticsearch datasources the assistant may use. It sees fields, counts, and documents without text fields
-          such as messages. Datasources that are not listed are not available to the assistant.
-        </p>
-        <LogDatasourcesEditor
-          value={state.logDatasources}
-          onChange={(logDatasources) => setState({ ...state, logDatasources })}
-        />
-      </FieldSet>
+        <FieldSet label="Custom skills" className={s.marginTopXl}>
+          <CustomSkillsEditor
+            value={state.customSkills}
+            issues={customSkillIssues}
+            error={customSkillsError}
+            onChange={onChangeCustomSkills}
+          />
+        </FieldSet>
 
-      <FieldSet label="SQL datasources" className={s.marginTopXl}>
-        <p className={s.colorWeak}>
-          Microsoft SQL Server datasources the assistant may use. It sees the schema, counts, and rows without string
-          columns, except the string columns listed as visible. Datasources that are not listed are not available to the
-          assistant.
-        </p>
-        <SqlDatasourcesEditor
-          value={state.sqlDatasources}
-          onChange={(sqlDatasources) => setState({ ...state, sqlDatasources })}
-        />
-      </FieldSet>
+        <FieldSet label="Assistant host" className={s.marginTopXl}>
+          <p className={s.colorWeak}>
+            The Mattermost/Webex service of the assistant (docs/alert-channels.md). With its URL and token, admins
+            create alert channel contact points below.
+          </p>
+          <Field
+            label="URL"
+            description="The host as Grafana reaches it, for example http://grafana-assistant-host.grafana:8080. Contact points send to this URL."
+          >
+            <Input
+              width={60}
+              id="assistant-host-url"
+              data-testid={testIds.appConfig.assistantHostUrl}
+              value={state.assistantHostUrl}
+              placeholder="http://grafana-assistant-host:8080"
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                setState({ ...state, assistantHostUrl: event.target.value.trim() })
+              }
+            />
+          </Field>
+          <Field
+            label="Token"
+            description="The host's ALERT_WEBHOOK_TOKEN. Contact points sign notifications with it (HMAC); stored in secureJsonData."
+            className={s.marginTop}
+          >
+            <SecretInput
+              width={60}
+              id="assistant-host-token"
+              data-testid={testIds.appConfig.assistantHostToken}
+              value={state.assistantHostToken}
+              isConfigured={state.isAssistantHostTokenSet}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                setState({ ...state, assistantHostToken: event.target.value.trim() })
+              }
+              onReset={() => setState({ ...state, assistantHostToken: '', isAssistantHostTokenSet: false })}
+            />
+          </Field>
+        </FieldSet>
 
-      <FieldSet label="Custom skills" className={s.marginTopXl}>
-        <CustomSkillsEditor
-          value={state.customSkills}
-          issues={customSkillIssues}
-          error={customSkillsError}
-          onChange={onChangeCustomSkills}
-        />
-      </FieldSet>
-
-      <div className={s.marginTop}>
-        <Button type="submit" data-testid={testIds.appConfig.submit} disabled={isSubmitDisabled}>
-          Save LLM settings
-        </Button>
-      </div>
-    </form>
+        <div className={s.marginTop}>
+          <Button type="submit" data-testid={testIds.appConfig.submit} disabled={isSubmitDisabled}>
+            Save LLM settings
+          </Button>
+        </div>
+      </form>
+      {jsonData?.assistantHostUrl && jsonData?.isAssistantHostTokenSet && <AlertChannels pluginId={plugin.meta.id} />}
+    </>
   );
 };
 

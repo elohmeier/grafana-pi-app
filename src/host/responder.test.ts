@@ -2,6 +2,7 @@ import { decideDelivery, formatAlertMessage, type GrafanaWebhook, type GrafanaWe
 import type { ChannelFile, ChannelMessage, ChatChannel, ThreadPost } from './channel';
 import { formatEvidence, Responder, split, type Assistant, type ResponderOptions } from './responder';
 import { alertPanels } from './screenshots';
+import { DEFAULT_ALERT_OPTIONS, type AlertOptions } from './alertRoutes';
 import type { ChatRef } from './assistant';
 import { Metrics } from './metrics';
 import { HostStore } from './store';
@@ -42,8 +43,12 @@ class FakeChannel implements ChatChannel {
   threadPosts: ThreadPost[] = [];
   async start() {}
   async stop() {}
+  readonly botName = 'Assistant';
   async resolveChannel(name: string) {
     return name;
+  }
+  async listChannels() {
+    return [{ id: 'alerts', name: 'alerts', title: 'Alerts' }];
   }
   async post(channelId: string, text: string, threadId?: string) {
     const id = `p${this.posts.length + 1}`;
@@ -89,7 +94,6 @@ function setup(
     channel,
     assistant,
     store,
-    alertChannelId: 'alerts',
     channelIds: ['ops'],
     allowDirect: true,
     ...options,
@@ -111,6 +115,9 @@ function message(overrides: Partial<ChannelMessage> = {}): ChannelMessage {
     ...overrides,
   };
 }
+
+/** The alert channel of most tests, investigated automatically. */
+const AUTO = { channelId: 'alerts', options: { ...DEFAULT_ALERT_OPTIONS, investigate: 'auto' as const } };
 
 async function settle() {
   for (let i = 0; i < 20; i++) {
@@ -154,7 +161,7 @@ describe('alert delivery', () => {
       () =>
         new Promise((resolve) => (finish = () => resolve({ chatId: 'chat-1', text: 'Cause: deploy.', toolCalls: 3 })))
     );
-    const result = await responder.handleAlert(notification('firing', [alert('a')]));
+    const result = await responder.handleAlert(notification('firing', [alert('a')]), AUTO);
     expect(result).toEqual({ action: 'open', threadId: 'p1' });
     expect(channel.posts[0].text).toContain('High 5xx');
     await settle();
@@ -163,7 +170,7 @@ describe('alert delivery', () => {
     await settle();
     expect(channel.posts[1]).toEqual({ id: 'p2', channelId: 'alerts', threadId: 'p1', text: 'Cause: deploy.' });
 
-    await responder.handleAlert(notification('resolved', [alert('a', 'resolved')]));
+    await responder.handleAlert(notification('resolved', [alert('a', 'resolved')]), AUTO);
     expect(channel.posts[2]).toMatchObject({ threadId: 'p1', text: expect.stringContaining('Resolved: High 5xx') });
   });
 
@@ -171,7 +178,7 @@ describe('alert delivery', () => {
     const { channel, responder } = setup(async () => {
       throw new Error('model server down');
     });
-    await responder.handleAlert(notification('firing', [alert('a')]));
+    await responder.handleAlert(notification('firing', [alert('a')]), AUTO);
     await settle();
     expect(channel.posts.map((post) => post.text)).toEqual([
       expect.stringContaining('High 5xx'),
@@ -299,7 +306,7 @@ describe('evidence and screenshots', () => {
         { title: 'Panel 2', file: { name: 'web-panel-2.png', mimeType: 'image/png', data: new Uint8Array([1]) } },
       ],
     });
-    await responder.handleAlert(notification('firing', [alert('a')]));
+    await responder.handleAlert(notification('firing', [alert('a')]), AUTO);
     await settle();
     expect(channel.posts.find((post) => post.files)).toMatchObject({
       threadId: 'p1',
@@ -358,18 +365,18 @@ describe('recovery and alert noise', () => {
 
   it('edits the last update while a group flaps and skips repeated analyses of a rule', async () => {
     const { channel, asks, responder } = setup();
-    await responder.handleAlert(notification('firing', [alert('a')]));
-    await responder.handleAlert(notification('firing', [alert('a'), alert('b')]));
-    await responder.handleAlert(notification('firing', [alert('a')]));
-    await responder.handleAlert(notification('firing', [alert('a'), alert('b'), alert('c')]));
+    await responder.handleAlert(notification('firing', [alert('a')]), AUTO);
+    await responder.handleAlert(notification('firing', [alert('a'), alert('b')]), AUTO);
+    await responder.handleAlert(notification('firing', [alert('a')]), AUTO);
+    await responder.handleAlert(notification('firing', [alert('a'), alert('b'), alert('c')]), AUTO);
     await settle();
     const updates = channel.posts.filter((post) => post.text.includes('Update: High 5xx'));
     expect(updates).toHaveLength(1);
     expect(updates[0].text).toContain('3 firing');
     expect(updates[0].text).toMatch(/updated \d\d:\d\d UTC/);
 
-    await responder.handleAlert(notification('resolved', [alert('a', 'resolved')]));
-    await responder.handleAlert(notification('firing', [alert('a')]));
+    await responder.handleAlert(notification('resolved', [alert('a', 'resolved')]), AUTO);
+    await responder.handleAlert(notification('firing', [alert('a')]), AUTO);
     await settle();
     expect(asks).toHaveLength(1);
     expect(channel.posts.at(-1)?.text).toContain('Not investigated automatically');
@@ -378,7 +385,7 @@ describe('recovery and alert noise', () => {
   it('posts a new update once the last one may not be edited again', async () => {
     const { channel, responder } = setup();
     channel.maxEdits = 1;
-    await responder.handleAlert(notification('firing', [alert('a')]));
+    await responder.handleAlert(notification('firing', [alert('a')]), AUTO);
     await settle();
     // The placeholder of the analysis used its one edit; updates edit their post once.
     for (const fingerprints of [['a', 'b'], ['a'], ['a', 'b'], ['a']]) {
@@ -386,7 +393,8 @@ describe('recovery and alert noise', () => {
         notification(
           'firing',
           fingerprints.map((fingerprint) => alert(fingerprint))
-        )
+        ),
+        AUTO
       );
     }
     const updates = channel.posts.filter((post) => post.text.includes('Update: High 5xx'));
@@ -437,8 +445,8 @@ describe('operations', () => {
     const metrics = new Metrics();
     metrics.gauge('assistant_host_runs_waiting', 'Waiting runs.', () => 3);
     const { responder } = setup(undefined, { metrics });
-    await responder.handleAlert(notification('firing', [alert('a')]));
-    await responder.handleAlert(notification('firing', [alert('a')]));
+    await responder.handleAlert(notification('firing', [alert('a')]), AUTO);
+    await responder.handleAlert(notification('firing', [alert('a')]), AUTO);
     await settle();
     expect(metrics.render()).toContain('assistant_host_alert_notifications_total{action="open"} 1');
     expect(metrics.render()).toContain('assistant_host_alert_notifications_total{action="skip"} 1');
@@ -457,7 +465,6 @@ describe('several platforms', () => {
       channel: first,
       assistant,
       store,
-      alertChannelId: 'a',
       channelIds: [],
       allowDirect: true,
     });
@@ -465,12 +472,13 @@ describe('several platforms', () => {
       channel: second,
       assistant,
       store,
-      alertChannelId: 'b',
       channelIds: [],
       allowDirect: true,
     });
-    await one.handleAlert(notification('firing', [alert('a')]));
-    expect((await two.handleAlert(notification('firing', [alert('a')]))).action).toBe('open');
+    await one.handleAlert(notification('firing', [alert('a')]), { ...AUTO, channelId: 'a' });
+    expect((await two.handleAlert(notification('firing', [alert('a')]), { ...AUTO, channelId: 'b' })).action).toBe(
+      'open'
+    );
     await settle();
     // Both platforms investigate their thread.
     expect(first.posts.some((post) => post.text === 'ok')).toBe(true);
@@ -479,8 +487,12 @@ describe('several platforms', () => {
     second.post = async () => {
       throw new Error('platform down');
     };
-    await expect(two.handleAlert(notification('resolved', [alert('a', 'resolved')]))).rejects.toThrow('platform down');
-    expect((await one.handleAlert(notification('resolved', [alert('a', 'resolved')]))).action).toBe('resolve');
+    await expect(
+      two.handleAlert(notification('resolved', [alert('a', 'resolved')]), { ...AUTO, channelId: 'b' })
+    ).rejects.toThrow('platform down');
+    expect(
+      (await one.handleAlert(notification('resolved', [alert('a', 'resolved')]), { ...AUTO, channelId: 'a' })).action
+    ).toBe('resolve');
   });
 });
 
@@ -551,5 +563,90 @@ describe('identity', () => {
     await responder.handleMessage(message({ postId: 'p2', text: 'link' }));
     expect(channel.directs).toHaveLength(1);
     expect(channel.posts.at(-1)?.text).toBe('I sent you a direct message with the link.');
+  });
+});
+
+describe('alert channels', () => {
+  const target = (channelId: string, options: Partial<AlertOptions> = {}) => ({
+    channelId,
+    options: { ...DEFAULT_ALERT_OPTIONS, ...options },
+  });
+
+  it('posts to the contact point channel and asks for a mention by default', async () => {
+    const { channel, asks, responder } = setup();
+    const result = await responder.handleAlert(notification('firing', [alert('a')]), target('team-a'));
+    await settle();
+    expect(result).toEqual({ action: 'open', threadId: 'p1' });
+    expect(channel.posts.map((post) => [post.channelId, post.threadId, post.text.split('\n')[0]])).toEqual([
+      ['team-a', undefined, '🚨 **High 5xx** — 1 firing'],
+      ['team-a', 'p1', 'Mention me in this thread to investigate.'],
+    ]);
+    expect(asks).toEqual([]);
+
+    // The channel is not one of the configured channels, but the alert thread is answered.
+    await responder.handleMessage(message({ channelId: 'team-a', threadId: 'p1', postId: 'p9', text: 'what is it?' }));
+    await settle();
+    expect(asks).toHaveLength(1);
+    // Outside the thread, mentions in that channel are not answered.
+    await responder.handleMessage(message({ channelId: 'team-a', threadId: 'other', postId: 'other' }));
+    await settle();
+    expect(asks).toHaveLength(1);
+  });
+
+  it('investigates automatically with auto, says nothing with off, and leaves out screenshots on request', async () => {
+    const alertPanels = jest.fn(async () => [
+      { title: 'Errors', file: { name: 'errors.png', mimeType: 'image/png', data: new Uint8Array([1]) } },
+    ]);
+    const { channel, asks, responder } = setup(undefined, { alertPanels });
+    await responder.handleAlert(notification('firing', [alert('a')]), target('auto-room', { investigate: 'auto' }));
+    await responder.handleAlert(
+      notification('firing', [alert('a')]),
+      target('quiet-room', { investigate: 'off', screenshots: false })
+    );
+    await settle();
+    expect(asks).toHaveLength(1);
+    expect(alertPanels).toHaveBeenCalledTimes(1);
+    expect(channel.posts.filter((post) => post.channelId === 'quiet-room').map((post) => post.text)).toEqual([
+      expect.stringContaining('High 5xx'),
+    ]);
+  });
+
+  it("keeps a thread per channel and uses the contact point's message with format=grafana", async () => {
+    const { channel, responder } = setup();
+    const firing = { ...notification('firing', [alert('a')]), message: 'Custom: High 5xx on a' };
+    await responder.handleAlert(firing, target('room-1', { format: 'grafana', investigate: 'off' }));
+    await responder.handleAlert(firing, target('room-2', { investigate: 'off' }));
+    // A repeat in room 1 is skipped; the same group still has its own thread in room 2.
+    expect(await responder.handleAlert(firing, target('room-1', { investigate: 'off' }))).toEqual({ action: 'skip' });
+    await responder.handleAlert(notification('resolved', [alert('a', 'resolved')]), target('room-2'));
+    expect(channel.posts.map((post) => [post.channelId, post.threadId, post.text.split('\n')[0]])).toEqual([
+      ['room-1', undefined, 'Custom: High 5xx on a'],
+      ['room-2', undefined, '🚨 **High 5xx** — 1 firing'],
+      ['room-2', 'p2', '✅ **Resolved: High 5xx**'],
+    ]);
+  });
+
+  it("posts Grafana's test notification without a thread or an investigation", async () => {
+    const { channel, asks, store, responder } = setup();
+    const test: GrafanaWebhook = {
+      status: 'firing',
+      receiver: 'Team A',
+      groupKey: '{}:{alertname="TestAlert"}',
+      alerts: [
+        {
+          status: 'firing',
+          labels: { alertname: 'TestAlert', instance: 'Grafana' },
+          annotations: { summary: 'Notification test' },
+          startsAt: '2026-10-14T10:00:00Z',
+          fingerprint: 'test',
+        },
+      ],
+    };
+    expect(await responder.handleAlert(test, target('team-a', { investigate: 'auto' }))).toEqual({ action: 'test' });
+    await settle();
+    expect(channel.posts).toHaveLength(1);
+    expect(channel.posts[0].text).toMatch(/^🧪 \*\*Test notification\*\* from Grafana: alerts of this contact point/);
+    expect(asks).toEqual([]);
+    expect(store.isAlertThread('team-a', 'p1')).toBe(false);
   });
 });

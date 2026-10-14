@@ -117,6 +117,13 @@ export class HostStore {
     return this.state.episodes[groupKey];
   }
 
+  /** Whether a thread is an alert episode's thread: mentions there are answered in any channel. */
+  isAlertThread(channelId: string, threadId: string) {
+    return Object.values(this.state.episodes).some(
+      (episode) => episode.channelId === channelId && episode.threadId === threadId
+    );
+  }
+
   async setEpisode(groupKey: string, episode: AlertEpisode) {
     this.state.episodes[groupKey] = episode;
     await this.save();

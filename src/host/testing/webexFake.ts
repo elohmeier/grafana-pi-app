@@ -1,16 +1,15 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 
 /**
  * An in-memory Webex API for tests of the assistant host's Webex adapter: the
  * subset the adapter uses (people, rooms, messages with threads, edits, file
- * uploads, webhooks with X-Spark-Signature) plus a control API under /_test.
+ * uploads, and the websocket) plus a control API under /_test.
  *
- * Behavior follows the Webex REST API as documented: webhook payloads carry
- * the message ID but not its text, bots receive group room messages only when
- * mentioned, a reply's parentId must be a thread root, a message holds at most
- * one uploaded file and 7439 bytes of text, and it can be edited 10 times.
+ * Behavior follows the Webex REST API as documented: a reply's parentId must
+ * be a thread root, a message holds at most one uploaded file and 7439 bytes
+ * of text, and it can be edited 10 times.
  *
  * The websocket Webex's clients use (Mercury) follows Webex's JavaScript SDK
  * and webex_bot: the service catalog (U2C) names the device service (WDM), a
@@ -40,16 +39,6 @@ export type FakeMessage = {
   created: string;
   updated?: string;
 };
-type FakeWebhook = {
-  id: string;
-  name: string;
-  targetUrl: string;
-  resource: string;
-  event: string;
-  secret?: string;
-  ownerId: string;
-  created: string;
-};
 type FakeFile = { name: string; mimeType: string; data: Buffer };
 type FakeDevice = {
   id: string;
@@ -62,7 +51,6 @@ type FakeDevice = {
 };
 /** `origin`: the fake as the client reached it, for the URLs in its events. */
 type FakeSocket = { socket: WebSocket; deviceId: string; origin: string; ownerId?: string; sequence: number };
-export type Delivery = { webhookId: string; targetUrl: string; status: number | 'error'; body: string };
 
 const MAX_TEXT_BYTES = 7439;
 const MAX_EDITS = 10;
@@ -71,8 +59,6 @@ export class WebexFake {
   readonly people = new Map<string, FakePerson>();
   readonly rooms = new Map<string, FakeRoom>();
   readonly messages = new Map<string, FakeMessage>();
-  readonly deliveries: Delivery[] = [];
-  private webhooks = new Map<string, FakeWebhook>();
   private files = new Map<string, FakeFile>();
   private edits = new Map<string, number>();
   readonly devices = new Map<string, FakeDevice>();
@@ -83,7 +69,6 @@ export class WebexFake {
   answerPings = true;
   private websockets = new WebSocketServer({ noServer: true });
   private server?: Server;
-  private pending = new Set<Promise<unknown>>();
   baseUrl = '';
 
   async listen(port = 0, host = '127.0.0.1') {
@@ -111,7 +96,6 @@ export class WebexFake {
   }
 
   async close() {
-    await this.settled();
     for (const { socket } of this.sockets) {
       socket.terminate();
     }
@@ -128,13 +112,6 @@ export class WebexFake {
   dropSockets(code = 1011) {
     for (const { socket } of this.sockets) {
       socket.close(code, 'dropped');
-    }
-  }
-
-  /** Resolves when every webhook delivery started so far has finished. */
-  async settled() {
-    while (this.pending.size) {
-      await Promise.allSettled([...this.pending]);
     }
   }
 
@@ -250,65 +227,8 @@ export class WebexFake {
       message.files = [`${this.baseUrl}/v1/contents/${fileId}`];
     }
     this.messages.set(message.id, message);
-    this.deliver(message);
     this.publish(message, message.files ? 'share' : 'post');
     return message;
-  }
-
-  /** Signed webhook calls for a new message, to every webhook owner who may see it. */
-  private deliver(message: FakeMessage) {
-    const room = this.rooms.get(message.roomId)!;
-    for (const webhook of this.webhooks.values()) {
-      if (webhook.resource !== 'messages' || !['created', 'all'].includes(webhook.event)) {
-        continue;
-      }
-      const owner = this.people.get(webhook.ownerId);
-      if (!owner || !room.members.includes(owner.id)) {
-        continue;
-      }
-      // Bots see group room messages only when mentioned (their own included).
-      if (
-        owner.type === 'bot' &&
-        room.type === 'group' &&
-        message.personId !== owner.id &&
-        !message.mentionedPeople?.includes(owner.id)
-      ) {
-        continue;
-      }
-      const body = JSON.stringify({
-        id: webhook.id,
-        name: webhook.name,
-        targetUrl: webhook.targetUrl,
-        resource: 'messages',
-        event: 'created',
-        orgId: 'fake-org',
-        createdBy: owner.id,
-        appId: 'fake-app',
-        ownedBy: 'creator',
-        status: 'active',
-        created: webhook.created,
-        actorId: message.personId,
-        data: {
-          id: message.id,
-          roomId: message.roomId,
-          roomType: message.roomType,
-          personId: message.personId,
-          personEmail: message.personEmail,
-          created: message.created,
-        },
-      });
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (webhook.secret) {
-        headers['X-Spark-Signature'] = createHmac('sha1', webhook.secret).update(body).digest('hex');
-      }
-      const delivery = fetch(webhook.targetUrl, { method: 'POST', headers, body }).then(
-        (response) =>
-          this.deliveries.push({ webhookId: webhook.id, targetUrl: webhook.targetUrl, status: response.status, body }),
-        () => this.deliveries.push({ webhookId: webhook.id, targetUrl: webhook.targetUrl, status: 'error', body })
-      );
-      this.pending.add(delivery);
-      void delivery.finally(() => this.pending.delete(delivery));
-    }
   }
 
   /** A websocket of a device: authorized by its owner's token, then it receives the owner's activities. */
@@ -466,6 +386,15 @@ export class WebexFake {
         );
         return send(response, 200, { items: items.map(({ members: _members, ...room }) => room) });
       }
+      if (method === 'GET' && (match = path.match(/^\/v1\/rooms\/([^/]+)$/))) {
+        // Like Webex, a room the caller is not a member of is not found.
+        const room = this.rooms.get(decodeURIComponent(match[1]));
+        if (!room || !room.members.includes(caller.id)) {
+          throw new ApiError(404, 'The requested resource could not be found.');
+        }
+        const { members: _members, ...rest } = room;
+        return send(response, 200, rest);
+      }
       if (method === 'POST' && path === '/v1/messages') {
         return send(response, 200, await this.postMessage(caller, request, raw));
       }
@@ -527,39 +456,6 @@ export class WebexFake {
           'Content-Disposition': `attachment; filename="${file.name}"`,
         });
         response.end(file.data);
-        return;
-      }
-      if (path === '/v1/webhooks' && method === 'GET') {
-        return send(response, 200, {
-          items: [...this.webhooks.values()].filter((hook) => hook.ownerId === caller.id).map(publicWebhook),
-        });
-      }
-      if (path === '/v1/webhooks' && method === 'POST') {
-        const body = JSON.parse(raw.toString('utf8')) as Partial<FakeWebhook>;
-        if (!body.name || !body.targetUrl || !body.resource || !body.event) {
-          throw new ApiError(400, 'name, targetUrl, resource, and event are required.');
-        }
-        const webhook: FakeWebhook = {
-          id: id('WEBHOOK'),
-          name: body.name,
-          targetUrl: body.targetUrl,
-          resource: body.resource,
-          event: body.event,
-          ...(body.secret ? { secret: body.secret } : {}),
-          ownerId: caller.id,
-          created: now(),
-        };
-        this.webhooks.set(webhook.id, webhook);
-        return send(response, 200, publicWebhook(webhook));
-      }
-      if (method === 'DELETE' && (match = path.match(/^\/v1\/webhooks\/([^/]+)$/))) {
-        const webhook = this.webhooks.get(match[1]);
-        if (!webhook || webhook.ownerId !== caller.id) {
-          throw new ApiError(404, 'The requested resource could not be found.');
-        }
-        this.webhooks.delete(webhook.id);
-        response.writeHead(204);
-        response.end();
         return;
       }
       throw new ApiError(404, `no route ${method} ${path}`);
@@ -632,7 +528,6 @@ export class WebexFake {
         people: [...this.people.values()],
         rooms: [...this.rooms.values()],
         messages: [...this.messages.values()],
-        deliveries: this.deliveries,
         devices: [...this.devices.values()],
         connections: this.connections().map(({ deviceId, ownerId }) => ({ deviceId, ownerId })),
       };
@@ -696,11 +591,6 @@ function publicPerson(person: FakePerson) {
 function publicDevice(device: FakeDevice) {
   const { id: _id, ownerId: _ownerId, ...rest } = device;
   return rest;
-}
-
-function publicWebhook(webhook: FakeWebhook) {
-  const { secret: _secret, ownerId, ...rest } = webhook;
-  return { ...rest, createdBy: ownerId, ownedBy: 'creator', status: 'active' };
 }
 
 async function readBody(request: IncomingMessage) {

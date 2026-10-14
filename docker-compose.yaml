@@ -278,18 +278,14 @@ services:
       GRAFANA_TOKEN_FILE: /repo/work/host/grafana-token
       MATTERMOST_URL: http://mattermost:8065
       MATTERMOST_TOKEN_FILE: /repo/work/host/mattermost-token
-      MATTERMOST_ALERT_CHANNEL: ops/alerts
       MATTERMOST_CHANNELS: ops/town-square
       ALERT_WEBHOOK_TOKEN_FILE: /repo/work/host/alert-webhook-token
       HOST_DATA_DIR: /data
       # Webex through the local fake (profile `webex`): `mise run dev:webex` sets HOST_WEBEX.
       WEBEX_TOKEN_FILE: ${HOST_WEBEX:+/repo/work/host/webex-token}
       WEBEX_API_URL: http://webex-fake:8099/v1
-      # Websocket mode against the fake's service catalog; set WEBEX_WEBHOOK_URL to
-      # http://assistant-host:8080/webex/webhook to test webhook mode instead.
+      # The fake's service catalog, for the websocket.
       WEBEX_CATALOG_URL: http://webex-fake:8099/u2c/api/v1/catalog
-      WEBEX_WEBHOOK_URL: ${WEBEX_WEBHOOK_URL:-}
-      WEBEX_ALERT_ROOM: Alerts
       WEBEX_ROOMS: Ops
     ports:
       - '${ASSISTANT_HOST_PORT:-8080}:8080'

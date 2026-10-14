@@ -13,13 +13,13 @@ grafana:
   publicUrl: ''
   pluginId: grafana-assistant-app
 
-# A Secret with the tokens; keys that are not set leave their feature off.
-# grafana-token (required), alert-webhook-token, mattermost-token, webex-token, webex-webhook-secret
+# A Secret with the tokens: grafana-token and alert-webhook-token (required),
+# mattermost-token and webex-token for the enabled platforms.
 existingSecret: assistant-host
 
 mattermost:
   url: ''
-  alertChannel: ''
+  # team/channel list where mentions are answered outside alert threads.
   channels: ''
   allowDirect: true
 
@@ -28,10 +28,7 @@ webex:
   # HTTPS_PROXY, NO_PROXY (Grafana, the Kubernetes API), and NODE_USE_ENV_PROXY=1 in `env`.
   enabled: false
   apiUrl: https://webexapis.com/v1
-  # Optional: public URL of this service's /webex/webhook route (an Ingress), to receive
-  # messages through a webhook instead of the websocket. Setting it enables Webex.
-  webhookUrl: ''
-  alertRoom: ''
+  # Room titles or IDs where mentions are answered outside alert threads.
   rooms: ''
   allowDirect: true
 

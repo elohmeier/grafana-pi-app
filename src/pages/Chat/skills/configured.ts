@@ -1,15 +1,6 @@
 import type { PiAppCustomSkill, PiAppJsonData } from '../../../types';
 import type { BundledSkillResource, GrafanaSkill, GrafanaSkillActivation } from './types';
 
-export const CONFIGURABLE_SKILL_TOOL_GROUPS = [
-  'metrics',
-  'alerts',
-  'dashboardMetricContext',
-  'dashboardRead',
-  'investigation',
-  'skillResources',
-] as const satisfies readonly string[];
-
 export const CUSTOM_SKILL_CONFIG_LIMITS = {
   maxSkills: 20,
   maxSkillContentLength: 20_000,
@@ -20,17 +11,6 @@ export const CUSTOM_SKILL_CONFIG_LIMITS = {
 
 export const CUSTOM_SKILL_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 
-const CONFIGURABLE_SKILL_TOOL_GROUP_SET = new Set<string>(CONFIGURABLE_SKILL_TOOL_GROUPS);
-/**
- * Retired groups whose tools moved into the always-available session
- * filesystem (read/write/edit/bash with the `jsonnet` command). Accepted so
- * existing configurations keep validating; they select nothing.
- */
-export const LEGACY_SKILL_TOOL_GROUPS: ReadonlySet<string> = new Set([
-  'jsonnetFiles',
-  'jsonnetDashboards',
-  'subagents',
-]);
 const CUSTOM_SKILL_FILE_PREFIX = 'plugin-config/customSkills';
 
 type ConfiguredSkillOptions = {
@@ -228,7 +208,6 @@ function validateCustomSkillObject(item: Record<string, unknown>, label: string,
   }
 
   validateCustomSkillActivation(item.activation, label, errors);
-  validateCustomSkillToolGroups(item.toolGroups, label, errors);
   validateCustomSkillResources(item.resources, label, errors);
 }
 
@@ -259,26 +238,6 @@ function validateCustomSkillActivation(value: unknown, label: string, errors: st
       errors.push(`${label}.activation.regex must be a non-empty string.`);
     } else if (!isValidRegex(value.regex.trim())) {
       errors.push(`${label}.activation.regex must be a valid JavaScript regular expression.`);
-    }
-  }
-}
-
-function validateCustomSkillToolGroups(value: unknown, label: string, errors: string[]) {
-  if (value === undefined) {
-    return;
-  }
-
-  if (!Array.isArray(value)) {
-    errors.push(`${label}.toolGroups must be an array.`);
-    return;
-  }
-
-  for (const item of value) {
-    if (
-      typeof item !== 'string' ||
-      (!CONFIGURABLE_SKILL_TOOL_GROUP_SET.has(item) && !LEGACY_SKILL_TOOL_GROUPS.has(item))
-    ) {
-      errors.push(`${label}.toolGroups contains unsupported group ${JSON.stringify(item)}.`);
     }
   }
 }

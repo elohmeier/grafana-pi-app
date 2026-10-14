@@ -37,21 +37,21 @@ Create the Secret and install the chart:
 kubectl create secret generic assistant-host \
   --from-literal=grafana-token=... \
   --from-literal=alert-webhook-token=... \
-  --from-literal=mattermost-token=...      # and/or webex-token, webex-webhook-secret
+  --from-literal=mattermost-token=...      # and/or webex-token
 helm install assistant deploy/helm/assistant-host \
   --set image.repository=registry.example.com/grafana-assistant-host --set image.tag=6.1.0 \
   --set grafana.url=http://grafana.monitoring:3000 \
-  --set mattermost.url=https://mattermost.example.com --set mattermost.alertChannel=ops/alerts
+  --set mattermost.url=https://mattermost.example.com
 ```
 
-Point Grafana's webhook contact point at the Service
-(`http://<release>-assistant-host:8080/alerts/grafana`). For Webex, set
+Set the Service as the assistant host URL in the app settings
+(`http://<release>-assistant-host:8080`, with the alert webhook token), and
+create contact points for the bot's channels there ([alert channels](alert-channels.md)). For Webex, set
 `webex.enabled=true`: the leader connects out to Webex's websocket, so no
 Ingress is needed. Behind an HTTP proxy, add `HTTPS_PROXY`, `NO_PROXY` (with
 Grafana's Service and `kubernetes.default.svc`), and `NODE_USE_ENV_PROXY=1`
-through `env` ([Webex](webex.md#websocket)). To use a webhook instead, expose
-`/webex/webhook` through an Ingress and set `webex.webhookUrl`. See
-`values.yaml` for the remaining settings.
+through `env` ([Webex](webex.md#websocket)). See `values.yaml` for the
+remaining settings.
 
 When Grafana itself runs with several replicas, configure the plugin's chat
 storage with PostgreSQL ([chat storage](chat-storage.md)): the host state lives

@@ -24,7 +24,9 @@ const admin = {
   email: 'admin@example.com',
 };
 // The URL Grafana uses to reach the host, inside the Compose network.
-const hostWebhookUrl = process.env.ASSISTANT_HOST_WEBHOOK_URL ?? 'http://assistant-host:8080/alerts/grafana';
+// An alert channel (docs/alert-channels.md): ops/alerts, investigated automatically.
+const hostWebhookUrl =
+  process.env.ASSISTANT_HOST_WEBHOOK_URL ?? 'http://assistant-host:8080/alerts/mattermost/ops/alerts?investigate=auto';
 const CONTACT_POINT_UID = 'assistant-host';
 const alertFolder = process.env.ASSISTANT_ALERT_FOLDER ?? 'Assistant Dev Samples';
 

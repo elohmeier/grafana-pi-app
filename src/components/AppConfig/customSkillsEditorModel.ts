@@ -1,8 +1,6 @@
 import type { PiAppCustomSkill, PiAppCustomSkillResource } from '../../types';
 import {
-  CONFIGURABLE_SKILL_TOOL_GROUPS,
   CUSTOM_SKILL_CONFIG_LIMITS,
-  LEGACY_SKILL_TOOL_GROUPS,
   CUSTOM_SKILL_NAME_PATTERN,
   isValidCustomSkillRegex,
   isValidCustomSkillResourcePath,
@@ -14,14 +12,10 @@ type ValidationOptions = {
 
 export type CustomSkillValidationIssue = {
   message: string;
-  field?: 'name' | 'description' | 'content' | 'activation' | 'toolGroups' | 'resources';
+  field?: 'name' | 'description' | 'content' | 'activation' | 'resources';
   skillIndex?: number;
   resourceIndex?: number;
 };
-
-const DEFAULT_TOOL_GROUP = 'skillResources';
-// Tool groups no longer select tools; the field is kept so existing configs round-trip unchanged.
-const KNOWN_TOOL_GROUP_SET = new Set<string>([...CONFIGURABLE_SKILL_TOOL_GROUPS, ...LEGACY_SKILL_TOOL_GROUPS]);
 
 export function createEmptyCustomSkill(existingSkills: readonly PiAppCustomSkill[]): PiAppCustomSkill {
   return {
@@ -32,7 +26,6 @@ export function createEmptyCustomSkill(existingSkills: readonly PiAppCustomSkill
     activation: {
       explicitOnly: true,
     },
-    toolGroups: [DEFAULT_TOOL_GROUP],
     resources: [],
   };
 }
@@ -44,7 +37,6 @@ export function serializeCustomSkills(customSkills: readonly PiAppCustomSkill[])
       description: readString(skill.description).trim(),
       content: readString(skill.content).trimEnd(),
       activation: serializeActivation(skill),
-      toolGroups: serializeToolGroups(skill.toolGroups),
     };
 
     if (skill.enabled === false) {
@@ -83,7 +75,6 @@ export function validateCustomSkillsForEditor(
     validateSkillDescription(skill, skillIndex, issues);
     validateSkillContent(skill, skillIndex, issues);
     validateSkillActivation(skill, skillIndex, issues);
-    validateSkillToolGroups(skill, skillIndex, issues);
     validateSkillResources(skill, skillIndex, issues);
   });
 
@@ -185,20 +176,6 @@ function validateSkillActivation(skill: PiAppCustomSkill, skillIndex: number, is
   }
 }
 
-function validateSkillToolGroups(skill: PiAppCustomSkill, skillIndex: number, issues: CustomSkillValidationIssue[]) {
-  const label = skillLabel(skillIndex);
-
-  for (const group of skill.toolGroups ?? []) {
-    if (typeof group !== 'string' || !KNOWN_TOOL_GROUP_SET.has(group)) {
-      issues.push({
-        skillIndex,
-        field: 'toolGroups',
-        message: `${label} has unsupported tool group ${JSON.stringify(group)}.`,
-      });
-    }
-  }
-}
-
 function validateSkillResources(skill: PiAppCustomSkill, skillIndex: number, issues: CustomSkillValidationIssue[]) {
   const resources = skill.resources ?? [];
   const seenPaths = new Set<string>();
@@ -260,14 +237,6 @@ function serializeActivation(skill: PiAppCustomSkill) {
     ...(keywords.length > 0 ? { keywords } : {}),
     ...(!explicitOnly && regex ? { regex } : {}),
   };
-}
-
-function serializeToolGroups(value: PiAppCustomSkill['toolGroups']) {
-  const groups = uniqueStrings([DEFAULT_TOOL_GROUP, ...(value ?? [])]).filter((group) =>
-    KNOWN_TOOL_GROUP_SET.has(group)
-  );
-
-  return groups.length > 0 ? groups : [DEFAULT_TOOL_GROUP];
 }
 
 function serializeResources(value: PiAppCustomSkill['resources']): PiAppCustomSkillResource[] {
