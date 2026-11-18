@@ -1,4 +1,5 @@
-import { runWorkspaceBash, type WorkspaceShellDeps } from './shell';
+import { runWorkspaceBash, setShellWorkerFactory, type WorkspaceShellDeps } from './shell';
+import type { ShellWorker } from './execution/browserRunner';
 import { createJsonnetLibraryMount } from './mounts';
 import { createFakeDashboardBroker } from './testUtils';
 import { SessionWorkspace } from './workspace';
@@ -141,6 +142,77 @@ describe('workspace bash', () => {
     const result = await run('while true; do :; done');
     expect(result.exitCode).not.toBe(0);
     expect(result.stderr).toMatch(/too many/);
+  });
+
+  it('keeps host command output and names the running command on timeout', async () => {
+    const { run, broker, workspace } = setup();
+    broker.prometheus!.query = (_ds, _spec, signal) =>
+      new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(new Error('aborted'))));
+    const result = await run(
+      `echo x > notes.txt; echo start; grafana-prom series up; grafana search checkout | jq -r '.results[].uid'; grafana-prom query -e 'sum(rate(slow_total[5m]))' --from now-7d; echo never`,
+      { timeoutMs: 1000 }
+    );
+
+    expect(result.timedOut).toBe(true);
+    expect(result.exitCode).toBe(124);
+    expect(result.stdout).toContain('$ grafana-prom series up\n{"__name__":"up","job":"api"}\n');
+    expect(result.stdout).toMatch(/\$ grafana search checkout\n\{.*"checkout"/s);
+    expect(result.stdout).not.toContain('slow_total');
+    expect(result.stderr).toContain(
+      "bash: timed out after 1000ms while running `grafana-prom query -e 'sum(rate(slow_total[5m]))' --from now-7d`"
+    );
+    expect(result.stderr).toMatch(/stdout shows what the 2 host commands that finished printed/);
+    expect(result.stderr).toMatch(/file changes of this call were discarded/);
+    expect(result.stderr).toMatch(/raise timeoutMs \(up to 120000\) or split the work/);
+    expect(result.discardedChanges).toBe('timed out after 1000ms');
+    expect(workspace.getScratchFile('/workspace/notes.txt')).toBeUndefined();
+  });
+
+  it('keeps host command output when a timeout terminates the worker', async () => {
+    const { run, broker } = setup();
+    broker.prometheus!.query = (_ds, _spec, signal) =>
+      new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(new Error('aborted'))));
+    // A worker that runs two host commands and then waits; the runner terminates it on timeout.
+    const calls = [
+      { name: 'grafana', args: ['search', 'checkout'] },
+      { name: 'grafana-prom', args: ['query', '-e', 'slow_total', '--from', 'now-7d'] },
+    ];
+    const terminate = jest.fn();
+    const worker: ShellWorker = {
+      onmessage: null,
+      onerror: null,
+      terminate,
+      postMessage(message: { type: string; id?: number }) {
+        const id = message.type === 'run' ? 0 : message.id!;
+        const call = calls[id];
+        if (call) {
+          setTimeout(() =>
+            worker.onmessage?.({
+              data: {
+                type: 'request',
+                id: id + 1,
+                kind: 'command',
+                args: [{ ...call, cwd: '/workspace', stdin: '', env: {} }],
+              },
+            })
+          );
+        }
+      },
+    };
+    setShellWorkerFactory(() => worker);
+    try {
+      const result = await run('grafana search checkout; grafana-prom query -e slow_total --from now-7d', {
+        timeoutMs: 1000,
+      });
+      expect(terminate).toHaveBeenCalled();
+      expect(result.exitCode).toBe(124);
+      expect(result.stdout).toMatch(/^\$ grafana search checkout\n\{.*"checkout"/s);
+      expect(result.stderr).toContain(
+        'bash: timed out after 1000ms while running `grafana-prom query -e slow_total --from now-7d`'
+      );
+    } finally {
+      setShellWorkerFactory(undefined);
+    }
   });
 
   it('stages resource deletion as a tombstone', async () => {

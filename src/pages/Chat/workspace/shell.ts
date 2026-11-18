@@ -14,7 +14,7 @@ import {
 import { executeShell, type ShellHost } from './execution/engine';
 import type { ShellWorker } from './execution/browserRunner';
 import { LIVE_DASHBOARD_PATH } from './liveDashboard';
-import { normalizeWorkspacePath, truncateUtf8 } from './paths';
+import { normalizeWorkspacePath, truncateUtf8, utf8ByteLength } from './paths';
 import type { WorkspaceFileChange } from './types';
 import { WorkspaceError, type SessionWorkspace, type WorkspaceTransaction } from './workspace';
 
@@ -103,10 +103,17 @@ export async function runWorkspaceBash(
   );
   const controller = new AbortController();
   let timedOut = false;
+  // The interpreter's own output is lost when a script is stopped, so host commands are recorded here.
+  const hostLog = new HostCommandLog();
+  let stoppedDuring: HostCommandRecord[] = [];
+  const stop = () => {
+    stoppedDuring = hostLog.running();
+    controller.abort();
+  };
   // The execution budget excludes time spent waiting for a human approval.
   const deadline = new PausableDeadline(timeoutMs, () => {
     timedOut = true;
-    controller.abort();
+    stop();
   });
   const approvals: WorkspaceApprovalService | undefined = deps.approvals && {
     async request(request) {
@@ -120,7 +127,7 @@ export async function runWorkspaceBash(
     },
   };
   const commandDeps: WorkspaceShellDeps = { ...deps, approvals };
-  const forwardAbort = () => controller.abort();
+  const forwardAbort = () => stop();
   if (signal?.aborted) {
     controller.abort();
   }
@@ -153,23 +160,26 @@ export async function runWorkspaceBash(
         if (controller.signal.aborted) {
           throw new Error('Shell cancelled');
         }
-        onProgress?.(formatProgressCommand(call.name, call.args));
-        const ctx = commandContext(commandDeps, tx, call.cwd, call.stdin, controller.signal);
-        const spec = specs.find((spec) => spec.name === call.name);
-        if (spec) {
-          const result = await runRegisteredCommand(spec, call.args, ctx);
-          images.push(...(result.images ?? []));
-          images.splice(0, Math.max(0, images.length - MAX_SHELL_IMAGES));
-          presentations.push(...(result.presentations ?? []));
-          presentations.splice(0, Math.max(0, presentations.length - 10));
-          tx.refreshGeneratedFiles();
-          return textResult(result);
-        }
-        const extra = extras.find((extra) => extra.name === call.name);
-        if (!extra) {
-          throw new Error(`Unknown command ${call.name}`);
-        }
-        return extra.run(call.args, { ...ctx, env: call.env });
+        const display = formatProgressCommand(call.name, call.args);
+        onProgress?.(display);
+        return hostLog.record(display, async () => {
+          const ctx = commandContext(commandDeps, tx, call.cwd, call.stdin, controller.signal);
+          const spec = specs.find((spec) => spec.name === call.name);
+          if (spec) {
+            const result = await runRegisteredCommand(spec, call.args, ctx);
+            images.push(...(result.images ?? []));
+            images.splice(0, Math.max(0, images.length - MAX_SHELL_IMAGES));
+            presentations.push(...(result.presentations ?? []));
+            presentations.splice(0, Math.max(0, presentations.length - 10));
+            tx.refreshGeneratedFiles();
+            return textResult(result);
+          }
+          const extra = extras.find((extra) => extra.name === call.name);
+          if (!extra) {
+            throw new Error(`Unknown command ${call.name}`);
+          }
+          return extra.run(call.args, { ...ctx, env: call.env });
+        });
       },
     };
     const input = {
@@ -201,7 +211,7 @@ export async function runWorkspaceBash(
       }
     }
 
-    const stdout = truncateUtf8(exec.stdout ?? '', DEFAULT_SHELL_OUTPUT_BYTES);
+    let stdout = truncateUtf8(exec.stdout ?? '', DEFAULT_SHELL_OUTPUT_BYTES);
     const stderr = truncateUtf8(exec.stderr ?? '', DEFAULT_SHELL_OUTPUT_BYTES);
     let changes: WorkspaceFileChange[] = tx.committedChanges();
     let discardedChanges: string | undefined;
@@ -218,10 +228,20 @@ export async function runWorkspaceBash(
       tx.abort();
       discardedChanges = timedOut ? `timed out after ${timeoutMs}ms` : 'cancelled';
       exitCode = timedOut ? 124 : 130;
-      stderrText = appendLine(
-        stderrText,
-        `bash: ${discardedChanges}; uncommitted file changes were discarded; earlier apply boundaries remain committed`
-      );
+      // A stopped interpreter returns nothing it printed; show what the host commands printed instead.
+      const recover = !exec.stdout && !exec.stderr;
+      if (recover) {
+        stdout = { text: hostLog.transcript(DEFAULT_SHELL_OUTPUT_BYTES, stoppedDuring), truncated: false };
+      }
+      for (const line of stopMessage({
+        timedOut,
+        timeoutMs,
+        running: stoppedDuring,
+        log: hostLog,
+        recovered: recover,
+      })) {
+        stderrText = appendLine(stderrText, line);
+      }
     } else {
       try {
         changes = tx.commit();
@@ -364,4 +384,134 @@ function formatProgressCommand(name: string, args: string[]) {
     .join(' ')
     .replace(/\s+/g, ' ');
   return text.length > MAX_PROGRESS_COMMAND_LENGTH ? `${text.slice(0, MAX_PROGRESS_COMMAND_LENGTH - 1)}…` : text;
+}
+
+type HostCommandRecord = { command: string; startedAt: number; done: boolean; output: string };
+
+/** Output kept per finished host command, and in total, for the report of a stopped script. */
+const HOST_RECORD_BYTES = 4 * 1024;
+const HOST_LOG_BYTES = 2 * DEFAULT_SHELL_OUTPUT_BYTES;
+
+/**
+ * Records host commands (everything that runs outside the interpreter, such as
+ * `grafana-prom query`) and what they printed. just-bash collects a script's
+ * output in memory and drops it when the script is stopped, and a terminated
+ * worker returns nothing, so this is the output that survives a timeout.
+ */
+class HostCommandLog {
+  private records: HostCommandRecord[] = [];
+  private retainedBytes = 0;
+  private dropped = 0;
+
+  async record(command: string, run: () => Promise<ExecResult>): Promise<ExecResult> {
+    const record: HostCommandRecord = { command, startedAt: Date.now(), done: false, output: '' };
+    this.records.push(record);
+    try {
+      const result = await run();
+      record.output = recordOutput(result.stdout, result.stderr, result.exitCode);
+      return result;
+    } catch (error) {
+      record.output = recordOutput('', error instanceof Error ? error.message : String(error), 1);
+      throw error;
+    } finally {
+      record.done = true;
+      this.retainedBytes += record.output.length;
+      while (this.retainedBytes > HOST_LOG_BYTES && this.records[0]?.done) {
+        this.retainedBytes -= this.records.shift()!.output.length;
+        this.dropped++;
+      }
+    }
+  }
+
+  running() {
+    return this.records.filter((record) => !record.done);
+  }
+
+  /** Commands that finished, except those still running when the script was stopped. */
+  finished(stoppedDuring: HostCommandRecord[] = []) {
+    return this.records.filter((record) => record.done && !stoppedDuring.includes(record));
+  }
+
+  finishedCount(stoppedDuring: HostCommandRecord[] = []) {
+    return this.dropped + this.finished(stoppedDuring).length;
+  }
+
+  /** The newest finished commands with their output, within maxBytes. */
+  transcript(maxBytes: number, stoppedDuring: HostCommandRecord[]) {
+    const finished = this.finished(stoppedDuring);
+    const parts: string[] = [];
+    let bytes = 0;
+    let index = finished.length - 1;
+    for (; index >= 0; index--) {
+      const part = `$ ${finished[index].command}\n${finished[index].output}`;
+      // Leaves room for the omission note.
+      if (bytes + utf8ByteLength(part) > maxBytes - 64) {
+        break;
+      }
+      parts.unshift(part);
+      bytes += utf8ByteLength(part);
+    }
+    const omitted = this.dropped + index + 1;
+    return (omitted > 0 ? `[${omitted} earlier host commands not shown]\n` : '') + parts.join('');
+  }
+}
+
+function recordOutput(stdout: string, stderr: string, exitCode: number) {
+  const clip = (text: string) => {
+    const clipped = truncateUtf8(text, HOST_RECORD_BYTES);
+    return clipped.truncated ? `${clipped.text}\n[truncated]\n` : text.replace(/\n?$/, '\n');
+  };
+  return [
+    stdout ? clip(stdout) : '',
+    stderr ? `[stderr] ${clip(stderr)}` : '',
+    exitCode !== 0 ? `[exit ${exitCode}]\n` : '',
+  ].join('');
+}
+
+/** Explains a timeout or cancellation: what was running, what output is shown, and what to do next. */
+function stopMessage({
+  timedOut,
+  timeoutMs,
+  running,
+  log,
+  recovered,
+}: {
+  timedOut: boolean;
+  timeoutMs: number;
+  running: HostCommandRecord[];
+  log: HostCommandLog;
+  recovered: boolean;
+}) {
+  const reason = timedOut ? `timed out after ${timeoutMs}ms` : 'cancelled';
+  const now = Date.now();
+  const lines: string[] = [];
+  if (running.length > 0) {
+    const commands = running.map(
+      (record) => `\`${record.command}\` (running for ${((now - record.startedAt) / 1000).toFixed(1)}s)`
+    );
+    lines.push(`bash: ${reason} while running ${commands.join(', ')}`);
+  } else {
+    const last = log.finished().at(-1);
+    lines.push(
+      `bash: ${reason} in the script itself, with no host command running` +
+        (last ? `; the last one to finish was \`${last.command}\`` : '')
+    );
+  }
+  if (recovered) {
+    const finished = log.finishedCount(running);
+    lines.push(
+      finished > 0
+        ? `bash: the script's own output (echo, jq, pipes) is lost when it is stopped; stdout shows what the ${finished} host commands that finished printed, before any pipe or redirect`
+        : `bash: the script's own output is lost when it is stopped, and no host command finished`
+    );
+  }
+  lines.push('bash: file changes of this call were discarded; earlier apply boundaries remain committed');
+  if (timedOut) {
+    lines.push(
+      timeoutMs >= MAX_SHELL_TIMEOUT_MS
+        ? `bash: ${MAX_SHELL_TIMEOUT_MS}ms is the maximum timeoutMs; split the work into several bash calls (for example fewer queries or dashboards per call)`
+        : `bash: raise timeoutMs (up to ${MAX_SHELL_TIMEOUT_MS}) or split the work into several bash calls`
+    );
+  }
+  return lines;
 }
