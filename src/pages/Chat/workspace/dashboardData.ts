@@ -24,6 +24,7 @@ import {
   type TransformerRegistryItem,
 } from '@grafana/data';
 import { lastValueFrom } from 'rxjs';
+import { mapConcurrent } from './concurrency';
 import type { PrometheusDatasourceInfo } from './broker';
 import {
   applyVariableOverrides,
@@ -630,19 +631,6 @@ function ensureStandardTransformers() {
     }
     return [...items.values()];
   });
-}
-
-async function mapConcurrent<T, R>(items: T[], concurrency: number, mapper: (item: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (next < items.length) {
-      const index = next++;
-      results[index] = await mapper(items[index]);
-    }
-  });
-  await Promise.all(workers);
-  return results;
 }
 
 function uniqueTexts(values: Array<string | undefined>) {

@@ -569,6 +569,27 @@ describe('grafana-prom query batches', () => {
     expect(result.stdout).toBe('13\n');
   });
 
+  it('runs expressions concurrently and prints them in input order', async () => {
+    const { run, broker } = setup();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const query = broker.prometheus!.query;
+    broker.prometheus!.query = async (ds, spec, signal) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      // Later expressions answer sooner, so completion order differs from input order.
+      const index = Number(spec.query.match(/i(\d+)/)![1]);
+      await new Promise((resolve) => setTimeout(resolve, (20 - index) * 5));
+      inFlight--;
+      return query(ds, spec, signal);
+    };
+    const flags = Array.from({ length: 20 }, (_, index) => `-e 'up{instance="i${index}"}'`).join(' ');
+    const result = await run(`grafana-prom query --from now-7d ${flags} | jq -r '.results[].query'`);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe(Array.from({ length: 20 }, (_, index) => `up{instance="i${index}"}\n`).join(''));
+    expect(maxInFlight).toBe(6);
+  });
+
   it('refuses unresolved dashboard variables and substitutes --var values', async () => {
     const { run } = setup();
     const expr = 'sum(rate(http_requests_total{env=~"$env", namespace="${ns}"}[$__rate_interval]))';

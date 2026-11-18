@@ -6,6 +6,7 @@ import {
   type TemplateValue,
   unresolvedVariables,
 } from '../dashboardPanels';
+import { mapConcurrent } from '../concurrency';
 import { normalizeWorkspacePath } from '../paths';
 import {
   json,
@@ -17,6 +18,9 @@ import {
   type WorkspaceCommandContext,
   type WorkspaceCommandSpec,
 } from './registry';
+
+/** Expressions of one `grafana-prom query` call that run at the same time. */
+const QUERY_CONCURRENCY = 6;
 
 export const grafanaPromCommand: WorkspaceCommandSpec = {
   name: 'grafana-prom',
@@ -120,7 +124,7 @@ export const grafanaPromCommand: WorkspaceCommandSpec = {
     },
     query: {
       summary:
-        'Run PromQL and print {queryType, failed, results: [...]} with compact min/max/last summaries per expression (never raw frames). Repeat -e to validate several expressions in one call.',
+        'Run PromQL and print {queryType, failed, results: [...]} with compact min/max/last summaries per expression (never raw frames). Repeat -e to run several expressions in one call (in parallel; results keep their order).',
       usage:
         'grafana-prom query EXPR | -e EXPR [-e EXPR]... | --file FILE [--var NAME=VALUE]... [--range] [--from now-1h] [--to now] [--step 1m] [--ds UID]',
       effect: 'remote-read',
@@ -169,10 +173,12 @@ export const grafanaPromCommand: WorkspaceCommandSpec = {
         const to = stringOption(parsed, 'to');
         const step = stringOption(parsed, 'step');
         const type = parsed.options.range === true || from || to || step ? 'range' : 'instant';
-        const summaries = [];
-        for (const query of queries) {
-          const summary = await requireProm(ctx).query(
-            stringOption(parsed, 'ds'),
+        const prom = requireProm(ctx);
+        const ds = stringOption(parsed, 'ds');
+        // Batches of long range queries against a slow store would run into the bash timeout one after another.
+        const results = await mapConcurrent(queries, QUERY_CONCURRENCY, (query) =>
+          prom.query(
+            ds,
             {
               query,
               type,
@@ -181,7 +187,11 @@ export const grafanaPromCommand: WorkspaceCommandSpec = {
               step,
             },
             ctx.signal
-          );
+          )
+        );
+        const summaries = [];
+        for (const [index, summary] of results.entries()) {
+          const query = queries[index];
           const artifact = ctx.artifacts?.register({
             kind: 'json',
             title: `PromQL: ${query.slice(0, 80)}`,
