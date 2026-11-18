@@ -43,14 +43,14 @@ describe('workspace bash', () => {
   it('keeps non-ASCII text intact when byte-producing commands write files', async () => {
     const { run, workspace } = setup();
     const write = await run(
-      `cat > title.txt <<'EOF'\nÄnderungen – Engpässe → ok\nEOF\nprintf 'Größe\\n' | tee tee.txt > /dev/null; cut -c1-5 title.txt >> title.txt`
+      `cat > title.txt <<'EOF'\nÜbersicht – Größe → ok\nEOF\nprintf 'Größe\\n' | tee tee.txt > /dev/null; cut -c1-5 title.txt >> title.txt`
     );
     expect(write.exitCode).toBe(0);
-    expect(workspace.getScratchFile('/workspace/title.txt')?.content).toBe('Änderungen – Engpässe → ok\nÄnder\n');
+    expect(workspace.getScratchFile('/workspace/title.txt')?.content).toBe('Übersicht – Größe → ok\nÜbers\n');
     expect(workspace.getScratchFile('/workspace/tee.txt')?.content).toBe('Größe\n');
 
     const read = await run(`cat title.txt | jq -R . && wc -c tee.txt && jq -n --rawfile t tee.txt '$t'`);
-    expect(read.stdout).toBe('"Änderungen – Engpässe → ok"\n"Änder"\n8 tee.txt\n"Größe\\n"\n');
+    expect(read.stdout).toBe('"Übersicht – Größe → ok"\n"Übers"\n8 tee.txt\n"Größe\\n"\n');
   });
 
   it('reports each host command as it starts, but not interpreter builtins', async () => {

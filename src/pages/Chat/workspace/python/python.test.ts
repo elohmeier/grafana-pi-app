@@ -72,13 +72,13 @@ describe('python3 in the workspace shell', () => {
     const { run, workspace } = setup();
     const script = [
       'import json',
-      'json.dump({"title": "Änderungen – Engpässe"}, open("out.json", "w"), ensure_ascii=False)',
+      'json.dump({"title": "Übersicht – Größe"}, open("out.json", "w"), ensure_ascii=False)',
     ];
     await run(`cat > /tmp/script.py <<'EOF'\n${script.join('\n')}\nEOF`);
     const result = await run('python3 /tmp/script.py && jq -r .title out.json');
     expect(result.stderr).toBe('');
-    expect(result.stdout).toBe('Änderungen – Engpässe\n');
-    expect(workspace.getScratchFile('/workspace/out.json')?.content).toBe('{"title": "Änderungen – Engpässe"}');
+    expect(result.stdout).toBe('Übersicht – Größe\n');
+    expect(workspace.getScratchFile('/workspace/out.json')?.content).toBe('{"title": "Übersicht – Größe"}');
   });
 
   it('reads and stages the live dashboard open in the browser', async () => {
