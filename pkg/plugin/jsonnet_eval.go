@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path"
@@ -16,11 +17,10 @@ import (
 )
 
 // Stateless Jsonnet evaluation for the session workspace `jsonnet` shell
-// command. The caller sends the workspace files the program may import; the
+// command. The caller sends the workspace files the program imports; the
 // embedded vendor tree is available as the library path. Nothing is stored.
 
 const (
-	jsonnetEvalMaxFiles       = 200
 	jsonnetEvalMaxInputBytes  = 4 << 20
 	jsonnetEvalMaxOutputBytes = 4 << 20
 	jsonnetEvalTimeout        = 20 * time.Second
@@ -60,6 +60,11 @@ func (a *App) handleJsonnetEval(w http.ResponseWriter, req *http.Request) {
 	}
 	var body api.JsonnetEvalRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, jsonnetEvalMaxInputBytes+64<<10)).Decode(&body); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("jsonnet input exceeds %d bytes: import only the files the program needs", jsonnetEvalMaxInputBytes))
+			return
+		}
 		writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %s", err))
 		return
 	}
@@ -93,9 +98,6 @@ func (a *App) handleJsonnetFix(w http.ResponseWriter, req *http.Request) {
 }
 
 func evaluateWorkspaceJsonnet(ctx context.Context, request api.JsonnetEvalRequest) (string, error) {
-	if len(request.Files) > jsonnetEvalMaxFiles {
-		return "", fmt.Errorf("too many files (%d > %d)", len(request.Files), jsonnetEvalMaxFiles)
-	}
 	files := make(map[string]string, len(request.Files))
 	total := 0
 	for name, content := range request.Files {
@@ -107,7 +109,7 @@ func evaluateWorkspaceJsonnet(ctx context.Context, request api.JsonnetEvalReques
 		files[cleaned] = content
 	}
 	if total > jsonnetEvalMaxInputBytes {
-		return "", fmt.Errorf("input too large (%d bytes)", total)
+		return "", fmt.Errorf("input too large (%d bytes, at most %d): import only the files the program needs", total, jsonnetEvalMaxInputBytes)
 	}
 	if _, ok := files[request.Entrypoint]; !ok {
 		return "", fmt.Errorf("entrypoint %q not provided", request.Entrypoint)

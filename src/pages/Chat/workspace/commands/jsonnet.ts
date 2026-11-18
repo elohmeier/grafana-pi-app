@@ -1,5 +1,5 @@
 import { describeDashboardRemovals } from '../dashboardChanges';
-import { isWithin, normalizeWorkspacePath } from '../paths';
+import { isWithin, normalizeWorkspacePath, parentPath } from '../paths';
 import { SCRATCH_MOUNTS } from '../workspace';
 import {
   fail,
@@ -13,8 +13,12 @@ import {
   type WorkspaceCommandSpec,
 } from './registry';
 
-const IMPORTABLE_FILE = /\.(jsonnet|libsonnet|json|txt|md)$/;
-const MAX_IMPORT_FILES = 200;
+// Mirrors jsonnetEvalMaxInputBytes and the request body limit in pkg/plugin/jsonnet_eval.go
+// (the body limit leaves 64 KiB for JSON encoding and the other request fields).
+const MAX_INPUT_BYTES = 4 << 20;
+const MAX_ENCODED_FILES_BYTES = MAX_INPUT_BYTES + (56 << 10);
+const IMPORT_KEYWORD = /(?<![\w$])(importstr|importbin|import)\s*(@?)(['"])/g;
+const STRING_ESCAPES: Record<string, string> = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f' };
 const DASHBOARD_RESOURCE_UID = /^[A-Za-z0-9_-]{1,40}$/;
 
 /**
@@ -58,7 +62,11 @@ export const jsonnetCommand: WorkspaceCommandSpec = {
       async run(parsed, ctx) {
         const jsonnet = requireJsonnet(ctx);
         const entrypoint = requireFile(parsed, ctx);
-        const files = await importableFiles(ctx, entrypoint);
+        const files = await importedFiles(ctx, entrypoint);
+        const tooLarge = oversizedRequest(files, entrypoint);
+        if (tooLarge) {
+          return fail(tooLarge);
+        }
         const resourceUid = stringOption(parsed, 'resource');
         if (resourceUid !== undefined && !DASHBOARD_RESOURCE_UID.test(resourceUid)) {
           throw new UsageError('--resource must be a dashboard UID ([A-Za-z0-9_-], at most 40 characters)');
@@ -150,23 +158,104 @@ function requireFile(parsed: ParsedArgs, ctx: WorkspaceCommandContext) {
   return normalizeWorkspacePath(raw, ctx.cwd);
 }
 
-/** Workspace files the program may import: the entrypoint plus Jsonnet/JSON/text files in scratch mounts. */
-async function importableFiles(ctx: WorkspaceCommandContext, entrypoint: string) {
+/**
+ * The entrypoint plus every scratch file it reaches through import, importstr,
+ * or importbin, transitively. Jsonnet import paths are string literals, so a
+ * static scan finds them; a match inside a comment or string only adds a file
+ * that exists. Paths resolve like the backend importer: absolute, or relative
+ * to the importing file. Anything else (library paths, missing files) is left
+ * to the backend, which resolves it in the vendor tree or reports the import.
+ */
+async function importedFiles(ctx: WorkspaceCommandContext, entrypoint: string) {
   const files: Record<string, string> = { [entrypoint]: await ctx.tx.readFile(entrypoint) };
-  let count = 1;
-  for (const path of ctx.tx.allPaths()) {
-    if (count >= MAX_IMPORT_FILES) {
-      break;
-    }
-    if (path === entrypoint || !IMPORTABLE_FILE.test(path) || !SCRATCH_MOUNTS.some((mount) => isWithin(path, mount))) {
-      continue;
-    }
-    if ((await ctx.tx.entryType(path)) === 'file') {
+  const pending = [entrypoint];
+  while (pending.length > 0) {
+    const from = pending.pop()!;
+    for (const imported of importPaths(files[from])) {
+      const path = resolveImport(from, imported);
+      if (
+        path === undefined ||
+        path in files ||
+        !SCRATCH_MOUNTS.some((mount) => isWithin(path, mount)) ||
+        (await ctx.tx.entryType(path)) !== 'file'
+      ) {
+        continue;
+      }
       files[path] = await ctx.tx.readFile(path);
-      count++;
+      pending.push(path);
     }
   }
   return files;
+}
+
+function resolveImport(from: string, imported: string) {
+  try {
+    return normalizeWorkspacePath(imported, parentPath(from), { clampAtRoot: true });
+  } catch {
+    return undefined;
+  }
+}
+
+/** The string literals following import, importstr, and importbin in Jsonnet source. */
+export function importPaths(source: string): string[] {
+  const paths: string[] = [];
+  for (const match of source.matchAll(IMPORT_KEYWORD)) {
+    const literal = readStringLiteral(source, match.index + match[0].length, match[3], match[2] === '@');
+    if (literal) {
+      paths.push(literal);
+    }
+  }
+  return paths;
+}
+
+function readStringLiteral(source: string, start: number, quote: string, verbatim: boolean) {
+  let value = '';
+  for (let i = start; i < source.length; i++) {
+    const char = source[i];
+    if (char === quote) {
+      if (verbatim && source[i + 1] === quote) {
+        value += quote;
+        i++;
+        continue;
+      }
+      return value;
+    }
+    if (char === '\\' && !verbatim) {
+      const next = source[++i];
+      if (next === 'u') {
+        value += String.fromCharCode(parseInt(source.slice(i + 1, i + 5), 16));
+        i += 4;
+      } else if (next !== undefined) {
+        value += STRING_ESCAPES[next] ?? next;
+      }
+      continue;
+    }
+    value += char;
+  }
+  return undefined;
+}
+
+/** A failure message when the backend would reject the request as too large, naming the largest files. */
+function oversizedRequest(files: Record<string, string>, entrypoint: string) {
+  const encoder = new TextEncoder();
+  const sizes = Object.entries(files).map(([path, content]) => ({ path, bytes: encoder.encode(content).length }));
+  const total = sizes.reduce((sum, file) => sum + file.bytes, 0);
+  const encoded = encoder.encode(JSON.stringify(files)).length;
+  if (total <= MAX_INPUT_BYTES && encoded <= MAX_ENCODED_FILES_BYTES) {
+    return undefined;
+  }
+  const largest = sizes
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, 5)
+    .map((file) => `${file.path} (${formatBytes(file.bytes)})`);
+  return (
+    `jsonnet: ${entrypoint} and the files it imports total ${formatBytes(total)}; the evaluator accepts at most ${formatBytes(MAX_INPUT_BYTES)}. Largest files sent:\n  ${largest.join('\n  ')}\n` +
+    'Import only what the program needs: extract the needed fields into a smaller file (for example with jq) and import that, or write the values into the Jsonnet source.\n'
+  );
+}
+
+function formatBytes(bytes: number) {
+  return bytes >= 1 << 20 ? `${(bytes / (1 << 20)).toFixed(1)} MiB` : `${Math.ceil(bytes / 1024)} KiB`;
 }
 
 function keyValues(parsed: ParsedArgs, name: string) {

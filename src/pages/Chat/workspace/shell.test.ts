@@ -327,8 +327,8 @@ describe('workspace persistence', () => {
 });
 
 describe('jsonnet command', () => {
-  function jsonnetSetup() {
-    const base = setup();
+  function jsonnetSetup(limits = {}) {
+    const base = setup(limits);
     const requests: Array<Record<string, any>> = [];
     const packageLoads: string[] = [];
     base.broker.jsonnet = {
@@ -376,13 +376,76 @@ describe('jsonnet command', () => {
     return { ...base, requests, packageLoads };
   }
 
-  it('evaluates workspace files CLI-style and sends importable files', async () => {
+  it('evaluates workspace files CLI-style and sends the files the entrypoint imports', async () => {
     const { run, requests } = jsonnetSetup();
-    await run(`mkdir -p lib && echo '{}' > lib/x.libsonnet && echo '{}' > dash.jsonnet && echo notes > n.bin`);
+    await run(
+      `mkdir -p lib && echo '{}' > lib/x.libsonnet && echo '{}' > lib/unused.libsonnet && echo "import 'lib/x.libsonnet'" > dash.jsonnet && echo notes > n.bin`
+    );
     const result = await run(`jsonnet dash.jsonnet -V title=Checkout | jq -r .title`);
     expect(result.stdout).toBe('Checkout\n');
     expect(Object.keys(requests[0].files).sort()).toEqual(['/workspace/dash.jsonnet', '/workspace/lib/x.libsonnet']);
     expect(requests[0].entrypoint).toBe('/workspace/dash.jsonnet');
+  });
+
+  it('does not send unrelated large scratch files', async () => {
+    const { run, requests } = jsonnetSetup({ maxWorkspaceBytes: 64 << 20 });
+    await run(
+      `seq 1 100000 > /tmp/n && cat /tmp/n /tmp/n /tmp/n /tmp/n /tmp/n /tmp/n /tmp/n /tmp/n > /workspace/evidence.json && cp /workspace/evidence.json /session/model.json && cp /workspace/evidence.json /tmp/raw.txt && echo '{}' > dash.jsonnet`
+    );
+    const result = await run('jsonnet dash.jsonnet | jq -r .title');
+    expect(result.exitCode).toBe(0);
+    expect(Object.keys(requests[0].files)).toEqual(['/workspace/dash.jsonnet']);
+  });
+
+  it('sends transitive imports resolved relative to the importing file', async () => {
+    const { run, requests } = jsonnetSetup();
+    await run(
+      [
+        'mkdir -p /workspace/app/lib /session/shared',
+        `echo "local l = import 'lib/panels.libsonnet'; local d = import \\"github.com/g42/pi-dashboard/main.libsonnet\\"; l" > /workspace/app/main.jsonnet`,
+        `echo "{ thresholds: importstr '../../thresholds.txt', shared: import '/session/shared/common.libsonnet', raw: importbin @'data''s.bin' }" > /workspace/app/lib/panels.libsonnet`,
+        'echo 80 > /workspace/thresholds.txt',
+        `echo "import '../../workspace/app/lib/panels.libsonnet'" > /session/shared/common.libsonnet`,
+        'echo x > "/workspace/app/lib/data\'s.bin"',
+        'echo unused > /workspace/app/lib/other.libsonnet',
+      ].join(' && ')
+    );
+    const result = await run('jsonnet /workspace/app/main.jsonnet | jq -r .title');
+    expect(result.exitCode).toBe(0);
+    expect(Object.keys(requests[0].files).sort()).toEqual([
+      '/session/shared/common.libsonnet',
+      "/workspace/app/lib/data's.bin",
+      '/workspace/app/lib/panels.libsonnet',
+      '/workspace/app/main.jsonnet',
+      '/workspace/thresholds.txt',
+    ]);
+  });
+
+  it('leaves imports of missing files to the evaluator', async () => {
+    const { run, broker } = jsonnetSetup();
+    const requests: Array<{ files: Record<string, string> }> = [];
+    broker.jsonnet!.evaluate = async (request) => {
+      requests.push(request);
+      throw new Error('RUNTIME ERROR: couldn\'t open import "missing.libsonnet": jsonnet import not found');
+    };
+    await run(`echo "import 'missing.libsonnet'" > dash.jsonnet`);
+    const result = await run('jsonnet dash.jsonnet');
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain('couldn\'t open import "missing.libsonnet"');
+    expect(Object.keys(requests[0].files)).toEqual(['/workspace/dash.jsonnet']);
+  });
+
+  it('names the largest imported files when the input exceeds the evaluator limit', async () => {
+    const { run, requests } = jsonnetSetup({ maxWorkspaceBytes: 64 << 20 });
+    await run(
+      `seq 1 100000 > n && cat n n n n n n n n > big.txt && echo '{}' > small.json && echo "{ a: importstr 'big.txt', b: import 'small.json' }" > dash.jsonnet`
+    );
+    const result = await run('jsonnet dash.jsonnet');
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toMatch(/evaluator accepts at most 4\.0 MiB/);
+    expect(result.stderr).toMatch(/Largest files sent:\n {2}\/workspace\/big\.txt \(4\.\d MiB\)/);
+    expect(result.stderr).toMatch(/Import only what the program needs/);
+    expect(requests).toHaveLength(0);
   });
 
   it('renders into a dashboard working copy with --resource', async () => {

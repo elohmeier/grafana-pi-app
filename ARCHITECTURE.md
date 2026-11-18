@@ -719,9 +719,13 @@ The Jsonnet backend (`pkg/plugin/jsonnet_eval.go`) is stateless:
 
 - `POST /jsonnet/eval` evaluates with `go-jsonnet`. Imports resolve against the
   workspace files sent with the request first, then the vendored libraries
-  embedded under `pkg/plugin/jsonnet/vendor`.
-- Requests are limited to 200 files and 4 MiB of input, output is limited to
-  4 MiB, and evaluation times out after 20 seconds.
+  embedded under `pkg/plugin/jsonnet/vendor`. The `jsonnet` command sends the
+  entrypoint and the scratch files it reaches through `import`, `importstr`,
+  and `importbin` (a static scan of the import string literals), not the
+  whole scratch filesystem.
+- Requests are limited to 4 MiB of input; the command refuses a larger request
+  and names its largest files. Output is limited to 4 MiB, and evaluation times
+  out after 20 seconds.
 - `POST /jsonnet/fix` rewrites common invalid Grafonnet constructor shapes into
   plain dashboard objects (`jsonnet_ast_repair.go`) and returns the repaired
   source and repair notes.
