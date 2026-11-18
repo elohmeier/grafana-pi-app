@@ -1,3 +1,26 @@
+## [7.0.1](https://github.com/elohmeier/grafana-pi-app/compare/v7.0.0...v7.0.1) (2026-11-18)
+
+### Bug Fixes
+
+* bound Prometheus discovery to a time window ([9185b20](https://github.com/elohmeier/grafana-pi-app/commit/9185b20bc8dbac4284069b2ae52fd0df21cbff17))
+* **deps:** update vulnerable dependencies and the plugin SDK ([7e67600](https://github.com/elohmeier/grafana-pi-app/commit/7e676001de4a08e921d40e378163db2d82d6e141))
+* describe shell and python3 capabilities accurately ([b07c736](https://github.com/elohmeier/grafana-pi-app/commit/b07c736c2aa23324cccd7fb18879013dc957b0a5))
+* drop PromQL size and diff output caps ([1261f71](https://github.com/elohmeier/grafana-pi-app/commit/1261f7199e5ccb8a4abd3ce09d634dffbc90e0e7))
+* drop the stray colon before upstream PromQL errors ([274af6c](https://github.com/elohmeier/grafana-pi-app/commit/274af6ccc37069aea2120ba326e6be50cd498ead))
+* emulate browser panel requests in grafana-dashboard data ([68b7062](https://github.com/elohmeier/grafana-pi-app/commit/68b7062ff5658a4f44da84174910353d9db29a19))
+* keep dashboard approval actions visible in large reviews ([73033b2](https://github.com/elohmeier/grafana-pi-app/commit/73033b20e09dca5574981ed6797f06eea4d2df5d))
+* keep host command output and name the running command on bash timeout ([b07979f](https://github.com/elohmeier/grafana-pi-app/commit/b07979f009ec2617a5efca1caa42f63c6d75415a))
+* keep leading whitespace inside quoted shell strings ([7f9519e](https://github.com/elohmeier/grafana-pi-app/commit/7f9519e2da1b8c85a6fa35da4eedcb24bc557894))
+* keep Responses API stream error messages ([74d9920](https://github.com/elohmeier/grafana-pi-app/commit/74d9920034098d3ea7d4df14190b9f3a5785a3a7))
+* keep UTF-8 intact when shell commands write byte output ([906c3ff](https://github.com/elohmeier/grafana-pi-app/commit/906c3ff15f7526c04bed64c6bf107ce12c08cd82))
+* let python3 read and edit the live dashboard ([68283f3](https://github.com/elohmeier/grafana-pi-app/commit/68283f31addcce24be2b9f99feb206b4f288fa77))
+* report each use of a datasource outside the allow-list ([8bd23e3](https://github.com/elohmeier/grafana-pi-app/commit/8bd23e35879007389b890caaebcdbc789be4c7ad))
+* resolve panel anchors and rows the way other commands do ([0eee478](https://github.com/elohmeier/grafana-pi-app/commit/0eee4781c45a258823b040c850076c8ffef629d4))
+* run grafana-prom query expressions concurrently ([4d09cf4](https://github.com/elohmeier/grafana-pi-app/commit/4d09cf4741403569183ccbe8aeeae211abf2f7a8))
+* send only imported files to jsonnet evaluation ([a07ea52](https://github.com/elohmeier/grafana-pi-app/commit/a07ea52c88dcb3cf45d4c57387e7391aa8e89c5e))
+* size panel data checks from the dashboard grid in the browser ([1475fae](https://github.com/elohmeier/grafana-pi-app/commit/1475faea5bd02cdf3ea1d1fe69293c10ef91dcce))
+* stop live apply from rejecting edits for problems it did not cause ([9874dba](https://github.com/elohmeier/grafana-pi-app/commit/9874dba9bd4abf2ae0bb4830587c74995909e9ee))
+
 ## [7.0.0](https://github.com/elohmeier/grafana-pi-app/compare/v6.2.0...v7.0.0) (2026-10-14)
 
 ### ⚠ BREAKING CHANGES
