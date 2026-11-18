@@ -1,3 +1,9 @@
+## [7.1.0](https://github.com/elohmeier/grafana-pi-app/compare/v7.0.1...v7.1.0) (2026-11-18)
+
+### Features
+
+* load custom skills from a skills directory on the Grafana server ([d154249](https://github.com/elohmeier/grafana-pi-app/commit/d1542499a6dc083ae58e6ae7b6116c38aa164e4c))
+
 ## [7.0.1](https://github.com/elohmeier/grafana-pi-app/compare/v7.0.0...v7.0.1) (2026-11-18)
 
 ### Bug Fixes
