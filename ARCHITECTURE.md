@@ -561,8 +561,14 @@ skills. The skills mount (`workspace/mounts.ts`) exposes every skill file and
 resource read-only, so the model reads a non-active skill or a reference with
 `read`. There is no separate skill resource tool.
 
-Custom skills are stored in `jsonData`. They are non-secret configuration and
-are sent to the model when active. Tool groups remain only as descriptive
+Custom skills are stored in `jsonData` or in the skills directory of the
+Grafana server (`skills_path`, docs/skills-directory.md), which the backend
+reads for every request of `/skills` (`pkg/plugin/skills.go`) because Grafana
+limits `jsonData` to 64 KiB. `skills/catalog.ts` merges bundled, directory, and
+`jsonData` skills in that order; an earlier skill wins over a later one of the
+same name. The chat and the assistant host load the directory skills before a
+run. Both kinds are non-secret configuration and are sent to the model when
+active. Tool groups remain only as descriptive
 metadata (`skills/catalog.ts`, `skills/configured.ts`). Custom skill
 validation still accepts the current group names and the retired
 `jsonnetFiles`, `jsonnetDashboards`, and `subagents` names so that existing
@@ -978,12 +984,14 @@ Routes are registered in `pkg/plugin/resources.go`:
 /jsonnet/fix
 /jsonnet-libs/files
 /promql/parse
+/skills
 /chats, /chats/{id}, /chats/{id}/open, /chats/{id}/log, /chats/{id}/commits
 ```
 
 `/jsonnet-libs/files` lists the vendored library files, or returns one
 package's contents for the `/lib/jsonnet` mount. `/promql/parse` checks
-PromQL syntax with the upstream Prometheus parser.
+PromQL syntax with the upstream Prometheus parser. `/skills` returns the skills
+of the skills directory, with the files it skipped.
 
 The old Jsonnet render/save, virtual-file, and agent-contract routes are gone.
 The backend uses Grafana's plugin app client secret only to build the authz

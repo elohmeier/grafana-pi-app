@@ -950,4 +950,5 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/jsonnet/fix", a.withAppAccess(a.handleJsonnetFix))
 	mux.HandleFunc("/jsonnet-libs/files", a.withAppAccess(a.handleJsonnetLibFiles))
 	mux.HandleFunc("/promql/parse", a.withAppAccess(a.handlePromQLParse))
+	mux.HandleFunc("/skills", a.withAppAccess(a.handleSkills))
 }

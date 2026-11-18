@@ -1,5 +1,6 @@
 export { GRAFANA_SKILLS, getGrafanaSkill, getGrafanaSkills } from './catalog';
 export { getConfiguredGrafanaSkills, parseCustomSkillsJson, validateCustomSkillsJson } from './configured';
+export { getDirectoryGrafanaSkills } from './directory';
 export { extractSkillReferences, selectGrafanaSkills } from './selection';
 export { renderGrafanaSystemPrompt } from './prompt';
 export type {

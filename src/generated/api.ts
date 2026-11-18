@@ -324,6 +324,55 @@ export interface PromQLParseResponse {
 }
 
 //////////
+// source: skills.go
+
+/**
+ * SkillsResponse is the response of GET /skills: the custom skills in the
+ * skills directory of the Grafana server.
+ */
+export interface SkillsResponse {
+  /**
+   * Configured is true when a skills directory is set.
+   */
+  configured: boolean;
+  skills: Skill[];
+  errors?: SkillError[];
+}
+/**
+ * Skill is one skill directory: SKILL.md and its text resources.
+ */
+export interface Skill {
+  name: string;
+  description: string;
+  /**
+   * Content is SKILL.md as written, with its frontmatter.
+   */
+  content: string;
+  disableModelInvocation?: boolean;
+  activation?: SkillActivation;
+  resources: SkillResource[];
+}
+export interface SkillActivation {
+  keywords?: string[];
+  regex?: string;
+  explicitOnly?: boolean;
+}
+export interface SkillResource {
+  /**
+   * Path is relative to the skill directory, for example references/runbook.md.
+   */
+  path: string;
+  content: string;
+}
+/**
+ * SkillError names a skill directory or file that was skipped.
+ */
+export interface SkillError {
+  path: string;
+  error: string;
+}
+
+//////////
 // source: telemetry.go
 
 /**

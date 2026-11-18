@@ -11,7 +11,7 @@ export const CUSTOM_SKILL_CONFIG_LIMITS = {
 
 export const CUSTOM_SKILL_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 
-const CUSTOM_SKILL_FILE_PREFIX = 'plugin-config/customSkills';
+export const CUSTOM_SKILL_FILE_PREFIX = 'plugin-config/customSkills';
 
 type ConfiguredSkillOptions = {
   reservedNames?: Iterable<string>;
@@ -107,7 +107,7 @@ function normalizeConfiguredSkill(
   };
 }
 
-function normalizeConfiguredSkillActivation(value: unknown): GrafanaSkillActivation {
+export function normalizeConfiguredSkillActivation(value: unknown): GrafanaSkillActivation {
   if (!isRecord(value)) {
     return { explicitOnly: true };
   }

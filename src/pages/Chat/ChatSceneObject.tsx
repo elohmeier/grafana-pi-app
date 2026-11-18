@@ -56,6 +56,8 @@ import {
 } from './chatMessages';
 import type { ChatAgentEvent } from './agentEvents';
 import { getGrafanaSkills } from './skills';
+import { fetchDirectorySkills } from './skills/directoryClient';
+import type { Skill } from '../../generated/api';
 import {
   ContentBlocks,
   ToolResultMessageBody,
@@ -212,7 +214,18 @@ export function ChatApp({
         },
       ]
     : THINKING_LEVEL_OPTIONS;
-  const skills = useMemo(() => getGrafanaSkills(jsonData), [jsonData]);
+  // Skills of the server's skills directory; undefined while loading.
+  const [directorySkills, setDirectorySkills] = useState<Skill[]>();
+  useEffect(() => {
+    let mounted = true;
+    fetchDirectorySkills()
+      .then((response) => mounted && setDirectorySkills(response.skills ?? []))
+      .catch(() => mounted && setDirectorySkills([]));
+    return () => {
+      mounted = false;
+    };
+  }, []);
+  const skills = useMemo(() => getGrafanaSkills(jsonData, undefined, directorySkills), [jsonData, directorySkills]);
   const assistantTelemetry = useMemo(() => createAssistantTelemetryReporter(), []);
   const streamFn = useMemo<AssistantStreamFn>(
     () =>
@@ -811,7 +824,8 @@ export function ChatApp({
     initialAutoSend,
     initialChatId,
   });
-  const initialConfigPending = !pluginMetaJsonData.isOpenAIAPIKeySet && settingsJsonData === undefined;
+  const initialConfigPending =
+    (!pluginMetaJsonData.isOpenAIAPIKeySet && settingsJsonData === undefined) || directorySkills === undefined;
 
   useLayoutEffect(() => {
     initialLoadHandlersRef.current = {

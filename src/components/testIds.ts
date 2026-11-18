@@ -23,6 +23,7 @@ export const testIds = {
     sqlDatasourceRow: 'data-testid ac-sql-datasource-row',
     sqlDatasourceAdd: 'data-testid ac-sql-datasource-add',
     sqlDatasourceDelete: 'data-testid ac-sql-datasource-delete',
+    directorySkills: 'data-testid ac-directory-skills',
     customSkillsEditor: 'data-testid ac-custom-skills-editor',
     customSkillsJson: 'data-testid ac-custom-skills-json',
     customSkillsJsonOpen: 'data-testid ac-custom-skills-json-open',

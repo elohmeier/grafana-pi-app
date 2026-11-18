@@ -7,6 +7,7 @@ import { AssistantSession, type SessionHost } from '../pages/Chat/session/Assist
 import { getGrafanaSkills } from '../pages/Chat/skills';
 import type { WorkspaceBroker } from '../pages/Chat/workspace/broker';
 import type { PythonRunner } from '../pages/Chat/workspace/python/pythonCommand';
+import type { Skill } from '../generated/api';
 import type { PiAppJsonData } from '../types';
 
 /** What the model is told about answering outside Grafana. */
@@ -42,6 +43,8 @@ export type AssistantAnswer = {
 export type AssistantHostOptions = {
   /** Plugin settings as stored in Grafana, read again for every run. */
   jsonData: () => Promise<PiAppJsonData>;
+  /** Skills of the skills directory of the Grafana server, read again for every run. */
+  directorySkills?: () => Promise<readonly Skill[]>;
   streamFn: AssistantStreamFn;
   broker: (jsonData: PiAppJsonData) => WorkspaceBroker;
   chatLog: ChatLogClient;
@@ -135,7 +138,7 @@ export class AssistantHost {
       systemPromptAddendum: [jsonData.systemPromptAddendum, CHANNEL_PROMPT].filter(Boolean).join('\n\n'),
     };
     const broker = this.options.broker(settings);
-    const skills = getGrafanaSkills(settings);
+    const skills = getGrafanaSkills(settings, undefined, await (this.options.directorySkills?.() ?? []));
     const session = new AssistantSession({ id: chat.id, stored: chat.stored });
     const host: SessionHost = {
       chatLog: this.options.chatLog,

@@ -13,6 +13,7 @@ require (
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/prometheus v0.313.0
 	modernc.org/sqlite v1.60.1
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -117,7 +118,6 @@ require (
 	modernc.org/libc v1.77.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
 tool github.com/gzuidhof/tygo

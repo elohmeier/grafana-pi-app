@@ -7,6 +7,7 @@ import { PLUGIN_ID } from '../constants';
 import { grafanaChatLog } from '../pages/Chat/durable/grafanaChatLog';
 import { createGrafanaStreamFn } from '../pages/Chat/grafanaStream';
 import { renderDashboardScreenshot } from '../pages/Chat/domain/dashboards';
+import { fetchDirectorySkills } from '../pages/Chat/skills/directoryClient';
 import { createGrafanaWorkspaceBroker } from '../pages/Chat/workspace/grafanaBroker';
 import type { WorkspaceBroker } from '../pages/Chat/workspace/broker';
 import type { PiAppJsonData } from '../types';
@@ -83,6 +84,14 @@ function createBroker(settings: PiAppJsonData): WorkspaceBroker {
 
 const assistant = new AssistantHost({
   jsonData,
+  directorySkills: () =>
+    fetchDirectorySkills().then(
+      (response) => response.skills ?? [],
+      (error) => {
+        log(`skills directory: ${error instanceof Error ? error.message : error}`);
+        return [];
+      }
+    ),
   streamFn: createGrafanaStreamFn({
     proxyUrl: `${grafanaUrl}/api/plugins/${PLUGIN_ID}/resources/llm`,
     refreshSession: async () => undefined,

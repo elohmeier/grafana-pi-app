@@ -70,6 +70,7 @@ services:
       - 'host.docker.internal:host-gateway'
     volumes:
       - ${PI_PLUGIN_PROVISIONING_FILE:-./provisioning/plugins/app.yaml}:/etc/grafana/provisioning/plugins/app.yaml:ro
+      - ./provisioning/grafana.ini:/etc/grafana/grafana.ini:ro
     environment:
       PI_PLUGIN_ID: g42-pi-app
       GF_LOG_FILTERS: plugin.g42-pi-app:debug
@@ -123,6 +124,7 @@ services:
       - ./dist:/var/lib/grafana/plugins/grafana-assistant-app
       - ./provisioning:/etc/grafana/provisioning
       - ${PI_PLUGIN_PROVISIONING_FILE:-./provisioning/plugins/app.yaml}:/etc/grafana/provisioning/plugins/app.yaml:ro
+      - ./provisioning/grafana.ini:/etc/grafana/grafana.ini:ro
       - .:/root/elohmeier-grafanapiapp-app
     environment:
       NODE_ENV: development

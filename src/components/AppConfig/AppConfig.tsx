@@ -41,6 +41,7 @@ import {
 } from '../../utils/access';
 import { AlertChannels } from './AlertChannels';
 import { CustomSkillsEditor } from './CustomSkillsEditor';
+import { DirectorySkills } from './DirectorySkills';
 import { LogDatasourcesEditor, serializeLogDatasources } from './LogDatasourcesEditor';
 import { SqlDatasourcesEditor, serializeSqlDatasources } from './SqlDatasourcesEditor';
 import {
@@ -557,6 +558,7 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
         </FieldSet>
 
         <FieldSet label="Custom skills" className={s.marginTopXl}>
+          <DirectorySkills customSkillNames={state.customSkills.map((skill) => skill.name ?? '')} />
           <CustomSkillsEditor
             value={state.customSkills}
             issues={customSkillIssues}
