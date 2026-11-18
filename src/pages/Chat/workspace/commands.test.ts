@@ -342,6 +342,26 @@ describe('live dashboard file', () => {
     expect(discard.stdout).toBe('true\n0\n');
     expect(applied).toHaveLength(0);
   });
+
+  it('explains that screenshots render saved dashboards, not the live state', async () => {
+    const { run } = liveSetup();
+    const result = await run('grafana-dashboard screenshot /live/dashboard/dashboard.json --panel 1');
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('the image renderer shows saved dashboards only');
+  });
+
+  it('selects v2 panels for a label filter by element name or numeric id', async () => {
+    const { run } = liveSetup();
+    for (const panel of ['1', 'panel-1']) {
+      const filter = await run(
+        `grafana-dashboard label-filter /live/dashboard/dashboard.json --label job --panel ${panel} | jq -c '[.changed[].panel]'; live discard > /dev/null`
+      );
+      expect(filter.stderr).toBe('');
+      expect(filter.stdout).toBe('["panel-1"]\n');
+    }
+    const missing = await run('grafana-dashboard label-filter /live/dashboard/dashboard.json --label job --panel 7');
+    expect(missing.stderr).toContain('no panel "7" with queries');
+  });
 });
 
 describe('grafana-dashboard label-filter on classic working copies', () => {

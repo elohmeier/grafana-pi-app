@@ -9,13 +9,13 @@ import { collectDashboardData } from '../dashboardData';
 import { applyDashboardLabelFilter } from '../dashboardLabelFilter';
 import { addPanel, setPanel, type PanelEditReport, type PanelQueryInput } from '../dashboardPanelEdit';
 import type { WorkspaceBroker } from '../broker';
-import { LIVE_DASHBOARD_PATH } from '../liveDashboard';
+import { LIVE_DASHBOARD_PATH, LIVE_DASHBOARD_ROOT } from '../liveDashboard';
 import { DashboardWalkError } from '../dashboardPanels';
 import { listDashboardQueries } from '../dashboardQueries';
 import { checkScreenshot } from '../screenshotGuard';
 import { DASHBOARDS_ROOT, HYDRATION_CONCURRENCY } from '../workspace';
 import { dashboardUid } from './alerts';
-import { normalizeWorkspacePath } from '../paths';
+import { isWithin, normalizeWorkspacePath } from '../paths';
 import {
   fail,
   json,
@@ -507,13 +507,19 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
       },
       examples: ['grafana-dashboard screenshot checkout --panel 4 --from now-6h'],
       async run(parsed, ctx) {
-        const screenshot = ctx.broker.ui?.screenshot;
-        if (!screenshot) {
-          throw new Error('dashboard rendering is not available in this session');
-        }
         const arg = parsed.positionals[0];
         if (!arg) {
           throw new UsageError('UID or PATH is required');
+        }
+        if (isWithin(normalizeWorkspacePath(arg, ctx.cwd), LIVE_DASHBOARD_ROOT)) {
+          // The image renderer loads the dashboard on the server, so only saved versions can be rendered.
+          throw new Error(
+            'the image renderer shows saved dashboards only, not the unsaved state in the browser; check unsaved panels with `grafana-dashboard data /live/dashboard/dashboard.json --panel ID`, or screenshot the saved version by its UID (see /live/dashboard/info.json)'
+          );
+        }
+        const screenshot = ctx.broker.ui?.screenshot;
+        if (!screenshot) {
+          throw new Error('dashboard rendering is not available in this session');
         }
         const uid = dashboardUid(arg);
         const panelId = typeof parsed.options.panel === 'number' ? parsed.options.panel : undefined;

@@ -264,6 +264,67 @@ describe('addPanel placement', () => {
   });
 });
 
+describe('addPanel anchors inside rows', () => {
+  const item = (name: string, x: number, y: number, width: number) => ({
+    kind: 'GridLayoutItem',
+    spec: { x, y, width, height: 8, element: { kind: 'ElementReference', name } },
+  });
+  const panel = (id: number) => ({
+    kind: 'Panel',
+    spec: {
+      id,
+      title: `P${id}`,
+      data: { kind: 'QueryGroup', spec: { queries: [v2Query('A', 'prometheus', 'prom-main', { expr: 'up' })] } },
+    },
+  });
+  const row = (title: string, items: AnyRecord[]) => ({
+    kind: 'RowsLayoutRow',
+    spec: { title, layout: { kind: 'GridLayout', spec: { items } } },
+  });
+
+  it('finds a v2 anchor by numeric id in its row, even when its element name differs', () => {
+    const doc: AnyRecord = {
+      spec: {
+        title: 'T',
+        // Element names need not match ids, for example after Grafana rekeys elements.
+        elements: { 'panel-1': panel(1), 'panel-12': panel(9) },
+        layout: {
+          kind: 'RowsLayout',
+          spec: { rows: [row('First', [item('panel-1', 0, 0, 12)]), row('Second', [item('panel-12', 0, 0, 12)])] },
+        },
+        variables: [],
+      },
+    };
+    const report = addPanel(doc, { title: 'Beside', queries: [promQuery], rightOf: '9', w: 12 });
+    expect(report.position).toEqual({ x: 12, y: 0, w: 12, h: 8 });
+    const second = doc.spec.layout.spec.rows[1].spec.layout.spec.items;
+    expect(second.map((entry: AnyRecord) => entry.spec.element.name)).toEqual(['panel-12', report.panel]);
+  });
+
+  it('places a classic panel in the collapsed row of its anchor', () => {
+    const doc = classicWith([
+      {
+        id: 1,
+        type: 'row',
+        title: 'Hidden',
+        collapsed: true,
+        gridPos: { x: 0, y: 0, w: 24, h: 1 },
+        panels: [{ id: 2, type: 'timeseries', title: 'Inner', gridPos: { x: 0, y: 1, w: 12, h: 8 }, targets: [] }],
+      },
+    ]);
+    const report = addPanel(doc, { title: 'Beside', queries: [promQuery], rightOf: '2', w: 12 });
+    expect(report.position).toEqual({ x: 12, y: 1, w: 12, h: 8 });
+    expect(doc.spec.panels[0].panels.map((entry: AnyRecord) => entry.title)).toEqual(['Inner', 'Beside']);
+  });
+
+  it('lists the existing rows when --row names none of them', () => {
+    const doc = classicWith([{ id: 1, type: 'row', title: 'Traffic', gridPos: { x: 0, y: 0, w: 24, h: 1 } }]);
+    expect(() => addPanel(doc, { title: 'X', queries: [promQuery], row: 'Latency' })).toThrow(
+      'no row titled "Latency"; existing: "Traffic". Rows are not created by add-panel.'
+    );
+  });
+});
+
 describe('addPanel --like', () => {
   it('copies visualization, field config, options, and the query datasource from the reference panel', () => {
     const doc = classicRows();

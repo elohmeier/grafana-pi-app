@@ -39,6 +39,8 @@ export type DashboardLabelFilterReport = {
 
 type QueryRef = {
   panel: string;
+  /** Other names that select the panel: the numeric id of a v2 element. */
+  aliases?: string[];
   title?: string;
   refId: string;
   datasourceType?: string;
@@ -73,8 +75,10 @@ export function applyDashboardLabelFilter(
   const wantedPanels = options.panels?.length ? new Set(options.panels) : undefined;
   const wantedRefIds = options.refIds?.length ? new Set(options.refIds) : undefined;
   const queries = format === 'v2' ? v2Queries(spec) : classicQueries(spec);
+  const selected = (query: QueryRef) =>
+    !wantedPanels || wantedPanels.has(query.panel) || (query.aliases ?? []).some((alias) => wantedPanels.has(alias));
   if (wantedPanels) {
-    const found = new Set(queries.map((query) => query.panel));
+    const found = new Set(queries.flatMap((query) => [query.panel, ...(query.aliases ?? [])]));
     const missing = [...wantedPanels].filter((panel) => !found.has(panel));
     if (missing.length > 0) {
       throw new Error(`no panel ${missing.map((panel) => JSON.stringify(panel)).join(', ')} with queries`);
@@ -84,7 +88,7 @@ export function applyDashboardLabelFilter(
   // Plan every edit first so a parse failure leaves the document untouched.
   const planned: Array<{ query: QueryRef; after: string }> = [];
   for (const query of queries) {
-    if ((wantedPanels && !wantedPanels.has(query.panel)) || (wantedRefIds && !wantedRefIds.has(query.refId))) {
+    if (!selected(query) || (wantedRefIds && !wantedRefIds.has(query.refId))) {
       continue;
     }
     const expression = query.get();
@@ -183,6 +187,7 @@ function v2Queries(spec: Record<string, any>): QueryRef[] {
       const querySpec = query.spec;
       refs.push({
         panel: name,
+        aliases: typeof element.spec.id === 'number' ? [String(element.spec.id)] : [],
         title: typeof element.spec.title === 'string' ? element.spec.title : undefined,
         refId: typeof panelQuery.spec.refId === 'string' ? panelQuery.spec.refId : 'A',
         datasourceType: typeof query.group === 'string' ? query.group : undefined,

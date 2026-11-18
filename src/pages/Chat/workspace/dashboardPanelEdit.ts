@@ -97,10 +97,27 @@ function addClassicPanel(spec: AnyRecord, options: AddPanelOptions): PanelEditRe
     classicPrometheusUid(all);
   let container: AnyRecord[] = spec.panels;
   let siblings = spec.panels.filter((panel: AnyRecord) => panel?.type !== 'row');
-  if (options.row) {
-    const row = spec.panels.find((panel: AnyRecord) => panel?.type === 'row' && panel.title === options.row);
+  // An anchor inside a collapsed row places the panel in that row.
+  const anchorKey = options.rightOf ?? options.below;
+  const anchorRow =
+    !options.row && anchorKey && !siblings.some((panel: AnyRecord) => String(panel.id) === anchorKey)
+      ? spec.panels.find(
+          (panel: AnyRecord) =>
+            panel?.type === 'row' &&
+            Array.isArray(panel.panels) &&
+            panel.panels.some((child: AnyRecord) => String(child?.id) === anchorKey)
+        )
+      : undefined;
+  const rowTitle: string | undefined = options.row ?? anchorRow?.title;
+  if (rowTitle !== undefined) {
+    const row = anchorRow ?? spec.panels.find((panel: AnyRecord) => panel?.type === 'row' && panel.title === rowTitle);
     if (!row) {
-      throw new Error(`no row titled ${JSON.stringify(options.row)}`);
+      const titles = spec.panels
+        .filter((panel: AnyRecord) => panel?.type === 'row')
+        .map((panel: AnyRecord) => JSON.stringify(panel.title ?? ''));
+      throw new Error(
+        `no row titled ${JSON.stringify(rowTitle)}; ${titles.length ? `existing: ${titles.join(', ')}` : 'the dashboard has no rows'}. Rows are not created by add-panel.`
+      );
     }
     if (row.collapsed) {
       row.panels = Array.isArray(row.panels) ? row.panels : [];
@@ -113,7 +130,7 @@ function addClassicPanel(spec: AnyRecord, options: AddPanelOptions): PanelEditRe
   const { position, note } = place(
     options,
     siblings.map((panel: AnyRecord) => ({ key: String(panel.id), ...classicGrid(panel) })),
-    options.row ? classicRowFloor(spec.panels, options.row) : 0
+    rowTitle !== undefined ? classicRowFloor(spec.panels, rowTitle) : 0
   );
   const like = options.like ? referencePanel : undefined;
   const panel = {
@@ -372,7 +389,9 @@ function addV2Panel(spec: AnyRecord, options: AddPanelOptions): PanelEditReport 
   for (let suffix = 2; name in elements; suffix++) {
     name = `panel-${id}-${suffix}`;
   }
-  const anchor = options.rightOf ?? options.below;
+  // Anchors may be given by numeric panel id; grids reference elements by name.
+  const anchorKey = options.rightOf ?? options.below;
+  const anchor = anchorKey ? (v2ElementName(elements, anchorKey) ?? anchorKey) : undefined;
   const grid = anchor
     ? (findV2GridOf(spec.layout, anchor) ?? targetV2Grid(spec, options.row))
     : targetV2Grid(spec, options.row);
@@ -426,7 +445,7 @@ function addV2Panel(spec: AnyRecord, options: AddPanelOptions): PanelEditReport 
   }
   const items: AnyRecord[] = grid.node.spec.items;
   const { position, note } = place(
-    options,
+    { ...options, ...(options.rightOf ? { rightOf: anchor } : {}), ...(options.below ? { below: anchor } : {}) },
     items.map((item) => ({ key: item.spec?.element?.name, ...v2Grid(item) })),
     0
   );
@@ -617,7 +636,10 @@ function targetV2Grid(spec: AnyRecord, row: string | undefined): V2Grid {
     }
     const selected = row ? children.find((child) => child?.spec?.title === row) : children[children.length - 1];
     if (!selected) {
-      throw new Error(`no row or tab titled ${JSON.stringify(row)}`);
+      const titles = children.map((child) => JSON.stringify(child?.spec?.title ?? '')).join(', ');
+      throw new Error(
+        `no row or tab titled ${JSON.stringify(row)}; existing: ${titles}. Rows are not created by add-panel.`
+      );
     }
     selected.spec.layout = isRecord(selected.spec.layout)
       ? selected.spec.layout
