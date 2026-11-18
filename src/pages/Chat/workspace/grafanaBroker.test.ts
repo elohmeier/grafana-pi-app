@@ -8,7 +8,7 @@ jest.mock('@grafana/runtime', () => ({
 
 import { getBackendSrv } from '@grafana/runtime';
 import { of } from 'rxjs';
-import { createGrafanaWorkspaceBroker } from './grafanaBroker';
+import { createGrafanaWorkspaceBroker, promqlParseBatches } from './grafanaBroker';
 
 const DASHBOARDS = '/apis/dashboard.grafana.app';
 
@@ -145,5 +145,20 @@ describe('alert rule broker', () => {
     expect(result).toMatchObject({ outcome: 'conflicted', error: expect.stringContaining('revision 3, now 4') });
     expect((await broker.delete('high-5xx', '3')).outcome).toBe('conflicted');
     expect(fetch.mock.calls.some(([options]) => options.method === 'PUT' || options.method === 'DELETE')).toBe(false);
+  });
+});
+
+describe('PromQL parse batches', () => {
+  it('splits by query count and size, keeping order and oversized expressions alone', () => {
+    const small = Array.from({ length: 1001 }, (_, index) => ({ id: String(index), expr: 'up' }));
+    expect(promqlParseBatches(small).map((batch) => batch.length)).toEqual([500, 500, 1]);
+
+    const large = 'x'.repeat(2 << 20);
+    const batches = promqlParseBatches([
+      { id: 'a', expr: large },
+      { id: 'b', expr: large },
+      { id: 'c', expr: 'up' },
+    ]);
+    expect(batches.map((batch) => batch.map((query) => query.id))).toEqual([['a'], ['b', 'c']]);
   });
 });

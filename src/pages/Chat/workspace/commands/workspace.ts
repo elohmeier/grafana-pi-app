@@ -1,10 +1,8 @@
 import { createTwoFilesPatch } from 'diff';
-import { normalizeWorkspacePath, truncateUtf8 } from '../paths';
+import { normalizeWorkspacePath } from '../paths';
 import { ApplyError, applyWorkspaceChanges, selectsEntry, stageRevert } from '../apply';
 import { groupChanges } from '../changeGroups';
 import { fail, json, listOption, ok, UsageError, type WorkspaceCommandSpec } from './registry';
-
-const MAX_DIFF_BYTES = 60_000;
 
 export const workspaceCommand: WorkspaceCommandSpec = {
   name: 'workspace',
@@ -103,11 +101,8 @@ export const workspaceCommand: WorkspaceCommandSpec = {
             )
           );
         }
-        const limited = truncateUtf8(patches.join('\n'), MAX_DIFF_BYTES);
-        return ok(
-          limited.text,
-          limited.truncated ? `# diff truncated at ${MAX_DIFF_BYTES} bytes; pass PATH to narrow\n` : ''
-        );
+        // Complete, so a redirected diff is the whole change; the bash tool bounds what the model sees.
+        return ok(patches.join('\n'));
       },
     },
     discard: {

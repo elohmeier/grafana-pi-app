@@ -152,22 +152,51 @@ export function createGrafanaWorkspaceBroker(toolConfig: GrafanaToolConfig): Wor
   };
 }
 
+/** Per-request limits of the backend PromQL parser (pkg/plugin/promql.go), with headroom for JSON encoding. */
+const PROMQL_PARSE_BATCH_QUERIES = 500;
+const PROMQL_PARSE_BATCH_BYTES = 3 << 20;
+
 function createPromqlParser(): PromqlParser {
   return {
     name: 'prometheus',
     async parse(queries, signal) {
-      const response = await request<PromQLParseResponse>(
-        'POST',
-        `/api/plugins/${PLUGIN_ID}/resources/promql/parse`,
-        { queries } satisfies PromQLParseRequest,
-        signal
-      );
-      if (!response.ok) {
-        throw new Error(`PromQL parser unavailable: ${response.message}`);
+      const results = [];
+      for (const batch of promqlParseBatches(queries)) {
+        const response = await request<PromQLParseResponse>(
+          'POST',
+          `/api/plugins/${PLUGIN_ID}/resources/promql/parse`,
+          { queries: batch } satisfies PromQLParseRequest,
+          signal
+        );
+        if (!response.ok) {
+          throw new Error(`PromQL parser unavailable: ${response.message}`);
+        }
+        results.push(...(response.data.results ?? []));
       }
-      return response.data.results ?? [];
+      return results;
     },
   };
+}
+
+/** Splits queries into requests the parser accepts, so dashboards of any size are checked. */
+export function promqlParseBatches<T extends { expr: string }>(queries: T[]): T[][] {
+  const batches: T[][] = [];
+  let batch: T[] = [];
+  let bytes = 0;
+  for (const query of queries) {
+    const size = new TextEncoder().encode(query.expr).length;
+    if (batch.length > 0 && (batch.length >= PROMQL_PARSE_BATCH_QUERIES || bytes + size > PROMQL_PARSE_BATCH_BYTES)) {
+      batches.push(batch);
+      batch = [];
+      bytes = 0;
+    }
+    batch.push(query);
+    bytes += size;
+  }
+  if (batch.length > 0) {
+    batches.push(batch);
+  }
+  return batches;
 }
 
 let libraryListing: Promise<JsonnetLibFilesResponse> | undefined;

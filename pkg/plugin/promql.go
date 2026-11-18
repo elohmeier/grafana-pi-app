@@ -11,9 +11,9 @@ import (
 	"github.com/elohmeier/grafana-pi-app/pkg/api"
 )
 
+// Request limits protect the backend; the frontend batches larger checks.
 const (
 	promQLParseMaxQueries    = 500
-	promQLParseMaxExprBytes  = 64 << 10
 	promQLParseMaxInputBytes = 4 << 20
 )
 
@@ -51,9 +51,7 @@ func parsePromQLQueries(queries []api.PromQLParseQuery) ([]api.PromQLParseResult
 	results := make([]api.PromQLParseResult, 0, len(queries))
 	for _, query := range queries {
 		result := api.PromQLParseResult{ID: query.ID}
-		if len(query.Expr) > promQLParseMaxExprBytes {
-			result.Error = fmt.Sprintf("expression too large (%d bytes)", len(query.Expr))
-		} else if _, err := p.ParseExpr(query.Expr); err != nil {
+		if _, err := p.ParseExpr(query.Expr); err != nil {
 			result.Error = err.Error()
 			var parseErrs parser.ParseErrors
 			if errors.As(err, &parseErrs) && len(parseErrs) > 0 {

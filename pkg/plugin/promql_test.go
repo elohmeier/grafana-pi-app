@@ -37,8 +37,10 @@ func TestParsePromQLQueriesLimits(t *testing.T) {
 	if _, err := parsePromQLQueries(make([]api.PromQLParseQuery, promQLParseMaxQueries+1)); err == nil {
 		t.Fatal("expected an error for too many queries")
 	}
-	results, err := parsePromQLQueries([]api.PromQLParseQuery{{ID: "big", Expr: strings.Repeat("a", promQLParseMaxExprBytes+1)}})
-	if err != nil || !strings.Contains(results[0].Error, "too large") {
-		t.Fatalf("expected size error, got %+v %v", results, err)
+	// Generated dashboards hold expressions far larger than hand-written ones.
+	large := "sum(" + strings.Repeat(`up{job="a"} or `, 10000) + `up{job="a"})`
+	results, err := parsePromQLQueries([]api.PromQLParseQuery{{ID: "big", Expr: large}})
+	if err != nil || results[0].Error != "" {
+		t.Fatalf("expected a large expression to parse, got %+v %v", results, err)
 	}
 }

@@ -2,10 +2,8 @@ import { createTwoFilesPatch } from 'diff';
 import { describeDashboardRemovals } from '../dashboardChanges';
 import { validateDashboardDocument } from '../dashboardModel';
 import { LIVE_DASHBOARD_PATH, liveDashboardDocument, liveRevision } from '../liveDashboard';
-import { truncateUtf8 } from '../paths';
 import { fail, json, ok, type WorkspaceCommandContext, type WorkspaceCommandSpec } from './registry';
 
-const MAX_DIFF_BYTES = 60_000;
 /** The browser state before the last `live apply`; /tmp lasts as long as the page, like the unsaved state. */
 const LIVE_UNDO_PATH = '/tmp/live/before-apply.json';
 
@@ -51,8 +49,8 @@ export const liveCommand: WorkspaceCommandSpec = {
         const patch = createTwoFilesPatch('a/live', 'b/live', current, staged.content, undefined, undefined, {
           context: 3,
         });
-        const limited = truncateUtf8(patch, MAX_DIFF_BYTES);
-        return ok(limited.text, limited.truncated ? `# diff truncated at ${MAX_DIFF_BYTES} bytes\n` : '');
+        // Complete, so a redirected diff is the whole change; the bash tool bounds what the model sees.
+        return ok(patch);
       },
     },
     apply: {
