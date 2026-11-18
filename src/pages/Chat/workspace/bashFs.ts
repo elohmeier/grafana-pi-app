@@ -27,26 +27,27 @@ const DEV_NULL = '/dev/null';
 export class WorkspaceBashFs implements IFileSystem {
   constructor(private readonly tx: WorkspaceTransaction) {}
 
-  async readFile(path: string, _options?: { encoding?: BufferEncoding | null } | BufferEncoding): Promise<string> {
+  async readFile(path: string, options?: { encoding?: BufferEncoding | null } | BufferEncoding): Promise<string> {
     const normalized = this.normalize(path);
-    return normalized === DEV_NULL ? '' : this.tx.readFile(normalized);
+    const text = normalized === DEV_NULL ? '' : await this.tx.readFile(normalized);
+    return isByteEncoding(options) ? latin1FromBytes(new TextEncoder().encode(text)) : text;
   }
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
     return new TextEncoder().encode(await this.readFile(path));
   }
 
-  async writeFile(path: string, content: FileContent): Promise<void> {
+  async writeFile(path: string, content: FileContent, options?: WriteOptions): Promise<void> {
     const normalized = this.normalize(path);
     if (normalized !== DEV_NULL) {
-      await this.tx.writeFile(normalized, decodeContent(content));
+      await this.tx.writeFile(normalized, decodeContent(content, options));
     }
   }
 
-  async appendFile(path: string, content: FileContent): Promise<void> {
+  async appendFile(path: string, content: FileContent, options?: WriteOptions): Promise<void> {
     const normalized = this.normalize(path);
     if (normalized !== DEV_NULL) {
-      await this.tx.appendFile(normalized, decodeContent(content));
+      await this.tx.appendFile(normalized, decodeContent(content, options));
     }
   }
 
@@ -158,7 +159,35 @@ export class WorkspaceBashFs implements IFileSystem {
   }
 }
 
-function decodeContent(content: FileContent) {
-  const text = typeof content === 'string' ? content : new TextDecoder().decode(content);
+/**
+ * just-bash passes byte output (`cat`, `cut`, `tee`, redirections of byte
+ * commands) as a latin1 string with one char per byte and the encoding
+ * `binary`. The session filesystem stores text, so those bytes are decoded
+ * as UTF-8; treating them as text would store every multibyte character as
+ * mojibake (`ä` as `Ã¤`).
+ */
+function decodeContent(content: FileContent, options?: WriteOptions) {
+  const bytes =
+    typeof content !== 'string'
+      ? content
+      : isByteEncoding(options)
+        ? Uint8Array.from(content, (char) => char.charCodeAt(0) & 0xff)
+        : undefined;
+  const text = bytes ? new TextDecoder().decode(bytes) : (content as string);
   return text.replace(/\r\n/g, '\n');
+}
+
+type WriteOptions = { encoding?: BufferEncoding | null } | BufferEncoding | null;
+
+function isByteEncoding(options: WriteOptions | undefined) {
+  const encoding = typeof options === 'string' ? options : options?.encoding;
+  return encoding === 'binary' || encoding === 'latin1';
+}
+
+function latin1FromBytes(bytes: Uint8Array) {
+  let text = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    text += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return text;
 }
