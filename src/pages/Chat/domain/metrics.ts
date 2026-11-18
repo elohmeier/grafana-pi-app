@@ -13,7 +13,7 @@ import {
 import { config, getDataSourceSrv } from '@grafana/runtime';
 import { lastValueFrom, type Observable } from 'rxjs';
 import { backendFetch, formatBackendFetchError } from './client';
-import { cleanPrometheusError } from './prometheusErrors';
+import { describePrometheusError } from './prometheusErrors';
 import { throwIfAborted } from './result';
 import type { GrafanaToolConfig, PrometheusQuerySpec, ResourceCapableDataSource } from './types';
 
@@ -226,7 +226,7 @@ export async function getDatasourceResource<T>(
     });
   } catch (error) {
     throw new Error(
-      `Prometheus resource ${path} failed for datasource ${ds.uid ?? 'unknown'}: ${formatBackendFetchError(error)}`
+      `Prometheus resource ${path} failed for datasource ${ds.uid ?? 'unknown'}: ${describePrometheusError(formatBackendFetchError(error))}`
     );
   }
 }
@@ -329,7 +329,7 @@ function prometheusQueryResponseError(response: DataQueryResponse): Error {
     stringRecordValue(first, 'status'),
   ]
     .filter((value): value is string => Boolean(value))
-    .map(cleanPrometheusError);
+    .map(describePrometheusError);
   const status = numberRecordValue(first, 'status') ?? numberRecordValue(first, 'statusCode');
   const reason = candidates.find((value) => !GENERIC_QUERY_ERRORS.has(value));
   const statusSuffix = status !== undefined && !reason?.includes(String(status)) ? ` (status ${status})` : '';

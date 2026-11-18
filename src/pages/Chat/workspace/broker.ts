@@ -197,27 +197,34 @@ export type PrometheusDatasourceInfo = {
   timeInterval?: string;
 };
 
+/** Time window of a Prometheus metadata request, in epoch milliseconds. */
+export type PrometheusTimeWindow = { start: number; end: number };
+
 export type PrometheusBroker = {
   datasources: () => PrometheusDatasourceInfo[];
   metricNames: (
     datasourceUid: string | undefined,
+    window: PrometheusTimeWindow,
     signal?: AbortSignal
   ) => Promise<{ datasourceUid: string; names: string[] }>;
   labelNames: (
     datasourceUid: string | undefined,
     match: string | undefined,
+    window: PrometheusTimeWindow,
     signal?: AbortSignal
   ) => Promise<{ datasourceUid: string; names: string[] }>;
   labelValues: (
     datasourceUid: string | undefined,
     label: string,
     match: string | undefined,
+    window: PrometheusTimeWindow,
     signal?: AbortSignal
   ) => Promise<{ datasourceUid: string; values: string[] }>;
   series: (
     datasourceUid: string | undefined,
     match: string,
     limit: number,
+    window: PrometheusTimeWindow,
     signal?: AbortSignal
   ) => Promise<{ datasourceUid: string; series: Array<Record<string, string>>; truncated: boolean }>;
   /**

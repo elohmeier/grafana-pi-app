@@ -30,6 +30,7 @@ import type {
   DashboardWriteResult,
   JsonnetBroker,
   PrometheusBroker,
+  PrometheusTimeWindow,
   WorkspaceBroker,
 } from './broker';
 import { DASHBOARD_API_GROUP } from './dashboardModel';
@@ -756,6 +757,11 @@ async function request<T>(
   }
 }
 
+/** Prometheus metadata APIs take start and end in epoch seconds; like Grafana's label browser, always send both. */
+export function prometheusWindowParams(window: PrometheusTimeWindow) {
+  return { start: Math.floor(window.start / 1000), end: Math.ceil(window.end / 1000) };
+}
+
 function createPrometheusBroker(toolConfig: GrafanaToolConfig): PrometheusBroker {
   return {
     datasources: () =>
@@ -768,27 +774,27 @@ function createPrometheusBroker(toolConfig: GrafanaToolConfig): PrometheusBroker
           ...(typeof timeInterval === 'string' && timeInterval ? { timeInterval } : {}),
         };
       }),
-    async metricNames(datasourceUid, signal) {
+    async metricNames(datasourceUid, window, signal) {
       const ds = await getPrometheusDatasource(toolConfig, datasourceUid);
       const response = await getDatasourceResource<PrometheusMetadataResponse<string[]>>(
         ds,
         'api/v1/label/__name__/values',
-        undefined,
+        prometheusWindowParams(window),
         signal
       );
       return { datasourceUid: ds.uid, names: response.data ?? [] };
     },
-    async labelNames(datasourceUid, match, signal) {
+    async labelNames(datasourceUid, match, window, signal) {
       const ds = await getPrometheusDatasource(toolConfig, datasourceUid);
       const response = await getDatasourceResource<PrometheusMetadataResponse<string[]>>(
         ds,
         'api/v1/labels',
-        match ? { 'match[]': match } : undefined,
+        { ...prometheusWindowParams(window), ...(match ? { 'match[]': match } : {}) },
         signal
       );
       return { datasourceUid: ds.uid, names: response.data ?? [] };
     },
-    async labelValues(datasourceUid, label, match, signal) {
+    async labelValues(datasourceUid, label, match, window, signal) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(label)) {
         throw new Error(`invalid label name ${JSON.stringify(label)}`);
       }
@@ -796,17 +802,17 @@ function createPrometheusBroker(toolConfig: GrafanaToolConfig): PrometheusBroker
       const response = await getDatasourceResource<PrometheusMetadataResponse<string[]>>(
         ds,
         `api/v1/label/${label}/values`,
-        match ? { 'match[]': match } : undefined,
+        { ...prometheusWindowParams(window), ...(match ? { 'match[]': match } : {}) },
         signal
       );
       return { datasourceUid: ds.uid, values: response.data ?? [] };
     },
-    async series(datasourceUid, match, limit, signal) {
+    async series(datasourceUid, match, limit, window, signal) {
       const ds = await getPrometheusDatasource(toolConfig, datasourceUid);
       const response = await getDatasourceResource<PrometheusMetadataResponse<Array<Record<string, string>>>>(
         ds,
         'api/v1/series',
-        { 'match[]': match, limit: limit + 1 },
+        { ...prometheusWindowParams(window), 'match[]': match, limit: limit + 1 },
         signal
       );
       const series = response.data ?? [];

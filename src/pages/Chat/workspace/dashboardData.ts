@@ -24,7 +24,7 @@ import {
   type TransformerRegistryItem,
 } from '@grafana/data';
 import { lastValueFrom } from 'rxjs';
-import { cleanPrometheusError } from '../domain/prometheusErrors';
+import { describePrometheusError } from '../domain/prometheusErrors';
 import { mapConcurrent } from './concurrency';
 import type { PrometheusDatasourceInfo } from './broker';
 import {
@@ -408,7 +408,7 @@ export function framesFromResponse(payload: unknown, expectedRefs: string[]): [D
       continue;
     }
     if (result.error) {
-      errors.push(`${refId}: ${cleanPrometheusError(asText(result.error))}`);
+      errors.push(`${refId}: ${describePrometheusError(asText(result.error))}`);
     }
     if (result.status != null && result.status !== 200 && result.status !== 'success') {
       errors.push(`${refId}: status ${asText(result.status)}`);

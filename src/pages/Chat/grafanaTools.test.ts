@@ -57,6 +57,7 @@ import {
   getPrometheusDatasourceSettings,
   runPrometheusQuerySummaryOrValidationError,
 } from './domain/metrics';
+import { createGrafanaWorkspaceBroker } from './workspace/grafanaBroker';
 
 const datasourceSettings = [
   { name: 'Prometheus A', uid: 'prom-a', type: 'prometheus', isDefault: true },
@@ -372,6 +373,71 @@ describe('grafana datasource tool policy', () => {
     const body = await runPrometheusQuerySummaryOrValidationError(dataSource as any, { query: 'sum(rate(up[5m])' });
 
     expect(body.validationError).toBe('1:34: parse error: unclosed left parenthesis');
+  });
+
+  it('shows the upstream text of plain-text Prometheus errors with a hint', async () => {
+    const dataSource = {
+      uid: 'prom-b',
+      type: 'prometheus',
+      query: jest.fn().mockResolvedValue({
+        state: 'Error',
+        errors: [
+          {
+            message:
+              "response from prometheus couldn't be parsed. it is non-json: ReadObject: expect { or , or } or n, but found q, error found in #1 byte of ...|query time|..., bigger context ...|query time range exceeds the limit (query length: |...",
+          },
+        ],
+      }),
+    };
+    mockDataSourceSrv.get.mockResolvedValue(dataSource);
+    const body = await runPrometheusQuerySummaryOrValidationError(dataSource as any, {
+      query: 'up',
+      type: 'range',
+      start: 'now-30d',
+    });
+
+    expect(body.validationError).toMatch(
+      /^Prometheus answered with a non-JSON error: "query time range exceeds the limit \(query length:" \(may be cut off\); hint: .*shorten the time range/
+    );
+    expect(body.validationError).not.toContain('ReadObject');
+  });
+
+  it('adds a hint to resource errors the upstream rejects for their size', async () => {
+    const dataSource = {
+      uid: 'prom-b',
+      type: 'prometheus',
+      getResource: jest
+        .fn()
+        .mockRejectedValue(grafanaFetchError(422, 'Unprocessable Entity', 'expanding series: exceeded series limit')),
+    };
+
+    await expect(getDatasourceResource(dataSource as any, 'api/v1/series')).rejects.toThrow(
+      /\(422 Unprocessable Entity\).*expanding series: exceeded series limit; hint: .*narrow the selector/
+    );
+  });
+
+  it('sends the discovery window as start and end in epoch seconds', async () => {
+    const dataSource = {
+      uid: 'prom-a',
+      type: 'prometheus',
+      getResource: jest.fn().mockResolvedValue({ status: 'success', data: [] }),
+    };
+    mockDataSourceSrv.get.mockResolvedValue(dataSource);
+    const prometheus = createGrafanaWorkspaceBroker({}).prometheus!;
+    const window = { start: 1_772_449_200_000, end: 1_772_452_800_500 };
+
+    await prometheus.metricNames(undefined, window);
+    await prometheus.labelNames(undefined, 'up', window);
+    await prometheus.labelValues(undefined, 'job', undefined, window);
+    await prometheus.series(undefined, 'up', 10, window);
+
+    const span = { start: 1_772_449_200, end: 1_772_452_801 };
+    expect(dataSource.getResource.mock.calls.map(([path, params]) => [path, params])).toEqual([
+      ['api/v1/label/__name__/values', span],
+      ['api/v1/labels', { ...span, 'match[]': 'up' }],
+      ['api/v1/label/job/values', span],
+      ['api/v1/series', { ...span, 'match[]': 'up', limit: 11 }],
+    ]);
   });
 
   it('finds App Platform alert rules linked to a dashboard panel', async () => {

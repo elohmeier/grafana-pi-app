@@ -712,9 +712,11 @@ describe('grafana-prom metric names that are not PromQL identifiers', () => {
   it('says when nothing matched', async () => {
     const { run } = setup();
     const metrics = await run(`grafana-prom metrics '^nothing_'`);
-    expect(metrics.stderr).toBe('# no metric names match ^nothing_\n');
+    expect(metrics.stderr).toMatch(
+      /^# window: now-1h to now \(.+\)\n# no metric names match \^nothing_ in the window\n$/
+    );
     const values = await run(`grafana-prom labels route --match 'up{job="api"}'`);
-    expect(values.stderr).toBe('# no values for label route matching up{job="api"}\n');
+    expect(values.stderr).toMatch(/\n# no values for label route matching up\{job="api"\} in the window\n$/);
   });
 });
 
@@ -723,6 +725,84 @@ describe('grafana-prom labels', () => {
     const { run } = setup();
     const result = await run('grafana-prom labels --match http_requests_total');
     expect(result.stdout).toBe('__name__\njob\nroute\nstatus\n');
+  });
+});
+
+describe('grafana-prom discovery time window', () => {
+  const now = Date.parse('2026-03-02T12:00:00Z');
+  beforeEach(() =>
+    jest.useFakeTimers({ now, doNotFake: ['setTimeout', 'setInterval', 'queueMicrotask', 'nextTick', 'setImmediate'] })
+  );
+  afterEach(() => jest.useRealTimers());
+
+  function recordWindows(broker: ReturnType<typeof setup>['broker']) {
+    const windows: Array<{ command: string; start: number; end: number }> = [];
+    const prom = broker.prometheus!;
+    const { metricNames, labelNames, labelValues, series } = prom;
+    prom.metricNames = (ds, window, signal) => {
+      windows.push({ command: 'metrics', ...window });
+      return metricNames(ds, window, signal);
+    };
+    prom.labelNames = (ds, match, window, signal) => {
+      windows.push({ command: 'labels', ...window });
+      return labelNames(ds, match, window, signal);
+    };
+    prom.labelValues = (ds, label, match, window, signal) => {
+      windows.push({ command: 'values', ...window });
+      return labelValues(ds, label, match, window, signal);
+    };
+    prom.series = (ds, match, limit, window, signal) => {
+      windows.push({ command: 'series', ...window });
+      return series(ds, match, limit, window, signal);
+    };
+    return windows;
+  }
+
+  it('searches the last hour by default and names the window', async () => {
+    const { run, broker } = setup();
+    const windows = recordWindows(broker);
+    const series = await run(`grafana-prom series 'up{job="api"}'`);
+    expect(series.exitCode).toBe(0);
+    expect(series.stderr).toBe('# window: now-1h to now (2026-03-02T11:00:00Z to 2026-03-02T12:00:00Z)\n');
+    await run('grafana-prom metrics');
+    await run('grafana-prom labels');
+    await run('grafana-prom labels job');
+    const hour = { start: now - 3_600_000, end: now };
+    expect(windows).toEqual([
+      { command: 'series', ...hour },
+      { command: 'metrics', ...hour },
+      { command: 'labels', ...hour },
+      { command: 'values', ...hour },
+    ]);
+  });
+
+  it('takes --since, --from, and --to', async () => {
+    const { run, broker } = setup();
+    const windows = recordWindows(broker);
+    await run('grafana-prom labels job --since 6h');
+    await run(`grafana-prom series up --from now-1d --to now-23h`);
+    const absolute = await run('grafana-prom metrics --from 2026-03-01T00:00:00Z --to 2026-03-01T06:00:00Z');
+    expect(absolute.stderr).toContain(
+      '# window: 2026-03-01T00:00:00Z to 2026-03-01T06:00:00Z (2026-03-01T00:00:00Z to 2026-03-01T06:00:00Z)'
+    );
+    expect(windows).toEqual([
+      { command: 'values', start: now - 6 * 3_600_000, end: now },
+      { command: 'series', start: now - 24 * 3_600_000, end: now - 23 * 3_600_000 },
+      { command: 'metrics', start: Date.parse('2026-03-01T00:00:00Z'), end: Date.parse('2026-03-01T06:00:00Z') },
+    ]);
+  });
+
+  it('rejects invalid windows', async () => {
+    const { run } = setup();
+    const since = await run('grafana-prom series up --since yesterday');
+    expect(since.exitCode).toBe(2);
+    expect(since.stderr).toContain('--since "yesterday"');
+    const from = await run('grafana-prom labels --from soon');
+    expect(from.exitCode).toBe(2);
+    expect(from.stderr).toContain('--from "soon"');
+    const order = await run('grafana-prom metrics --from now-1h --to now-2h');
+    expect(order.exitCode).toBe(2);
+    expect(order.stderr).toContain('must be before');
   });
 });
 
