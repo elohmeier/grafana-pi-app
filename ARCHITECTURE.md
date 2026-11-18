@@ -478,8 +478,9 @@ objects.
 - `grafana-dashboard data` resolves each target to an allowed Prometheus
   datasource (or `__expr__`) and builds the request the dashboard would send
   (`dashboardPromEmulation.ts`): maxDataPoints is the panel's pixel width
-  (grid columns in a 1920px window with the docked menu, `--browser-width`
-  to change) unless the panel sets it, the interval is bounded by the panel
+  (grid columns of the dashboard grid measured in the user's window, which
+  the Assistant sidebar narrows; `--browser-width` assumes a window with the
+  docked menu instead) unless the panel sets it, the interval is bounded by the panel
   min interval or the datasource `timeInterval` (15s by default, none for
   Mixed panels), panel relative time and time shift change the range, and
   "Both" queries run as a range query and `<refId>-Instant`. It reports the
