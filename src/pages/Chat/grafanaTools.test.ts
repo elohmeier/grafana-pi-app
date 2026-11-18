@@ -359,6 +359,21 @@ describe('grafana datasource tool policy', () => {
     });
   });
 
+  it('drops the empty error type Grafana puts before upstream PromQL errors', async () => {
+    const dataSource = {
+      uid: 'prom-b',
+      type: 'prometheus',
+      query: jest.fn().mockResolvedValue({
+        state: 'Error',
+        errors: [{ message: ': 1:34: parse error: unclosed left parenthesis' }],
+      }),
+    };
+    mockDataSourceSrv.get.mockResolvedValue(dataSource);
+    const body = await runPrometheusQuerySummaryOrValidationError(dataSource as any, { query: 'sum(rate(up[5m])' });
+
+    expect(body.validationError).toBe('1:34: parse error: unclosed left parenthesis');
+  });
+
   it('finds App Platform alert rules linked to a dashboard panel', async () => {
     const alertRule = {
       apiVersion: 'rules.alerting.grafana.app/v0alpha1',

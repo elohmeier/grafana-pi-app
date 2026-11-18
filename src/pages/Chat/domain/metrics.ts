@@ -13,6 +13,7 @@ import {
 import { config, getDataSourceSrv } from '@grafana/runtime';
 import { lastValueFrom, type Observable } from 'rxjs';
 import { backendFetch, formatBackendFetchError } from './client';
+import { cleanPrometheusError } from './prometheusErrors';
 import { throwIfAborted } from './result';
 import type { GrafanaToolConfig, PrometheusQuerySpec, ResourceCapableDataSource } from './types';
 
@@ -326,7 +327,9 @@ function prometheusQueryResponseError(response: DataQueryResponse): Error {
     stringRecordValue(data, 'message'),
     stringRecordValue(first, 'statusText'),
     stringRecordValue(first, 'status'),
-  ].filter((value): value is string => Boolean(value));
+  ]
+    .filter((value): value is string => Boolean(value))
+    .map(cleanPrometheusError);
   const status = numberRecordValue(first, 'status') ?? numberRecordValue(first, 'statusCode');
   const reason = candidates.find((value) => !GENERIC_QUERY_ERRORS.has(value));
   const statusSuffix = status !== undefined && !reason?.includes(String(status)) ? ` (status ${status})` : '';

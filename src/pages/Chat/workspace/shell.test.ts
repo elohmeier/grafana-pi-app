@@ -945,6 +945,13 @@ describe('grafana-dashboard data', () => {
       errors: ['A: bad_data: parse error', 'A: status 400'],
     });
 
+    setDataResponse(() => ({ results: { A: { status: 400, error: ': parse error: unclosed left parenthesis' } } }));
+    const untyped = await run('grafana-dashboard data /grafana/dashboards/checkout/dashboard.json --panel 1');
+    expect(JSON.parse(untyped.stdout).panels[0].errors).toEqual([
+      'A: parse error: unclosed left parenthesis',
+      'A: status 400',
+    ]);
+
     setDataResponse(() => ({
       results: {
         A: {
