@@ -33,7 +33,9 @@ Rules:
 
 Commands (run \`<command> --help\` for options):
 ${renderCommandReference(WORKSPACE_COMMANDS)}
-- Standard tools: cat, ls, find, rg, grep, sed, awk, jq, yq, diff, sort, uniq, head, tail, wc, xargs, cut, tr, tee${
-    options.pythonAvailable ? ', python3 (CPython with stdlib, no network; sees a copy of the filesystem)' : ''
+- Standard tools: cat, ls, find, rg, grep, sed, awk, jq, diff, sort, uniq, head, tail, wc, xargs, cut, tr, tee${
+    options.pythonAvailable
+      ? ', python3 (CPython with stdlib, no network, no subprocesses: run grafana-* and other commands from bash, not from Python; sees a copy of the filesystem)'
+      : ''
   }.`;
 }

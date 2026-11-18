@@ -12,7 +12,7 @@ The [conversational alerting design](docs/conversational-alerting.md) covers Mat
 - Discovers Prometheus datasources, metric names, labels, and series, and runs PromQL through Grafana datasource APIs as the current user (`grafana-prom`), returning compact min/max/last/sample summaries.
 - Investigates Elasticsearch logs without reading their text (`grafana-logs`): field structure, counts with text search, time patterns, groups, and documents with their non-text fields. Documents matching admin-defined keyword conditions, such as deployment events, are returned completely.
 - Investigates Microsoft SQL Server tables without reading their sensitive columns (`grafana-sql`): schema, counts filtered by any column, time buckets, groups, and rows with numeric, date, and admin-approved string columns.
-- Searches dashboards and loads them lazily into the session filesystem as local working copies (`/grafana/dashboards/<uid>/dashboard.json`), so `rg`, `jq`, `yq`, `python3`, and `edit` work on real dashboard JSON.
+- Searches dashboards and loads them lazily into the session filesystem as local working copies (`/grafana/dashboards/<uid>/dashboard.json`), so `rg`, `jq`, `python3`, and `edit` work on real dashboard JSON.
 - Extracts Prometheus metric usage from existing dashboards, including panel co-usage, labels, grouping labels, functions, and related metric neighborhoods.
 - Creates new dashboards from model-authored Jsonnet evaluated by the backend with the vendored Grafana libraries, and edits existing dashboards as JSON.
 - Writes dashboard and alert rule changes only through `workspace apply`: the user reviews the change set (repeated replacements, per-resource diffs, checkboxes to leave resources out), and the browser writes as the current user with revision preconditions. `workspace revert` undoes an apply through the same review.
@@ -103,7 +103,7 @@ Users can run commands in the same shell: composer input that starts with `!` (f
 
 Each tool call or bash invocation is one transaction with path checks and a stored-size budget for `/workspace` and `/session`; there are no limits on how many dashboards are read, changed, or applied. Links are not supported. Its file changes are committed together, or discarded on timeout, cancellation, or a quota or policy error. Only explicit `workspace apply` and `live apply` commit earlier writes in the same call. Later failures discard uncommitted changes and report earlier commits.
 
-`bash` runs just-bash (its browser bundle) in a dedicated, terminable Web Worker, with coreutils, `rg`, `grep`, `find`, `sed`, `awk`, `yq`, and `diff`, `jq` (jq 1.8 compiled to WebAssembly, so filters behave like the real jq), and `/dev/null`, plus these commands (run `<command> --help`):
+`bash` runs just-bash (its browser bundle) in a dedicated, terminable Web Worker, with coreutils, `rg`, `grep`, `find`, `sed`, `awk`, and `diff`, `jq` (jq 1.8 compiled to WebAssembly, so filters behave like the real jq), and `/dev/null`, plus these commands (run `<command> --help`):
 
 - `grafana search|fetch|refresh|open`: dashboard discovery, parallel loading (`grafana fetch UID...|--all|--folder UID|--query TEXT|-`), and opening a dashboard, Explore query, or Grafana path in the browser.
 - `grafana-prom datasources|metrics|labels|series|query`: Prometheus discovery and bounded query summaries. `query` accepts any number of `-e EXPR` in one call, substitutes dashboard variables given with `--var NAME=VALUE`, refuses expressions with unresolved `$variables`, and marks results without series.

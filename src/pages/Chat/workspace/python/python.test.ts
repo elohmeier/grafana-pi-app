@@ -107,6 +107,21 @@ describe('python3 in the workspace shell', () => {
     expect(result.stderr).toContain('not staged: /live/dashboard/info.json is read-only');
   });
 
+  it('sees empty directories created by bash in the same call', async () => {
+    const { run } = setup();
+    const result = await run(`mkdir -p /tmp/out/nested && python3 -c 'open("/tmp/out/nested/a.txt", "w").write("x")'`);
+    expect(result.stderr).toBe('');
+    expect(result.exitCode).toBe(0);
+    expect((await run('cat /tmp/out/nested/a.txt')).stdout).toBe('x');
+  });
+
+  it('says how to run commands when a program tries to start a process', async () => {
+    const { run } = setup();
+    const result = await run(`python3 -c 'import subprocess; subprocess.run(["ls"])'`);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain('run grafana-* and other commands in bash');
+  });
+
   it('reports Python exceptions with a non-zero exit code', async () => {
     const { run } = setup();
     const result = await run(`python3 -c 'raise SystemExit(3)'; echo "exit=$?"`);

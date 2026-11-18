@@ -9,6 +9,8 @@ export type PythonRunInput = {
   env: Record<string, string>;
   /** Files made visible to the program, by absolute path. */
   files: Record<string, string>;
+  /** Directories made visible to the program, including empty ones. */
+  dirs?: string[];
   /** Roots whose files are returned after the run (writable mounts). */
   collectRoots: string[];
   maxOutputBytes: number;
@@ -115,8 +117,8 @@ export async function runPythonProgram(
     FS.mkdirTree(parentOf(path));
     FS.writeFile(path, content);
   }
-  for (const root of input.collectRoots) {
-    FS.mkdirTree(root);
+  for (const dir of [...input.collectRoots, ...(input.dirs ?? [])]) {
+    FS.mkdirTree(dir);
   }
   FS.mkdirTree(input.cwd);
   FS.chdir(input.cwd);

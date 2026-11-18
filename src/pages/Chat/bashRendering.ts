@@ -10,7 +10,7 @@ const bashGrammar = Prism.languages.extend('bash', {
   function: [
     {
       pattern:
-        /(^|[\s;|&]|[<>]\()(?:grafana(?:-prom|-usage|-dashboard|-alert)?|workspace|live|jsonnet|jq|yq|rg)(?=$|[)\s;|&<>])/,
+        /(^|[\s;|&]|[<>]\()(?:grafana(?:-prom|-usage|-dashboard|-alert)?|workspace|live|jsonnet|jq|rg)(?=$|[)\s;|&<>])/,
       lookbehind: true,
     },
     ...(Array.isArray(bashFunctions) ? bashFunctions : [bashFunctions]),

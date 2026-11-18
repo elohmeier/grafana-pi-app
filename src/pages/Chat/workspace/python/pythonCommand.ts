@@ -38,6 +38,7 @@ export function createPythonCommands(runner: PythonRunner): WorkspaceShellComman
           cwd: ctx.cwd,
           env: { HOME: '/workspace', TMPDIR: '/tmp', LANG: 'C.UTF-8', ...pickEnv(ctx.env) },
           files: snapshot.files,
+          dirs: snapshot.dirs,
           collectRoots: [
             ...SCRATCH_MOUNTS,
             ...tx.workspace.resourceKinds().map((kind) => RESOURCE_KINDS[kind].root),
@@ -86,6 +87,11 @@ export function createPythonCommands(runner: PythonRunner): WorkspaceShellComman
         }
       }
     }
+    if (output.stderr.includes('does not support processes')) {
+      warnings.push(
+        'python: Python cannot start processes; run grafana-* and other commands in bash and exchange files with Python'
+      );
+    }
     const stderr = output.stderr + (output.stderrTruncated ? 'python: stderr truncated\n' : '');
     return result(
       output.stdout + (output.stdoutTruncated ? '\n[python stdout truncated]\n' : ''),
@@ -102,6 +108,8 @@ export function createPythonCommands(runner: PythonRunner): WorkspaceShellComman
 async function snapshotFiles(tx: WorkspaceTransaction) {
   const files: Record<string, string> = {};
   const writable: string[] = [];
+  // Directories bash created in the same call may still be empty; Python must see them to write into them.
+  const dirs: string[] = [];
   for (const path of tx.allPaths()) {
     const resource = resourceAtPath(path.replace(/\/meta\.json$/, ''));
     if (
@@ -117,7 +125,11 @@ async function snapshotFiles(tx: WorkspaceTransaction) {
     if (!stageable && !readOnly) {
       continue;
     }
-    if ((await tx.entryType(path)) !== 'file') {
+    const type = await tx.entryType(path);
+    if (type === 'dir' && stageable) {
+      dirs.push(path);
+    }
+    if (type !== 'file') {
       continue;
     }
     try {
@@ -133,7 +145,7 @@ async function snapshotFiles(tx: WorkspaceTransaction) {
       }
     }
   }
-  return { files, writable };
+  return { files, writable, dirs };
 }
 
 function isStageable(path: string) {

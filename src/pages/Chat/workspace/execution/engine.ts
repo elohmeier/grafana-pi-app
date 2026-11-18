@@ -51,7 +51,6 @@ export const WORKSPACE_BUILTIN_COMMANDS: CommandName[] = [
   'false',
   'bash',
   'sh',
-  'yq',
   'base64',
   'diff',
   'date',

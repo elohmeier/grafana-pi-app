@@ -405,7 +405,8 @@ the worker on timeout or cancellation. Filesystem RPC remains inside the host
 transaction; domain commands, Python, and approvals execute through host adapters.
 
 Built-in commands include coreutils, `find`, `rg`, `grep`, `sed`, `awk`,
-`yq`, `diff`, and `xargs`. There are no network, process, or link commands.
+`diff`, and `xargs`. There are no network, process, or link commands; just-bash
+leaves `yq` out of its browser bundle.
 `jq` is not just-bash's reimplementation but jq 1.8 compiled to WebAssembly
 (`workspace/jqCommand.ts`, backed by `jq-wasm`); input, `-f`, `--slurpfile`,
 and `--rawfile` files are read through the transaction. `WorkspaceBashFs`
