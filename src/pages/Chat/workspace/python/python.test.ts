@@ -1,5 +1,6 @@
 import { readFileSync } from 'fs';
 import path from 'path';
+import { createLiveDashboardMount, liveRevision } from '../liveDashboard';
 import { runWorkspaceBash } from '../shell';
 import { createFakeDashboardBroker } from '../testUtils';
 import { SessionWorkspace } from '../workspace';
@@ -65,6 +66,45 @@ describe('python3 in the workspace shell', () => {
     // meta.json is provider-owned: the change stays inside the interpreter and is reported.
     expect(result.stderr).toContain('not staged: /grafana/dashboards/checkout/meta.json');
     expect(workspace.status()).toHaveLength(1);
+  });
+
+  it('keeps non-ASCII text intact between heredocs, python, and jq', async () => {
+    const { run, workspace } = setup();
+    const script = [
+      'import json',
+      'json.dump({"title": "Änderungen – Engpässe"}, open("out.json", "w"), ensure_ascii=False)',
+    ];
+    await run(`cat > /tmp/script.py <<'EOF'\n${script.join('\n')}\nEOF`);
+    const result = await run('python3 /tmp/script.py && jq -r .title out.json');
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe('Änderungen – Engpässe\n');
+    expect(workspace.getScratchFile('/workspace/out.json')?.content).toBe('{"title": "Änderungen – Engpässe"}');
+  });
+
+  it('reads and stages the live dashboard open in the browser', async () => {
+    const spec = { title: 'Live', elements: {}, layout: { kind: 'GridLayout', spec: { items: [] } }, variables: [] };
+    const live = {
+      available: () => true,
+      get: async () => ({ uid: 'live-uid', info: { uid: 'live-uid' }, spec, revision: liveRevision(spec) }),
+      apply: async () => ({ spec, warnings: [] }),
+    };
+    const workspace = new SessionWorkspace();
+    workspace.setGeneratedMounts([createLiveDashboardMount(live)]);
+    const run = (command: string) =>
+      runWorkspaceBash({ workspace, broker: { live }, extraCommands: createPythonCommands(nodeRunner) }, { command });
+    const script = [
+      'import json',
+      'p = "/live/dashboard/dashboard.json"',
+      'd = json.load(open(p))',
+      'd["spec"]["title"] = "Größe"',
+      'json.dump(d, open(p, "w"), ensure_ascii=False)',
+      'open("/live/dashboard/info.json", "w").write("{}")',
+    ].join('\n');
+    const result = await run(
+      `python3 -c '${script}'; live status | jq -c .staged; jq -r .spec.title /live/dashboard/dashboard.json`
+    );
+    expect(result.stdout).toBe('true\nGröße\n');
+    expect(result.stderr).toContain('not staged: /live/dashboard/info.json is read-only');
   });
 
   it('reports Python exceptions with a non-zero exit code', async () => {

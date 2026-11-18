@@ -1,4 +1,5 @@
 import type { ExecResult } from 'just-bash/browser';
+import { LIVE_DASHBOARD_PATH, LIVE_DASHBOARD_ROOT } from '../liveDashboard';
 import { isWithin } from '../paths';
 import type { WorkspaceShellCommand } from '../shell';
 import { RESOURCE_KINDS, resourceAtPath } from '../resourceKinds';
@@ -11,8 +12,11 @@ export type PythonRunner = {
 
 const PYTHON_TIMEOUT_MS = 60_000;
 const MAX_OUTPUT_BYTES = 64 * 1024;
-/** Generated mounts copied into the interpreter. Network-backed mounts (catalog, live) are excluded. */
-const READ_ONLY_ROOTS = ['/.agents/skills', '/artifacts'];
+/**
+ * Generated mounts copied into the interpreter. The catalog is excluded; the
+ * live dashboard (read from the open browser tab) is copied when one is open.
+ */
+const READ_ONLY_ROOTS = ['/.agents/skills', '/artifacts', LIVE_DASHBOARD_ROOT];
 
 /**
  * `python3`/`python` backed by CPython compiled to WebAssembly. The program
@@ -34,7 +38,11 @@ export function createPythonCommands(runner: PythonRunner): WorkspaceShellComman
           cwd: ctx.cwd,
           env: { HOME: '/workspace', TMPDIR: '/tmp', LANG: 'C.UTF-8', ...pickEnv(ctx.env) },
           files: snapshot.files,
-          collectRoots: [...SCRATCH_MOUNTS, ...tx.workspace.resourceKinds().map((kind) => RESOURCE_KINDS[kind].root)],
+          collectRoots: [
+            ...SCRATCH_MOUNTS,
+            ...tx.workspace.resourceKinds().map((kind) => RESOURCE_KINDS[kind].root),
+            ...(LIVE_DASHBOARD_PATH in snapshot.files ? [LIVE_DASHBOARD_ROOT] : []),
+          ],
           maxOutputBytes: MAX_OUTPUT_BYTES,
           maxFileBytes: Number.POSITIVE_INFINITY,
         },
@@ -119,7 +127,8 @@ async function snapshotFiles(tx: WorkspaceTransaction) {
         writable.push(path);
       }
     } catch (error) {
-      if (!(error instanceof WorkspaceError)) {
+      // A live dashboard that cannot be read (tab closed meanwhile) is left out like a missing file.
+      if (!(error instanceof WorkspaceError) && !isWithin(path, LIVE_DASHBOARD_ROOT)) {
         throw error;
       }
     }
@@ -130,6 +139,7 @@ async function snapshotFiles(tx: WorkspaceTransaction) {
 function isStageable(path: string) {
   const resource = resourceAtPath(path);
   return (
+    path === LIVE_DASHBOARD_PATH ||
     SCRATCH_MOUNTS.some((mount) => isWithin(path, mount)) ||
     (resource !== undefined && path.endsWith(`/${RESOURCE_KINDS[resource.kind].document}`))
   );
