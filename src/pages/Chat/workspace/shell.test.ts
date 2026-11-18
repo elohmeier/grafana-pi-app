@@ -958,7 +958,19 @@ describe('grafana-dashboard data', () => {
     const report = JSON.parse(result.stdout);
     expect(report.notes[0]).toContain('$job');
     const [series, table, logs] = report.panels;
-    expect(series).toMatchObject({ id: '1', status: 'ok', seriesTotal: 1 });
+    // $job is approximated as .*, so the panel is only partially emulated.
+    expect(series).toMatchObject({ id: '1', status: 'partial', seriesTotal: 1 });
+    expect(series.notes.join('\n')).toContain('$job');
+    expect(series.request).toMatchObject({ maxDataPoints: 762, maxDataPointsSource: 'width', intervalMs: 60_000 });
+    expect(series.queries[0]).toMatchObject({
+      format: 'time_series',
+      type: 'range',
+      step: '1m0s',
+      rateInterval: '4m0s',
+    });
+    expect(series.executedQueries).toEqual([
+      'Expr: sum by (job) (rate(http_requests_total{job=~".*"}[4m0s])); Step: 1m0s',
+    ]);
     expect(series.series[0].calcs).toMatchObject({ lastNotNull: 20, min: 10, max: 30 });
     expect(series.series[0].display.max).toBe('30%');
     expect(table.status).toBe('ok');
@@ -974,8 +986,9 @@ describe('grafana-dashboard data', () => {
     expect(sent.queries[0]).toMatchObject({
       expr: 'sum by (job) (rate(http_requests_total{job=~".*"}[$__rate_interval]))',
       datasource: { type: 'prometheus', uid: 'prometheus' },
-      maxDataPoints: 1000,
-      // 1h / 1000 points is below the datasource scrape interval, which bounds the step.
+      // A half-width panel in a 1920px window is 762px wide.
+      maxDataPoints: 762,
+      // 1h / 762 points is below the datasource scrape interval, which bounds the step.
       intervalMs: 60_000,
     });
     expect(Number(sent.to) - Number(sent.from)).toBeCloseTo(3_600_000, -4);

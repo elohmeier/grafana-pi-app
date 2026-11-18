@@ -476,13 +476,25 @@ objects.
   checks types but not dangling layout references, which the local structure
   level covers.
 - `grafana-dashboard data` resolves each target to an allowed Prometheus
-  datasource (or `__expr__`), computes `intervalMs` from the range and
-  `maxDataPoints`, and posts to `/api/ds/query`. The broker rejects any other
-  datasource. Frames go through Grafana's transformer registry,
-  `applyFieldOverrides`, and `reduceField`. The command reports `ok`, `empty`,
-  `error` (including errors inside HTTP 200 responses), or `skipped` with a
-  reason. Query variables saved as All without known options are approximated
-  as `.*`, and the output notes this.
+  datasource (or `__expr__`) and builds the request the dashboard would send
+  (`dashboardPromEmulation.ts`): maxDataPoints is the panel's pixel width
+  (grid columns in a 1920px window with the docked menu, `--browser-width`
+  to change) unless the panel sets it, the interval is bounded by the panel
+  min interval or the datasource `timeInterval` (15s by default, none for
+  Mixed panels), panel relative time and time shift change the range, and
+  "Both" queries run as a range query and `<refId>-Instant`. It reports the
+  step, `$__interval`, and `$__rate_interval` per query as promlib resolves
+  them, and `executedQueries` (the backend's when the response carries it,
+  otherwise the emulated one; a difference is noted). The broker rejects any
+  other datasource. Frames are reshaped like the Prometheus frontend's
+  `transformV2` (tables per `format: table` query with label columns and
+  `Value #<refId>`, de-accumulated heatmaps) and then go through Grafana's
+  transformer registry, `applyFieldOverrides`, and `reduceField`. The command
+  reports `ok`, `partial` (data, but the panel uses something not emulated:
+  time comparison, ad hoc filters, repeats, approximated All values, unknown
+  width), `empty`, `error` (including errors inside HTTP 200 responses), or
+  `skipped` with a reason. Query variables saved as All without known options
+  are approximated as `.*`, and the output notes this.
 
 ## Evidence Presentation
 

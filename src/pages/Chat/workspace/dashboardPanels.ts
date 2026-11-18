@@ -235,9 +235,6 @@ export function datasourceUid(target: JsonObject): string {
  * Prometheus datasource escaping; datasource references are substituted raw.
  */
 export function prepareTargets(panel: WalkedPanel, variables: Record<string, TemplateValue>): JsonObject[] {
-  const data = isObject(panel.raw.data) ? panel.raw.data : {};
-  const dataSpec = isObject(data.spec) ? data.spec : {};
-  const queryOptions = panel.source === 'v2' && isObject(dataSpec.queryOptions) ? dataSpec.queryOptions : panel.raw;
   return panel.targets.map((original) => {
     const { datasource, ...rest } = original;
     const formatter =
@@ -248,14 +245,45 @@ export function prepareTargets(panel: WalkedPanel, variables: Record<string, Tem
     if (datasource !== undefined) {
       target.datasource = substituteVars(datasource, variables);
     }
-    if (queryOptions.maxDataPoints != null) {
-      target.maxDataPoints ??= queryOptions.maxDataPoints;
-    }
-    if (queryOptions.interval && !target.interval) {
-      target.interval = queryOptions.interval;
-    }
     return target;
   });
+}
+
+export type PanelQueryOptions = {
+  maxDataPoints?: number;
+  /** Panel min interval; a query's own `interval` is its Prometheus min step instead. */
+  interval?: string;
+  timeFrom?: string;
+  timeShift?: string;
+  timeCompare?: string;
+  /** Variable a classic panel repeats by. */
+  repeat?: string;
+};
+
+/**
+ * Panel-level query options (classic panel fields, v2 `data.spec.queryOptions`)
+ * with variables resolved. Grafana applies them to the panel request, not to
+ * each target: `interval` is the min interval of the request, not a target's
+ * min step.
+ */
+export function panelQueryOptions(panel: WalkedPanel, variables: Record<string, TemplateValue>): PanelQueryOptions {
+  const data = isObject(panel.raw.data) ? panel.raw.data : {};
+  const dataSpec = isObject(data.spec) ? data.spec : {};
+  const options = panel.source === 'v2' ? (isObject(dataSpec.queryOptions) ? dataSpec.queryOptions : {}) : panel.raw;
+  const text = (value: unknown) =>
+    typeof value === 'string' && value ? replaceVariables(value, variables) : undefined;
+  const maxDataPoints = Number(options.maxDataPoints);
+  const result: PanelQueryOptions = {
+    ...(Number.isFinite(maxDataPoints) && maxDataPoints > 0 ? { maxDataPoints } : {}),
+    ...(text(options.interval) ? { interval: text(options.interval) } : {}),
+    ...(text(options.timeFrom) ? { timeFrom: text(options.timeFrom) } : {}),
+    ...(text(options.timeShift) ? { timeShift: text(options.timeShift) } : {}),
+    ...(options.timeCompare ? { timeCompare: asText(options.timeCompare) } : {}),
+    ...(panel.source === 'classic' && typeof panel.raw.repeat === 'string' && panel.raw.repeat
+      ? { repeat: panel.raw.repeat }
+      : {}),
+  };
+  return result;
 }
 
 function legacyFormatter(value: VariableValue, variable: TemplateValue): string {

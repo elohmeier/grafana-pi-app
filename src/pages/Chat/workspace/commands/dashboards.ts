@@ -411,7 +411,7 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
     },
     data: {
       summary:
-        'Run panel queries as the current user and apply the panel transformations, overrides, units, and reducers: shows what each panel displays (status ok/empty/error/skipped, reduced series or bounded table rows). Prometheus panels only.',
+        'Run panel queries as the current user the way the dashboard does (maxDataPoints from the panel width, panel interval and time overrides, $__rate_interval, query format and range/instant) and apply the panel transformations, overrides, units, and reducers: shows what each panel displays (status ok/partial/empty/error/skipped, resolved intervals and executed queries, reduced series or bounded table rows). Prometheus panels only.',
       usage:
         'grafana-dashboard data PATH [--panel ID]... [--type TYPE]... [--var NAME=VALUE]... [--from now-1h] [--to now]',
       effect: 'remote-read',
@@ -427,6 +427,12 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
         'max-panels': { type: 'number', description: 'Panels to query, 1-30.', default: 10 },
         'max-series': { type: 'number', description: 'Series per panel, 1-200.', default: 10 },
         'max-rows': { type: 'number', description: 'Table rows per frame, 1-200.', default: 10 },
+        'browser-width': {
+          type: 'number',
+          description:
+            'Browser window width in pixels (docked menu assumed), 400-7680. Panels without maxDataPoints use their pixel width, which sets $__interval and $__rate_interval.',
+          default: 1920,
+        },
         'include-hidden': { type: 'boolean', description: 'Also run hidden queries.' },
         'include-collapsed': {
           type: 'boolean',
@@ -461,6 +467,7 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
             maxPanels: numberOption(parsed, 'max-panels', 10, 1, 30),
             maxSeries: numberOption(parsed, 'max-series', 10, 1, 200),
             maxRows: numberOption(parsed, 'max-rows', 10, 1, 200),
+            browserWidth: numberOption(parsed, 'browser-width', 1920, 400, 7680),
             includeHiddenTargets: parsed.options['include-hidden'] === true,
             includeCollapsed: parsed.options['include-collapsed'] === true,
             datasources: prom.datasources(),
