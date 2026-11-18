@@ -282,12 +282,31 @@ export async function validateDashboardDocument(
   }
   if (options.allowedDatasourceUids && options.allowedDatasourceUids.length > 0) {
     const allowed = new Set(options.allowedDatasourceUids);
-    for (const uid of inspection.datasourceUids) {
-      if (!allowed.has(uid) && !BUILTIN_DATASOURCE_UIDS.has(uid)) {
-        errors.push({
-          level: 'policy',
-          message: `datasource UID ${JSON.stringify(uid)} is not allowed for the assistant`,
-        });
+    const disallowed = (uid: string | undefined): uid is string =>
+      uid !== undefined &&
+      !uid.startsWith('$') &&
+      !uid.startsWith('-- ') &&
+      !allowed.has(uid) &&
+      !BUILTIN_DATASOURCE_UIDS.has(uid);
+    // One error per use: comparing reports then tells a new use apart from one the dashboard already had.
+    // The path leaves out the panel title, so renaming a panel does not make its use look new.
+    const seen = new Set<string>();
+    for (const panel of inspection.panels) {
+      const uses = panel.queries.length
+        ? panel.queries.map((query) => ({
+            uid: query.datasourceUid ?? panel.datasourceUid,
+            path: `panel ${panel.id ?? panel.key} query ${query.refId || '?'}`,
+          }))
+        : [{ uid: panel.datasourceUid, path: `panel ${panel.id ?? panel.key}` }];
+      for (const { uid, path } of uses) {
+        if (disallowed(uid) && !seen.has(`${path}|${uid}`)) {
+          seen.add(`${path}|${uid}`);
+          errors.push({
+            level: 'policy',
+            path,
+            message: `datasource UID ${JSON.stringify(uid)} is not allowed for the assistant`,
+          });
+        }
       }
     }
   }

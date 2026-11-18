@@ -282,7 +282,9 @@ describe('live dashboard file', () => {
     const edit = await run(
       `jq '.spec.title = "Edited"' /live/dashboard/dashboard.json > /tmp/d.json && cp /tmp/d.json /live/dashboard/dashboard.json && live apply | jq -c '{applied, preexistingErrors}'`
     );
-    expect(edit.stdout).toBe('{"applied":true,"preexistingErrors":["duplicate variable env"]}\n');
+    expect(edit.stdout).toBe(
+      '{"applied":true,"preexistingErrors":[".spec.variables[1].spec.name: duplicate variable env"]}\n'
+    );
 
     const broken = await run(
       `jq '.spec.variables += [.spec.variables[0] | .spec.name = "team"] + [.spec.variables[0] | .spec.name = "team"]' /live/dashboard/dashboard.json > /tmp/d.json && cp /tmp/d.json /live/dashboard/dashboard.json && live apply`

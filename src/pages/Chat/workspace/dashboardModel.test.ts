@@ -258,3 +258,35 @@ describe('validateDashboardDocument display and layout warnings', () => {
     ]);
   });
 });
+
+describe('validateDashboardDocument datasource policy', () => {
+  const panel = (id: number, title: string, uid: string) => ({
+    id,
+    type: 'timeseries',
+    title,
+    gridPos: { x: 0, y: id * 8, w: 24, h: 8 },
+    datasource: { type: 'prometheus', uid },
+    targets: [{ refId: 'A', expr: 'up' }],
+  });
+  const policyErrors = async (panels: unknown[]) =>
+    (
+      await validateDashboardDocument(JSON.stringify({ spec: { title: 'T', panels } }), {
+        allowedDatasourceUids: ['prom-main'],
+      })
+    ).errors
+      .filter((error) => error.level === 'policy')
+      .map((error) => `${error.path}: ${error.message}`);
+
+  it('reports each use of a datasource that is not allowed, independent of panel titles', async () => {
+    expect(await policyErrors([panel(1, 'Requests', 'prom-main'), panel(2, 'Audit', 'audit-logs')])).toEqual([
+      'panel 2 query A: datasource UID "audit-logs" is not allowed for the assistant',
+    ]);
+    // A second use of the same datasource is a separate error, so comparing reports finds it as new.
+    expect(await policyErrors([panel(1, 'Requests', 'audit-logs'), panel(2, 'Audit (renamed)', 'audit-logs')])).toEqual(
+      [
+        'panel 1 query A: datasource UID "audit-logs" is not allowed for the assistant',
+        'panel 2 query A: datasource UID "audit-logs" is not allowed for the assistant',
+      ]
+    );
+  });
+});

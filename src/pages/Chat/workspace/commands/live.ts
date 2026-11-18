@@ -152,7 +152,11 @@ export const liveCommand: WorkspaceCommandSpec = {
           ...(removed.length > 0 ? { removed } : {}),
           warnings: [...report.warnings.map((warning) => warning.message), ...result.warnings],
           ...(preexistingErrors.length > 0
-            ? { preexistingErrors: preexistingErrors.map((error) => error.message) }
+            ? {
+                preexistingErrors: preexistingErrors.map(
+                  (error) => `${error.path ? `${error.path}: ` : ''}${error.message}`
+                ),
+              }
             : {}),
           undo: 'live undo',
           note: 'Applied to the unsaved dashboard in the browser; the user saves it in Grafana. Element names may be rekeyed; read the file again before further edits.',
