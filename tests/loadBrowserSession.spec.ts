@@ -6,6 +6,7 @@ import { test, expect } from './fixtures';
 import { LoadBrowserSession, type LoadSession } from './loadBrowserSession';
 import { runLoadStage, validateLoadConfig } from '../scripts/benchmarks/load.mjs';
 import { requestToolNames } from './llmRequest';
+import pluginJson from '../src/plugin.json';
 
 // Exercises real chat/agent/tool wiring, with every model call intercepted.
 // This is an ordinary regression test and never generates endpoint load.
@@ -18,7 +19,7 @@ test('load driver isolates conversations, captures shell tool calls, resets and 
   baseURL,
 }, testInfo) => {
   test.setTimeout(90_000);
-  const pluginId = process.env.E2E_PLUGIN_ID ?? 'grafana-assistant-app';
+  const pluginId = process.env.E2E_PLUGIN_ID ?? pluginJson.id;
   const settings = await (await page.request.get(`/api/plugins/${pluginId}/settings`)).json();
   const expected =
     settings.jsonData.models.find((m: { default?: boolean }) => m.default) ?? settings.jsonData.models[0];
