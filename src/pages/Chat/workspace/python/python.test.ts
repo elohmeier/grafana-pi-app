@@ -107,6 +107,15 @@ describe('python3 in the workspace shell', () => {
     expect(result.stderr).toContain('not staged: /live/dashboard/info.json is read-only');
   });
 
+  it('keeps the indentation of multi-line programs passed with -c', async () => {
+    const { run } = setup();
+    const result = await run(
+      `python3 -c "\nfor value in [1, 2]:\n    if value > 1:\n        print(value)\n" && printf '%s' '\n  x' | wc -c`
+    );
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe('2\n4\n');
+  });
+
   it('sees empty directories created by bash in the same call', async () => {
     const { run } = setup();
     const result = await run(`mkdir -p /tmp/out/nested && python3 -c 'open("/tmp/out/nested/a.txt", "w").write("x")'`);

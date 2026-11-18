@@ -124,7 +124,8 @@ export async function executeShell(input: ShellInput, host: ShellHost, signal?: 
       maxHeredocSize: 1024 * 1024,
     },
   });
-  return bash.exec(input.command, { cwd: input.cwd, stdin: input.stdin, signal });
+  // rawScript keeps leading whitespace inside quoted strings, as bash does; `python3 -c` programs depend on it.
+  return bash.exec(input.command, { cwd: input.cwd, stdin: input.stdin, signal, rawScript: true });
 }
 
 function stdinText(stdin: unknown) {
