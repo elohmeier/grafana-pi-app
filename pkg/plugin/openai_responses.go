@@ -80,14 +80,15 @@ type proxyContentBlock struct {
 }
 
 type openAIResponsesStreamEvent struct {
-	Type        string          `json:"type"`
-	OutputIndex int             `json:"output_index"`
-	Delta       string          `json:"delta"`
-	Arguments   string          `json:"arguments"`
-	Name        string          `json:"name"`
-	Code        string          `json:"code"`
-	Message     string          `json:"message"`
-	Item        json.RawMessage `json:"item"`
+	Type        string                `json:"type"`
+	OutputIndex int                   `json:"output_index"`
+	Delta       string                `json:"delta"`
+	Arguments   string                `json:"arguments"`
+	Name        string                `json:"name"`
+	Code        flexibleString        `json:"code"`
+	Message     string                `json:"message"`
+	Error       *openAIResponsesError `json:"error"`
+	Item        json.RawMessage       `json:"item"`
 	Response    *struct {
 		Status            string                `json:"status"`
 		Usage             *openAIResponsesUsage `json:"usage"`
@@ -123,10 +124,75 @@ type openAIResponsesUsage struct {
 }
 
 type openAIResponsesError struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Param   string `json:"param"`
-	Code    string `json:"code"`
+	Message string         `json:"message"`
+	Type    string         `json:"type"`
+	Param   string         `json:"param"`
+	Code    flexibleString `json:"code"`
+}
+
+// flexibleString accepts a JSON string, number, or boolean as text. Error codes
+// are strings at OpenAI, but OpenAI-compatible servers also send numbers, and
+// a type mismatch would discard the whole error object with its message.
+type flexibleString string
+
+func (s *flexibleString) UnmarshalJSON(data []byte) error {
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		*s = flexibleString(text)
+		return nil
+	}
+	var value interface{}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	switch value.(type) {
+	case nil:
+		*s = ""
+	case float64, bool:
+		*s = flexibleString(strings.TrimSpace(string(data)))
+	default:
+		*s = ""
+	}
+	return nil
+}
+
+// responsesStreamError formats an error reported inside a Responses stream.
+// OpenAI and Azure send `{"type":"error","error":{"code","message"}}`;
+// `response.failed` carries `response.error`; older and compatible servers put
+// code and message at the top level of the event. The message is kept verbatim
+// so that context-overflow detection in the browser can recognize it.
+func responsesStreamError(event openAIResponsesStreamEvent, raw string) error {
+	var code, message string
+	consider := func(c flexibleString, m string) {
+		if code == "" {
+			code = strings.TrimSpace(string(c))
+		}
+		if message == "" {
+			message = strings.TrimSpace(m)
+		}
+	}
+	if event.Error != nil {
+		consider(event.Error.Code, event.Error.Message)
+	}
+	if event.Response != nil && event.Response.Error != nil {
+		consider(event.Response.Error.Code, event.Response.Error.Message)
+	}
+	consider(event.Code, event.Message)
+	if len(raw) > 1000 {
+		raw = raw[:1000] + "…"
+	}
+	switch {
+	case code != "" && message != "":
+		return fmt.Errorf("responses API error %s: %s", code, message)
+	case message != "":
+		return fmt.Errorf("responses API error: %s", message)
+	case code != "":
+		return fmt.Errorf("responses API error %s", code)
+	case event.Type == "response.failed":
+		return fmt.Errorf("responses API request failed: %s", raw)
+	default:
+		return fmt.Errorf("responses API error: %s", raw)
+	}
 }
 
 type openAIErrorEnvelope struct {
@@ -618,13 +684,8 @@ func (a *App) relayOpenAIResponsesStream(body io.Reader, stream proxyEventWriter
 					doneReason = "length"
 				}
 			}
-		case "response.failed":
-			if event.Response != nil && event.Response.Error != nil {
-				return fmt.Errorf("responses API error: %s", event.Response.Error.Message)
-			}
-			return errors.New("responses API request failed")
-		case "error":
-			return fmt.Errorf("responses API error %s: %s", event.Code, event.Message)
+		case "response.failed", "error":
+			return responsesStreamError(event, data)
 		}
 		return nil
 	}

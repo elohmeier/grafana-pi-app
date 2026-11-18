@@ -1,5 +1,6 @@
 import type { ProxyStreamOptions, StreamFn } from '@earendil-works/pi-agent-core';
 import { createAssistantMessageEventStream, type AssistantMessage } from '@earendil-works/pi-ai';
+import { isContextOverflow } from '@earendil-works/pi-ai/utils/overflow';
 import { createGrafanaStreamFn } from './grafanaStream';
 
 const model = { id: 'm', api: 'openai-completions', provider: 'openai', maxTokens: 1000 } as never;
@@ -95,5 +96,27 @@ describe('createGrafanaStreamFn', () => {
     const result = await createGrafanaStreamFn({ proxyUrl: '/llm', refreshSession, stream })(model, {} as never, {});
     expect(await collect(result)).toEqual(['error']);
     expect(calls).toHaveLength(1);
+  });
+
+  it('keeps backend stream error messages intact so context overflow is detected', async () => {
+    // Messages the backend formats from Responses API `error` and `response.failed` stream events.
+    const overflows = [
+      'responses API error context_length_exceeded: Your input exceeds the context window of this model.',
+      'responses API error: Your input exceeds the context window of this model.',
+      'responses API error context_length_exceeded',
+    ];
+    for (const errorMessage of overflows) {
+      const { stream } = scripted([errorMessage]);
+      const result = await createGrafanaStreamFn({ proxyUrl: '/llm', refreshSession: jest.fn(), stream })(
+        model,
+        {} as never,
+        {}
+      );
+      expect(await collect(result)).toEqual(['error']);
+      const final = await result.result();
+      expect(final.errorMessage).toBe(errorMessage);
+      expect(isContextOverflow(final)).toBe(true);
+    }
+    expect(isContextOverflow(message('error', 'responses API error rate_limit_exceeded: slow down'))).toBe(false);
   });
 });
