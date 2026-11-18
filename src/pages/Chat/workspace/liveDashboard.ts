@@ -54,9 +54,32 @@ export function createLiveDashboardBroker(getApi: () => DashboardMutationAPI | u
   };
 }
 
-/** Revision of a live spec, carried as metadata.resourceVersion for optimistic concurrency. */
+/**
+ * Revision of a live spec, carried as metadata.resourceVersion for optimistic
+ * concurrency. Grafana sets each panel's plugin version (`vizConfig.version`)
+ * when the panel renders; that is not a user edit, so it is left out.
+ */
 export function liveRevision(spec: unknown) {
-  return `live-${sha256Hex(JSON.stringify(spec)).slice(0, 16)}`;
+  return `live-${sha256Hex(JSON.stringify(withoutPluginVersions(spec))).slice(0, 16)}`;
+}
+
+function withoutPluginVersions(spec: unknown) {
+  const elements = (spec as { elements?: unknown } | null)?.elements;
+  if (!elements || typeof elements !== 'object' || Array.isArray(elements)) {
+    return spec;
+  }
+  const stripped: Record<string, unknown> = {};
+  for (const [key, element] of Object.entries(elements)) {
+    const vizConfig = (element as { spec?: { vizConfig?: unknown } } | null)?.spec?.vizConfig;
+    if (vizConfig && typeof vizConfig === 'object' && 'version' in vizConfig) {
+      const { version: _version, ...rest } = vizConfig as Record<string, unknown>;
+      const panel = element as { spec: Record<string, unknown> };
+      stripped[key] = { ...panel, spec: { ...panel.spec, vizConfig: rest } };
+    } else {
+      stripped[key] = element;
+    }
+  }
+  return { ...(spec as Record<string, unknown>), elements: stripped };
 }
 
 /** The editable file: a v2 resource envelope, so grafana-dashboard inspect/validate/data work on it. */

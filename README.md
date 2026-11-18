@@ -114,7 +114,7 @@ Each tool call or bash invocation is one transaction with path checks and a stor
 - `grafana-alert find|get|validate`: Grafana-managed alert rules found through `panelRef` and the `__dashboardUid__`/`__panelId__` annotations, with PromQL checks to run and the path of each rule's working copy; `validate` checks changed rule working copies (expression graph, durations, PromQL, contact point and time interval references, datasource allow-list, and changes Grafana would ignore).
 - `jsonnet [eval] FILE [-o OUT] [--resource UID]`, `jsonnet fix FILE`: Jsonnet evaluation and repair in the backend. The vendored libraries are files under `/lib/jsonnet`.
 - `workspace status|diff|discard|apply|revert|receipts`: staged dashboard and alert rule changes (`diff --stat` summarizes repeated replacements), reviewed writes, reverts, and receipts.
-- `live status|diff|apply|undo|discard`: review and apply edits of `/live/dashboard/dashboard.json` to the unsaved dashboard in the browser. `live apply` refuses edits that drop panels, queries, transformations, or variables unless `--allow-removals`; `live undo` stages the state from before the last apply.
+- `live status|diff|apply|undo|discard`: review and apply edits of `/live/dashboard/dashboard.json` to the unsaved dashboard in the browser. `live apply` validates the edit (errors the open dashboard already had do not block it) and refuses edits that drop panels, queries, transformations, or variables unless `--allow-removals`; `live undo` stages the state from before the last apply.
 - `python3` / `python`: CPython compiled to WebAssembly, run in a Web Worker per invocation with no network access. It works on a copy of the filesystem; its file changes go through the same transaction.
 
 ## Dashboard changes

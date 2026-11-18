@@ -156,7 +156,7 @@ describe('grafana open and screenshot', () => {
 });
 
 describe('live dashboard file', () => {
-  function liveSetup() {
+  function liveSetup(variables: unknown[] = []) {
     let spec: Record<string, any> = {
       title: 'Live',
       elements: {
@@ -188,7 +188,7 @@ describe('live dashboard file', () => {
         },
       },
       layout: { kind: 'GridLayout', spec: { items: [] } },
-      variables: [],
+      variables,
     };
     const applied: Array<Record<string, any>> = [];
     const live = {
@@ -271,6 +271,37 @@ describe('live dashboard file', () => {
     expect(allowed.exitCode).toBe(0);
     expect(JSON.parse(allowed.stdout)).toEqual(['removes 1 of 1 panels: "Requests"']);
     expect(applied[0].elements).toEqual({});
+  });
+
+  it('applies edits to dashboards that already had validation errors, but not new errors', async () => {
+    const variable = (name: string) => ({
+      kind: 'CustomVariable',
+      spec: { name, query: 'a,b', current: {}, options: [] },
+    });
+    const { run, applied } = liveSetup([variable('env'), variable('env')]);
+    const edit = await run(
+      `jq '.spec.title = "Edited"' /live/dashboard/dashboard.json > /tmp/d.json && cp /tmp/d.json /live/dashboard/dashboard.json && live apply | jq -c '{applied, preexistingErrors}'`
+    );
+    expect(edit.stdout).toBe('{"applied":true,"preexistingErrors":["duplicate variable env"]}\n');
+
+    const broken = await run(
+      `jq '.spec.variables += [.spec.variables[0] | .spec.name = "team"] + [.spec.variables[0] | .spec.name = "team"]' /live/dashboard/dashboard.json > /tmp/d.json && cp /tmp/d.json /live/dashboard/dashboard.json && live apply`
+    );
+    expect(broken.exitCode).toBe(1);
+    expect(broken.stderr).toContain('duplicate variable team');
+    expect(broken.stderr).not.toContain('duplicate variable env');
+    expect(applied).toHaveLength(1);
+  });
+
+  it('ignores panel plugin versions Grafana sets while rendering', async () => {
+    const spec = {
+      elements: { 'panel-1': { kind: 'Panel', spec: { vizConfig: { group: 'stat', version: '1.0.0' } } } },
+    };
+    const rendered = {
+      elements: { 'panel-1': { kind: 'Panel', spec: { vizConfig: { group: 'stat', version: '1.0.1' } } } },
+    };
+    expect(liveRevision(rendered)).toBe(liveRevision(spec));
+    expect(liveRevision({ ...rendered, title: 'Other' })).not.toBe(liveRevision(spec));
   });
 
   it('stages the state before the last live apply with live undo', async () => {

@@ -57,7 +57,7 @@ export const liveCommand: WorkspaceCommandSpec = {
     },
     apply: {
       summary:
-        'Validate the staged file (no separate validate needed) and replace the unsaved browser dashboard with its spec (APPLY_SPEC). Refuses when the browser state changed since the file was read, unless --force, and when the edit drops panels, queries, transformations, or variables, unless --allow-removals. Nothing is saved; the user saves in Grafana.',
+        'Validate the staged file (no separate validate needed; errors the open dashboard already had are listed as preexistingErrors and do not block) and replace the unsaved browser dashboard with its spec (APPLY_SPEC). Refuses when the browser state changed since the file was read, unless --force, and when the edit drops panels, queries, transformations, or variables, unless --allow-removals. Nothing is saved; the user saves in Grafana.',
       usage: 'live apply [--force] [--allow-removals]',
       effect: 'remote-write',
       options: {
@@ -105,16 +105,37 @@ export const liveCommand: WorkspaceCommandSpec = {
         }
         // metadata.resourceVersion is the live revision used above, not a Grafana resource version.
         const { resourceVersion: _revision, ...metadata } = document.metadata ?? {};
-        const report = await validateDashboardDocument(JSON.stringify({ ...document, metadata }), {
+        const validationOptions = {
           allowedDatasourceUids: ctx.broker.dashboards?.allowedDatasourceUids?.(),
           promql: ctx.broker.promql,
           signal: ctx.signal,
-        });
-        if (!report.ok) {
+        };
+        const report = await validateDashboardDocument(JSON.stringify({ ...document, metadata }), validationOptions);
+        // Like workspace apply, only errors the edit introduces block it; the open dashboard may already have others.
+        const key = (error: { level: string; path?: string; message: string }) =>
+          `${error.level}|${error.path ?? ''}|${error.message}`;
+        const existing =
+          report.errors.length > 0
+            ? new Set(
+                (
+                  await validateDashboardDocument(
+                    JSON.stringify({ ...JSON.parse(liveDashboardDocument(current)), metadata }),
+                    validationOptions
+                  )
+                ).errors.map(key)
+              )
+            : new Set<string>();
+        const errors = report.errors.filter((error) => !existing.has(key(error)));
+        const preexistingErrors = report.errors.filter((error) => existing.has(key(error)));
+        if (errors.length > 0) {
           return json(
-            { schemaVersion: 1, applied: false, validation: report },
+            {
+              schemaVersion: 1,
+              applied: false,
+              validation: { ...report, ok: false, errors, ...(preexistingErrors.length ? { preexistingErrors } : {}) },
+            },
             1,
-            'live apply: validation failed; nothing was applied\n'
+            `live apply: validation failed; nothing was applied\n${errors.map((error) => `  ${error.path ? `${error.path}: ` : ''}${error.message}`).join('\n')}\n`
           );
         }
         await ctx.tx.mkdir('/tmp/live', { recursive: true });
@@ -132,6 +153,9 @@ export const liveCommand: WorkspaceCommandSpec = {
           revision: result.spec ? liveRevision(result.spec) : undefined,
           ...(removed.length > 0 ? { removed } : {}),
           warnings: [...report.warnings.map((warning) => warning.message), ...result.warnings],
+          ...(preexistingErrors.length > 0
+            ? { preexistingErrors: preexistingErrors.map((error) => error.message) }
+            : {}),
           undo: 'live undo',
           note: 'Applied to the unsaved dashboard in the browser; the user saves it in Grafana. Element names may be rekeyed; read the file again before further edits.',
         });
