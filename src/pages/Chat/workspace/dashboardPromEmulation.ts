@@ -38,8 +38,6 @@ const DASHBOARD_HORIZONTAL_PADDING = 32;
 /** react-grid-layout settings of the dashboard grid. */
 const GRID_COLUMN_COUNT = 24;
 const GRID_CELL_MARGIN = 8;
-/** PanelChrome content padding (theme.components.panel.padding * gridSize) on each side, plus the 1px borders. */
-const PANEL_CHROME_HORIZONTAL = 8 * 2 + 1 * 2;
 /** Prometheus frontend default for `ds.interval` when jsonData.timeInterval is empty. */
 const PROMETHEUS_DEFAULT_SCRAPE_INTERVAL = '15s';
 /** promlib's safeResolution: the step never drops below range / 11000. */
@@ -53,16 +51,27 @@ export function dashboardGridWidth(browserWidth = DEFAULT_BROWSER_WIDTH) {
   return Math.max(0, browserWidth - DOCKED_MENU_WIDTH - DASHBOARD_HORIZONTAL_PADDING);
 }
 
+/** Where panel widths come from: a dashboard grid measured in the browser, or an assumed window width. */
+export type GridWidthSource = { gridWidth: number; measured: boolean; browserWidth?: number };
+
+export function gridWidthSource(options: { browserWidth?: number; measuredGridWidth?: number }): GridWidthSource {
+  if (options.browserWidth === undefined && options.measuredGridWidth && options.measuredGridWidth > 0) {
+    return { gridWidth: options.measuredGridWidth, measured: true };
+  }
+  const browserWidth = options.browserWidth ?? DEFAULT_BROWSER_WIDTH;
+  return { gridWidth: dashboardGridWidth(browserWidth), measured: false, browserWidth };
+}
+
 /**
- * The width in pixels a panel's visualization gets in the browser, which
- * Grafana uses as maxDataPoints when the panel does not set one: the grid item
- * width (react-grid-layout calcGridItemPosition) minus the panel chrome.
+ * The width in pixels Grafana uses as maxDataPoints when the panel does not
+ * set one: the grid item width (react-grid-layout calcGridItemPosition).
+ * Scenes' VizPanelRenderer measures the whole panel container and passes it to
+ * SceneQueryRunner.setContainerWidth, so the panel chrome is not subtracted.
  */
-export function panelPixelWidth(gridColumns: number, browserWidth = DEFAULT_BROWSER_WIDTH) {
+export function panelPixelWidth(gridColumns: number, gridWidth = dashboardGridWidth()) {
   const columns = Math.min(Math.max(gridColumns, 1), GRID_COLUMN_COUNT);
-  const colWidth = (dashboardGridWidth(browserWidth) - GRID_CELL_MARGIN * (GRID_COLUMN_COUNT - 1)) / GRID_COLUMN_COUNT;
-  const itemWidth = Math.round(colWidth * columns + Math.max(0, columns - 1) * GRID_CELL_MARGIN);
-  return Math.max(1, itemWidth - PANEL_CHROME_HORIZONTAL);
+  const colWidth = (gridWidth - GRID_CELL_MARGIN * (GRID_COLUMN_COUNT - 1)) / GRID_COLUMN_COUNT;
+  return Math.max(1, Math.round(colWidth * columns + Math.max(0, columns - 1) * GRID_CELL_MARGIN));
 }
 
 export type PanelRequestOptions = {
@@ -76,7 +85,8 @@ export type PanelRequestOptions = {
   panelDatasourceInterval?: string;
   /** The panel datasource is "-- Mixed --", whose `interval` is unset. */
   mixed?: boolean;
-  browserWidth?: number;
+  /** Pixel width of the dashboard grid; defaults to the grid of a 1920px window. */
+  gridWidth?: number;
 };
 
 export type PanelRequest = {
@@ -95,7 +105,7 @@ export function panelRequest(range: TimeRange, options: PanelRequestOptions): Pa
   const fromPanel = Number.isFinite(panelPoints) && panelPoints > 0;
   const maxDataPoints = fromPanel
     ? panelPoints
-    : panelPixelWidth(options.gridColumns ?? GRID_COLUMN_COUNT, options.browserWidth);
+    : panelPixelWidth(options.gridColumns ?? GRID_COLUMN_COUNT, options.gridWidth);
   // ds.interval of the Prometheus frontend is jsonData.timeInterval || '15s'; the Mixed datasource has none.
   const lowerLimit =
     options.minInterval ||

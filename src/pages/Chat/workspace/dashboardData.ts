@@ -47,8 +47,7 @@ import {
   type WalkedPanel,
 } from './dashboardPanels';
 import {
-  dashboardGridWidth,
-  DEFAULT_BROWSER_WIDTH,
+  gridWidthSource,
   INSTANT_REF_SUFFIX,
   panelRequest,
   panelTimeRange,
@@ -81,7 +80,10 @@ export type DashboardDataOptions = {
   includeHiddenTargets?: boolean;
   includeCollapsed?: boolean;
   /** Browser window width panel widths (and so maxDataPoints) are derived from. */
+  /** Assumed browser window width; overrides measuredGridWidth. */
   browserWidth?: number;
+  /** Width of the dashboard grid rendered in the user's browser, when one is open. */
+  measuredGridWidth?: number;
   datasources: PrometheusDatasourceInfo[];
   query: DashboardDataQuery;
   signal?: AbortSignal;
@@ -212,7 +214,7 @@ export async function collectDashboardData(
       return { ...panelIdentity(panel), status: 'error', queries: [], errors: [errorText(error)], warnings: [] };
     })
   );
-  const browserWidth = options.browserWidth ?? DEFAULT_BROWSER_WIDTH;
+  const width = gridWidthSource(options);
   return {
     schemaVersion: 1,
     title: asText(dashboard.title) || '(untitled dashboard)',
@@ -233,7 +235,7 @@ export async function collectDashboardData(
           ]
         : []),
       'Values come from the saved dashboard variables and time range unless overridden with --var/--from/--to.',
-      `Panel requests are sized like the browser's: without a panel maxDataPoints, maxDataPoints is the panel's pixel width in a ${browserWidth}px browser window with the docked navigation menu (dashboard grid ${dashboardGridWidth(browserWidth)}px); pass --browser-width for another screen. A narrower panel or window means a longer interval and $__rate_interval.`,
+      `Panel requests are sized like the browser's: without a panel maxDataPoints, maxDataPoints is the panel's pixel width in a ${width.gridWidth}px dashboard grid (${width.measured ? 'measured in the open browser window' : `a ${width.browserWidth}px browser window with the docked navigation menu`}); pass --browser-width for another screen. A narrower panel or window means a longer interval and $__rate_interval.`,
       'Queries, intervals, and frames follow Grafana and its Prometheus datasource (format table/time_series/heatmap, range/instant). Not emulated: variable queries, ad hoc filters, panel repeats, time comparison, and panel plugin rendering; affected panels list this in notes and report status partial instead of ok.',
     ],
   };
@@ -338,7 +340,7 @@ async function queryPanel(
     panelDatasourceInterval: mixed
       ? undefined
       : (resolveDatasource(panelDatasource, options.datasources) ?? promTargets[0]?.ds)?.timeInterval,
-    browserWidth: options.browserWidth,
+    gridWidth: gridWidthSource(options).gridWidth,
   });
   const sent = buildQueries(targets, promTargets, request, range.to.valueOf() - range.from.valueOf());
   const visibleRefs = sent.filter((target) => !target.hide).map((target) => asText(target.refId));

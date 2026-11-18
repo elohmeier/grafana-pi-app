@@ -83,6 +83,8 @@ export type UiBroker = {
   /** Opens a Grafana-relative path in the browser. */
   navigate: (path: string) => void;
   screenshot?: (params: ScreenshotParams, signal?: AbortSignal) => Promise<DashboardImage>;
+  /** Pixel width a dashboard grid has in this browser window: measured when a dashboard is open, else estimated. */
+  dashboardGridWidth?: () => number | undefined;
 };
 
 /** Stateless Jsonnet evaluation with the plugin's vendored libraries (grafonnet, pi-dashboard helpers). */

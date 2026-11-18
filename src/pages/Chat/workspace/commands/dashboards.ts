@@ -424,14 +424,13 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
         },
         from: { type: 'string', description: 'Range start (default: dashboard time).' },
         to: { type: 'string', description: 'Range end (default: dashboard time).' },
-        'max-panels': { type: 'number', description: 'Panels to query, 1-30.', default: 10 },
+        'max-panels': { type: 'number', description: 'Panels to query.', default: 10 },
         'max-series': { type: 'number', description: 'Series per panel, 1-200.', default: 10 },
         'max-rows': { type: 'number', description: 'Table rows per frame, 1-200.', default: 10 },
         'browser-width': {
           type: 'number',
           description:
-            'Browser window width in pixels (docked menu assumed), 400-7680. Panels without maxDataPoints use their pixel width, which sets $__interval and $__rate_interval.',
-          default: 1920,
+            'Browser window width in pixels (docked menu assumed), 400-7680. Panels without maxDataPoints use their pixel width, which sets $__interval and $__rate_interval. Default: the dashboard grid measured in this browser window.',
         },
         'include-hidden': { type: 'boolean', description: 'Also run hidden queries.' },
         'include-collapsed': {
@@ -464,10 +463,14 @@ export const grafanaDashboardCommand: WorkspaceCommandSpec = {
             vars: listOption(parsed, 'var'),
             from: stringOption(parsed, 'from'),
             to: stringOption(parsed, 'to'),
-            maxPanels: numberOption(parsed, 'max-panels', 10, 1, 30),
+            maxPanels: numberOption(parsed, 'max-panels', 10, 1, Number.MAX_SAFE_INTEGER),
             maxSeries: numberOption(parsed, 'max-series', 10, 1, 200),
             maxRows: numberOption(parsed, 'max-rows', 10, 1, 200),
-            browserWidth: numberOption(parsed, 'browser-width', 1920, 400, 7680),
+            browserWidth:
+              typeof parsed.options['browser-width'] === 'number'
+                ? numberOption(parsed, 'browser-width', 1920, 400, 7680)
+                : undefined,
+            measuredGridWidth: ctx.broker.ui?.dashboardGridWidth?.(),
             includeHiddenTargets: parsed.options['include-hidden'] === true,
             includeCollapsed: parsed.options['include-collapsed'] === true,
             datasources: prom.datasources(),

@@ -37,6 +37,7 @@ import { DASHBOARD_API_GROUP } from './dashboardModel';
 import { createLogsBroker, type FieldCapsResponse } from './logs';
 import { createSqlBroker } from './sql';
 import { sha256Hex } from './hash';
+import { dashboardGridWidth } from './dashboardPromEmulation';
 import type { PromqlParser } from './promqlCheck';
 import type { WorkspaceResourceMeta, WorkspaceResourceSnapshot } from './types';
 import type {
@@ -149,6 +150,7 @@ export function createGrafanaWorkspaceBroker(toolConfig: GrafanaToolConfig): Wor
     ui: {
       navigate: (path) => locationService.push(path),
       screenshot: renderDashboardScreenshot,
+      dashboardGridWidth: measureDashboardGridWidth,
     },
   };
 }
@@ -844,4 +846,18 @@ function createPrometheusBroker(toolConfig: GrafanaToolConfig): PrometheusBroker
       } as unknown as Record<string, unknown>;
     },
   };
+}
+
+/**
+ * Width of the dashboard grid in this window, which sizes panel queries: the
+ * widest rendered grid when a dashboard is open (narrower with the Assistant
+ * sidebar), else the grid a dashboard would get in this window.
+ */
+function measureDashboardGridWidth(): number | undefined {
+  if (typeof document === 'undefined') {
+    return undefined;
+  }
+  const widths = [...document.querySelectorAll('.react-grid-layout')].map((grid) => grid.getBoundingClientRect().width);
+  const measured = Math.round(Math.max(0, ...widths));
+  return measured > 0 ? measured : dashboardGridWidth(window.innerWidth);
 }

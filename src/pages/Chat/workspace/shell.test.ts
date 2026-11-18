@@ -961,7 +961,7 @@ describe('grafana-dashboard data', () => {
     // $job is approximated as .*, so the panel is only partially emulated.
     expect(series).toMatchObject({ id: '1', status: 'partial', seriesTotal: 1 });
     expect(series.notes.join('\n')).toContain('$job');
-    expect(series.request).toMatchObject({ maxDataPoints: 762, maxDataPointsSource: 'width', intervalMs: 60_000 });
+    expect(series.request).toMatchObject({ maxDataPoints: 780, maxDataPointsSource: 'width', intervalMs: 60_000 });
     expect(series.queries[0]).toMatchObject({
       format: 'time_series',
       type: 'range',
@@ -986,8 +986,8 @@ describe('grafana-dashboard data', () => {
     expect(sent.queries[0]).toMatchObject({
       expr: 'sum by (job) (rate(http_requests_total{job=~".*"}[$__rate_interval]))',
       datasource: { type: 'prometheus', uid: 'prometheus' },
-      // A half-width panel in a 1920px window is 762px wide.
-      maxDataPoints: 762,
+      // A half-width panel in a 1920px window is 780px wide.
+      maxDataPoints: 780,
       // 1h / 762 points is below the datasource scrape interval, which bounds the step.
       intervalMs: 60_000,
     });

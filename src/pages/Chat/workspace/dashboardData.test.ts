@@ -2,6 +2,7 @@ import { dateTime, FieldType, type DataFrame, type TimeRange } from '@grafana/da
 import { collectDashboardData, type DashboardDataOptions } from './dashboardData';
 import type { JsonObject } from './dashboardPanels';
 import {
+  dashboardGridWidth,
   goDuration,
   panelPixelWidth,
   panelRequest,
@@ -21,19 +22,21 @@ function absoluteRange(hours: number): TimeRange {
 
 describe('panel request sizing', () => {
   it('derives maxDataPoints from the panel grid width like the browser', () => {
-    // 1920px window: 320px docked menu, 2 x 16px padding, 24 columns with 8px gaps, 18px panel chrome.
-    expect(panelPixelWidth(24)).toBe(1550);
-    expect(panelPixelWidth(12)).toBe(762);
-    expect(panelPixelWidth(8)).toBe(499);
-    expect(panelPixelWidth(12, 1440)).toBe(522);
+    // 1920px window: 320px docked menu, 2 x 16px padding, 24 columns with 8px gaps. Scenes measures the
+    // whole panel container, so the panel chrome is not subtracted (a full-width 401px panel sends 401).
+    expect(panelPixelWidth(24)).toBe(1568);
+    expect(panelPixelWidth(12)).toBe(780);
+    expect(panelPixelWidth(8)).toBe(517);
+    expect(panelPixelWidth(12, dashboardGridWidth(1440))).toBe(540);
+    expect(panelPixelWidth(24, 401)).toBe(401);
   });
 
   it('uses the panel pixel width, the panel maxDataPoints, and the panel or datasource min interval', () => {
     const range = absoluteRange(12);
     expect(panelRequest(range, { gridColumns: 12, panelDatasourceInterval: '15s' })).toEqual({
-      maxDataPoints: 762,
+      maxDataPoints: 780,
       maxDataPointsSource: 'width',
-      // 12h / 762 = 56.7s, rounded to 1m.
+      // 12h / 780 = 55.4s, rounded to 1m.
       interval: '1m',
       intervalMs: 60_000,
       minInterval: '15s',
@@ -254,14 +257,14 @@ describe('collectDashboardData', () => {
     const result = await report;
     const [narrow, fixed] = result.panels;
 
-    // 8 columns are 499px: 12h / 499 = 86.6s rounds to 1m.
+    // 8 columns are 517px: 12h / 517 = 83.6s rounds to 1m.
     expect(requests[0].queries[0]).toMatchObject({
-      maxDataPoints: 499,
+      maxDataPoints: 517,
       intervalMs: 60_000,
       range: true,
       instant: false,
     });
-    expect(narrow.request).toMatchObject({ maxDataPoints: 499, maxDataPointsSource: 'width', interval: '1m' });
+    expect(narrow.request).toMatchObject({ maxDataPoints: 517, maxDataPointsSource: 'width', interval: '1m' });
     expect(narrow.queries[0]).toMatchObject({ step: '1m0s', rateInterval: '1m15s' });
     expect(narrow.executedQueries).toEqual(['Expr: sum(rate(http_requests_total[1m15s])); Step: 1m0s']);
     expect(narrow.status).toBe('ok');
@@ -327,10 +330,36 @@ describe('collectDashboardData', () => {
       browserWidth: 1440,
     });
     const [panel] = (await report).panels;
-    expect(panel.request).toMatchObject({ maxDataPoints: 522, minInterval: '5m', intervalMs: 300_000 });
+    expect(panel.request).toMatchObject({ maxDataPoints: 540, minInterval: '5m', intervalMs: 300_000 });
     expect(panel.request?.timeOverride).toBe('Last 2 hours');
     expect(Number(requests[0].to) - Number(requests[0].from)).toBeCloseTo(2 * HOUR, -4);
     expect(panel.queries[0]).toMatchObject({ rateInterval: '5m15s' });
+  });
+
+  it('sizes requests from the dashboard grid measured in the browser unless a width is given', async () => {
+    const dashboard = {
+      title: 'Service',
+      panels: [
+        {
+          id: 1,
+          type: 'timeseries',
+          title: 'Request rate',
+          gridPos: { x: 0, y: 0, w: 24, h: 8 },
+          datasource: DS,
+          targets: [{ refId: 'A', expr: 'sum(rate(http_requests_total[5m]))' }],
+        },
+      ],
+    };
+    // A full-width panel in a 401px grid (Assistant sidebar open): 12h / 401 = 107.7s rounds to 2m, as the browser sends.
+    const measured = run(dashboard, () => [{ labels: {}, values: [1] }], { measuredGridWidth: 401 });
+    const [panel] = (await measured.report).panels;
+    expect(panel.request).toMatchObject({ maxDataPoints: 401, intervalMs: 120_000 });
+    expect((await measured.report).notes.join('\n')).toContain(
+      '401px dashboard grid (measured in the open browser window)'
+    );
+
+    const assumed = run(dashboard, () => [{ labels: {}, values: [1] }], { measuredGridWidth: 401, browserWidth: 1920 });
+    expect((await assumed.report).panels[0].request).toMatchObject({ maxDataPoints: 1568 });
   });
 
   it('builds table frames for table-format queries before transformations, like Grafana', async () => {
