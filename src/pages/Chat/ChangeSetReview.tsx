@@ -398,17 +398,23 @@ const getStyles = (theme: GrafanaTheme2) => {
       width: 'min(1100px, calc(100vw - 32px))',
     }),
     modalContent: css({
-      minHeight: 260,
+      display: 'flex',
+      flexDirection: 'column',
+      minHeight: 0,
       overflow: 'hidden',
     }),
     review: css({
       display: 'flex',
       flexDirection: 'column',
       gap: theme.spacing(2),
-      maxHeight: 'calc(90vh - 120px)',
+      // Inherit the space left below Grafana's modal header. An independent
+      // viewport limit can exceed the modal content and clip the action row.
+      flex: '1 1 auto',
+      minHeight: 0,
       minWidth: 0,
     }),
     body: css({
+      flex: '1 1 auto',
       display: 'grid',
       gap: theme.spacing(2),
       overflowY: 'auto',

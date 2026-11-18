@@ -7,6 +7,67 @@ import { textResponse, toolCallResponse } from './llmResponses';
 const LLM_ROUTE = '**/resources/llm/api/stream';
 
 test.describe('assistant safety workflows', () => {
+  test('keeps approval actions clickable when several dashboard diffs overflow the review', async ({
+    gotoPage,
+    page,
+  }) => {
+    const suffix = Date.now().toString(36);
+    const uids = Array.from({ length: 3 }, (_, index) => `large-review-${index}-${suffix}`);
+    const responses = [
+      ...uids.map((uid, index) =>
+        toolCallResponse(
+          'write',
+          stagedDashboard(uid, `Large review ${index}`, 'Large dashboard note '.repeat(500)),
+          `call_large_write_${index}`
+        )
+      ),
+      toolCallResponse('bash', { command: 'workspace apply' }, 'call_large_apply'),
+      textResponse('Large review denied.'),
+    ];
+    await page.route(LLM_ROUTE, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: responses.shift() ?? textResponse('No scripted response available.'),
+      });
+    });
+
+    try {
+      await gotoPage(`/${ROUTES.Chat}`);
+      await page.getByTestId(testIds.chat.composer).fill('Create three dashboards with large notes');
+      await page.getByTestId(testIds.chat.send).click();
+      const review = page.getByTestId(testIds.chat.toolConfirmation);
+      const approve = review.getByTestId(testIds.chat.toolConfirmationApprove);
+      await expect(approve).toHaveText('Apply all 3');
+      for (const height of [900, 768, 600, 400]) {
+        await page.setViewportSize({ width: 1280, height });
+        await expect
+          .poll(() =>
+            approve.evaluate((button) => {
+              const rect = button.getBoundingClientRect();
+              return (
+                document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.closest('button') ===
+                button
+              );
+            })
+          )
+          .toBe(true);
+        // Trial clicks check hit testing without approving any dashboard writes.
+        await approve.click({ trial: true });
+      }
+      await review.getByTestId(testIds.chat.toolConfirmationDeny).click();
+      await expect(page.getByText('Large review denied.')).toBeVisible();
+      for (const uid of uids) {
+        expect((await page.request.get(`/api/dashboards/uid/${uid}`)).status()).toBe(404);
+      }
+    } finally {
+      await page.unroute(LLM_ROUTE).catch(() => undefined);
+      for (const uid of uids) {
+        await page.request.delete(`/api/dashboards/uid/${uid}`).catch(() => undefined);
+      }
+    }
+  });
+
   test('requires approval before workspace apply writes a dashboard to Grafana', async ({ gotoPage, page }) => {
     const suffix = Date.now().toString(36);
     const deniedUid = `denied-e2e-${suffix}`;
@@ -136,7 +197,7 @@ function dashboardPath(uid: string) {
   return `/grafana/dashboards/${uid}/dashboard.json`;
 }
 
-function stagedDashboard(uid: string, title: string) {
+function stagedDashboard(uid: string, title: string, note = title) {
   const resource = {
     apiVersion: 'dashboard.grafana.app/v1',
     kind: 'Dashboard',
@@ -145,7 +206,7 @@ function stagedDashboard(uid: string, title: string) {
       title,
       schemaVersion: 41,
       panels: [
-        { id: 1, type: 'text', title: 'Note', gridPos: { x: 0, y: 0, w: 12, h: 4 }, options: { content: title } },
+        { id: 1, type: 'text', title: 'Note', gridPos: { x: 0, y: 0, w: 12, h: 4 }, options: { content: note } },
       ],
     },
   };
